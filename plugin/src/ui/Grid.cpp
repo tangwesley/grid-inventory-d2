@@ -1,4 +1,5 @@
-﻿#include "ui/Badges.h"
+﻿#include "api/HostApi.h"
+#include "ui/Badges.h"
 #include "ui/Editor.h"
 #include "ui/Equip.h"
 #include "ui/Fallback.h"
@@ -5700,6 +5701,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     xp && xp->poison) {
                     it.glow |= 4;
                 }
+                // ★The extension tint, resolved HERE because this is where the
+                // sub-stack's own list is in hand. Everything downstream reads
+                // it back out of the glow byte -- see Grid.h.
+                // a_obj is only STORED by this function (it.obj) and never
+                // dereferenced, so nothing here has ever proven it non-null --
+                // and the wedge call site guards it. TintTier answers 0 for
+                // base 0, so the guard costs one branch and no special case.
+                if (HostApi::HasTinter()) {
+                    SetTintTier(it.glow,
+                        HostApi::TintTier(a_obj ? a_obj->GetFormID() : 0, xl));
+                }
             }
             // GI40: the star belongs to the POOL, not to one list.
             //
@@ -10607,6 +10619,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 glow |= 4;
             }
         }
+        // ★The extension tint (bits 5..7). Asked with a_xl exactly as it
+        // arrived -- nullptr included, which is a plain unit and a legitimate
+        // question: an extension may well colour by base form alone.
+        if (HostApi::HasTinter()) {
+            SetTintTier(glow, HostApi::TintTier(a_obj->GetFormID(), a_xl));
+        }
         return glow;
     }
 
@@ -10755,10 +10773,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                          Lotd::Status a_relic)
     {
         const std::uint8_t bits = a_haloBits & 0x3;
-        // ★An OWED relic earns the wedge with no rarity of its own; a donated
-        // one does not, and gets nothing here that it would not have had
-        // anyway. See the colour note below.
-        if (!a_dl || (!bits && a_relic != Lotd::Status::kUndonated)) return;
+        // ★An EXTENSION TINT earns the wedge on the same terms as an owed relic
+        // -- outright, with no rarity of its own. An extension that colours by
+        // its own rules is not obliged to agree with ours about which items are
+        // interesting, and an item it has ranked while the host sees nothing
+        // special is precisely the case it was added for.
+        const std::uint8_t tint = TintTierOf(a_haloBits);
+        if (!a_dl || (!bits && !tint && a_relic != Lotd::Status::kUndonated)) return;
         const float cell = CellPx();
         const float d    = cell * kWedgeFrac;
         const float rim  = RimPx();
@@ -10801,8 +10822,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         constexpr ImU32 kUnique   = IM_COL32(232, 182, 74, 255);
         constexpr ImU32 kEnchant  = IM_COL32(79, 143, 240, 255);
         constexpr ImU32 kRelicOwe = IM_COL32(169, 123, 232, 255);   // #A97BE8
+
+        // ★★★AND THE TINT SITS DIRECTLY ABOVE "ENCHANTED", WHICH IS THE WHOLE
+        // PLACEMENT ARGUMENT.
+        //
+        // An extension that ranks an item has, in every case we know of, ranked
+        // it BY its enchantment -- so the blue it displaces is not a second
+        // fact being hidden, it is the same fact told coarsely. Anything that
+        // can say "tier 3" already said "enchanted", and said less.
+        //
+        // Unique keeps its gold, for the reason GI67 gave it: unique is a
+        // property of the FORM and there is exactly one, so it can never be
+        // out-ranked by a roll. And an owed relic still takes everything,
+        // because "carry this home" outlives any opinion about quality.
+        const std::uint32_t tintCol = tint ? HostApi::TintColour(tint) : 0u;
         const ImU32 col = (a_relic == Lotd::Status::kUndonated) ? kRelicOwe
                         : (bits & 0x2)                          ? kUnique
+                        : tintCol                               ? static_cast<ImU32>(tintCol)
                                                                 : kEnchant;
 
         // outer: the full wedge, in black. Both legs are d, so the top and the
@@ -11655,10 +11691,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // AGGREGATE cell may fall back to the entry.
         const char* nm = DisplayNameOf(a_obj, scoped,
             a_scope == ExtraScope::kAny ? entry : nullptr);
+        // ★THE NAME TAKES THE TINT, and it is asked for here rather than read
+        // off a glow byte because this is a tooltip: `scoped` is the unit's own
+        // list, already resolved above by the GI61 rules, and no byte has been
+        // packed on this path. One call, once, while a tooltip is built.
+        //
+        // Falls back to TipBody the moment nothing claims the item -- which is
+        // every item for a player with no such extension, and most items for a
+        // player with one.
+        ImVec4 nameCol = Theme::TipBody();
+        if (HostApi::HasTinter()) {
+            if (const auto t = HostApi::TintTier(a_obj ? a_obj->GetFormID() : 0, scoped)) {
+                if (const auto rgba = HostApi::TintColour(t)) {
+                    nameCol = ImGui::ColorConvertU32ToFloat4(rgba);
+                }
+            }
+        }
         if (a_count > 1) {
-            ImGui::TextColored(Theme::TipBody(), "%s  x%d", nm, a_count);
+            ImGui::TextColored(nameCol, "%s  x%d", nm, a_count);
         } else {
-            ImGui::TextColored(Theme::TipBody(), "%s", nm);
+            ImGui::TextColored(nameCol, "%s", nm);
         }
         // ★★Directly under the NAME, as a subtitle: "Iron Greatsword / Greatsword"
         // is how the eye expects a kind to be told, and it is the one fact here

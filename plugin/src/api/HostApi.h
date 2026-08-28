@@ -60,4 +60,26 @@ namespace FUI::HostApi
 
     // Drop routing: consulted before the host's own tables, hover and commit.
     [[nodiscard]] GridInvAPI::DropVerdict OfferDrop(const GridInvAPI::DropQuery& a_query);
+
+    // ---- rarity tint ------------------------------------------------------
+    //
+    // A SECOND extension slot, independent of the provider one. See the Tinter
+    // note in GridInventoryAPI.h for why it is not a fourth Provider hook.
+
+    // True once a tinter has passed the handshake. Checked before the two calls
+    // below on the paths where skipping the work matters.
+    [[nodiscard]] bool HasTinter();
+
+    // The tint tier of ONE unit: 0 when nothing claims it (the overwhelmingly
+    // common answer -- every item for a player without such an extension), else
+    // 1..kMaxTintTier.
+    //
+    // HOT PATH: once per visible tile per frame. a_xl is the sub-stack's own
+    // list, or nullptr when the unit has none.
+    [[nodiscard]] std::uint8_t TintTier(std::uint32_t a_base, const RE::ExtraDataList* a_xl);
+
+    // The colour registered for a tier, packed 0xAABBGGRR (ImU32), or 0 when
+    // the tier is out of range or unpainted. Reads a cached palette -- the
+    // tinter is NOT called here.
+    [[nodiscard]] std::uint32_t TintColour(std::uint8_t a_tier);
 }

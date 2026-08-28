@@ -77,6 +77,21 @@ namespace FUI::HostApi
         GridInvAPI::Provider g_provider{};
         bool                 g_haveProvider = false;
 
+        // ---- registered tinter -------------------------------------------
+        //
+        // Its own slot, so colouring items and owning the badge wells are not
+        // the same privilege. A plugin may hold either without the other.
+        GridInvAPI::Tinter g_tinter{};
+        bool               g_haveTinter = false;
+
+        // ★THE PALETTE IS FETCHED ONCE AND CACHED, and that is the difference
+        // between this and a per-frame call. Colour cannot change without a
+        // re-registration, so asking for it while drawing would be the same
+        // answer copied several hundred times a frame across the board, the
+        // doll and the partner window.
+        std::uint32_t g_tintPalette[GridInvAPI::kMaxTintTier]{};
+        std::uint32_t g_tintPaletteCount = 0;
+
         void Notify(const char* a_text)
         {
             FUI::Sfx::Notify(a_text);
@@ -129,6 +144,71 @@ namespace FUI::HostApi
                          p->name ? p->name : "<unnamed>", who, p->abiVersion);
         }
 
+        // The tint handshake. Same shape and same rigour as OnRegisterProvider
+        // above -- the listener takes every sender, so this must prove the
+        // payload before it trusts a single offset in it.
+        void OnRegisterTinter(SKSE::MessagingInterface::Message* a_msg)
+        {
+            if (!a_msg->data || a_msg->dataLen < sizeof(GridInvAPI::Tinter)) {
+                logger::error("[API] TINT REFUSED '{}': payload is {} bytes, a Tinter is {}",
+                              a_msg->sender ? a_msg->sender : "<unknown>",
+                              a_msg->data ? a_msg->dataLen : 0u,
+                              sizeof(GridInvAPI::Tinter));
+                return;
+            }
+            const auto* t   = static_cast<const GridInvAPI::Tinter*>(a_msg->data);
+            const char* who = a_msg->sender ? a_msg->sender : "<unknown>";
+
+            if (t->abiVersion != GridInvAPI::kABIVersion ||
+                t->structSize != sizeof(GridInvAPI::Tinter)) {
+                logger::error("[API] TINT REFUSED '{}': abiVersion {} (need {}), structSize {} (need {})",
+                              who, t->abiVersion, GridInvAPI::kABIVersion,
+                              t->structSize, sizeof(GridInvAPI::Tinter));
+                Notify("Grid Inventory: tint extension version mismatch - not loaded");
+                return;
+            }
+            if (!t->GetTier || !t->GetPalette) {
+                logger::error("[API] TINT REFUSED '{}': null function pointer", who);
+                Notify("Grid Inventory: tint extension is incomplete - not loaded");
+                return;
+            }
+            if (g_haveTinter) {
+                logger::warn("[API] tinter '{}' ignored: one is already registered ('{}')",
+                             who, g_tinter.name ? g_tinter.name : "?");
+                return;
+            }
+
+            g_tinter = *t;   // copy; the caller's pointer is borrowed only
+
+            // ★THE PALETTE IS TAKEN NOW, while the caller is still on the stack
+            // and has said it is ready. Fetching it lazily at the first draw
+            // would put a cross-DLL call on the frame path for no gain, and a
+            // tinter that answers GetTier but paints nothing would then fail
+            // several hundred times a frame instead of once, here.
+            std::uint32_t buf[GridInvAPI::kMaxTintTier]{};
+            std::uint32_t n = t->GetPalette(t->self, buf, GridInvAPI::kMaxTintTier);
+            if (n > GridInvAPI::kMaxTintTier) {
+                // A misbehaving tinter must not walk us off the array.
+                n = GridInvAPI::kMaxTintTier;
+            }
+            for (std::uint32_t i = 0; i < n; ++i) {
+                g_tintPalette[i] = buf[i];
+            }
+            g_tintPaletteCount = n;
+
+            if (n == 0) {
+                // Registering with an empty palette is legal and means nothing
+                // will ever be tinted. Say so rather than leaving the author to
+                // wonder why a working GetTier draws no colour.
+                logger::warn("[API] tinter '{}' registered with an EMPTY palette; "
+                             "no tier can be drawn", who);
+            }
+
+            g_haveTinter = true;
+            logger::info("[API] tinter registered: '{}' (from '{}') abi={} palette={} tier(s)",
+                         t->name ? t->name : "<unnamed>", who, t->abiVersion, n);
+        }
+
         // This listener sees EVERY sender, so it must only ever act on our own
         // 4CC message types -- never on a lifecycle number.
         void OnApiMessage(SKSE::MessagingInterface::Message* a_msg)
@@ -136,6 +216,8 @@ namespace FUI::HostApi
             if (!a_msg) return;
             if (a_msg->type == GridInvAPI::kMsgRegisterProvider) {
                 OnRegisterProvider(a_msg);
+            } else if (a_msg->type == GridInvAPI::kMsgRegisterTinter) {
+                OnRegisterTinter(a_msg);
             }
         }
     }
@@ -242,5 +324,32 @@ namespace FUI::HostApi
         return (v <= GridInvAPI::kDropBlocked)
                    ? static_cast<GridInvAPI::DropVerdict>(v)
                    : GridInvAPI::kDropReject;
+    }
+
+    bool HasTinter()
+    {
+        return g_haveTinter;
+    }
+
+    std::uint8_t TintTier(std::uint32_t a_base, const RE::ExtraDataList* a_xl)
+    {
+        if (!g_haveTinter || a_base == 0) return 0;
+        const std::uint8_t tier =
+            g_tinter.GetTier(g_tinter.self, a_base, static_cast<const void*>(a_xl));
+
+        // ★A TIER WITH NO COLOUR IS NO TIER. Clamping here rather than at the
+        // draw sites means every consumer -- the wedge, the tooltip name, and
+        // whatever comes next -- gets the same answer without repeating the
+        // check, and a tinter built against a later ABI (more tiers than this
+        // build knows) degrades to "no opinion" instead of indexing past the
+        // palette.
+        if (tier == 0 || tier > g_tintPaletteCount) return 0;
+        return tier;
+    }
+
+    std::uint32_t TintColour(std::uint8_t a_tier)
+    {
+        if (a_tier == 0 || a_tier > g_tintPaletteCount) return 0;
+        return g_tintPalette[a_tier - 1];
     }
 }

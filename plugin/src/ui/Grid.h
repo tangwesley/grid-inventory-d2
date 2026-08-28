@@ -630,6 +630,7 @@ namespace FUI::Grid
     //   bit1 = enchanted (EITM or crafted ExtraEnchantment)  -> halo
     //   bit2 = unique (DESC, cached)                         -> halo
     //   bit4 = poisoned                                      -> corner droplet
+    //   bits 5..7 = EXTENSION TINT TIER (0..7), see TintTierOf below
     // ★Only bits 1|2 are a HALO. Bit 4 is a marker and must never reach the
     // rarity switch, or a poison-only item takes the "both rarities" red.
     // (There was a bit 8 for temper; nothing marks temper any more -- it is in
@@ -644,6 +645,38 @@ namespace FUI::Grid
     [[nodiscard]] std::uint8_t GlowBits(RE::TESBoundObject* a_obj,
                                         RE::InventoryEntryData* a_entry,
                                         RE::ExtraDataList* a_xl);
+
+    // ---- extension tint tier, packed into the glow byte -------------------
+    //
+    // ★★THE TIER RIDES THE BITS WE ALREADY PASS, and that is the entire reason
+    // this feature costs no signatures.
+    //
+    // Rarity is per-INSTANCE, but DrawGlow -- the one call site the doll and the
+    // partner window share -- takes an object and a glow byte and no extra
+    // list. Threading a list through it would change three declarations and
+    // every caller, in a codebase where those callers are the exact places that
+    // have drifted apart before (see the GI1/D2 note above). The glow byte is
+    // already computed per sub-stack, already carried to every draw, and had
+    // five bits spare since the temper bit was retired.
+    //
+    // So the tier is resolved ONCE, where the list is in hand, and read back
+    // wherever the byte arrives. Three bits: 0 = no extension has an opinion,
+    // which is every item for every player without one.
+    inline constexpr std::uint8_t kTintShift = 5;
+    inline constexpr std::uint8_t kTintMask  = 0xE0;   // bits 5..7
+
+    [[nodiscard]] inline std::uint8_t TintTierOf(std::uint8_t a_bits)
+    {
+        return static_cast<std::uint8_t>((a_bits & kTintMask) >> kTintShift);
+    }
+
+    // Folds a tier into a glow byte, replacing whatever tier was there.
+    inline void SetTintTier(std::uint8_t& a_bits, std::uint8_t a_tier)
+    {
+        a_bits = static_cast<std::uint8_t>(
+            (a_bits & ~kTintMask) |
+            ((a_tier & 0x7u) << kTintShift));
+    }
 
     // ★★"Is this a ring?" -- in ONE place, because it was four: the doll slot,
     // the item category, the fallback icon and bag eligibility each asked
