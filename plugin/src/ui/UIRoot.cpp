@@ -433,9 +433,11 @@ namespace FUI::UIRoot
         // What remains below is observation only: counts of what actually
         // arrives. Liveness is a thing you measure, never a pointer you compare.
 
-        // fonts are BAKED at the current UI scale (bitmap-scaling hangul via
-        // FontGlobalScale mushes the strokes). While the slider drags we
-        // preview via FontGlobalScale ratio; on release the atlas rebakes.
+        // The atlas is built for the DISPLAY scale and for the glyph ranges
+        // the active language pack wants -- those two, and nothing else, are
+        // what this flag asks to be rebuilt. The player's text size is not in
+        // here: it rides on style.FontScaleMain and needs no rebuild at all
+        // (see BuildFonts).
         std::atomic<bool> g_fontsDirty = false;
         float             g_bakedScale = 1.0f;
 
@@ -512,6 +514,20 @@ namespace FUI::UIRoot
         // narrows that ratio and is the size the panel wanted anyway.
         constexpr float kBodyFont = 17.0f;
 
+        // ★★THE TEXT-SIZE SETTING IS NOT IN HERE, and that is measured, not
+        // preference. ImGui 1.92 sizes text as
+        //     style.FontSizeBase * style.FontScaleMain
+        // and FontSizeBase is seeded ONCE, from the first font's LegacySize:
+        //
+        //     if (g.Style.FontSizeBase <= 0.0f)                 // imgui.cpp
+        //         g.Style.FontSizeBase = font->LegacySize;
+        //
+        // -- so rebuilding the atlas at a bigger size does NOT resize a single
+        // string. It never did. Baking the player's setting in here would also
+        // mean that on the one startup where the ini loaded BEFORE the first
+        // bake, the seed carried the setting AND FontScaleMain multiplied it
+        // again. The bake carries the DISPLAY scale, which is what seeds a
+        // base; the player's multiplier rides on FontScaleMain, live.
         void BuildFonts()
         {
             auto& io = ImGui::GetIO();
@@ -634,6 +650,11 @@ namespace FUI::UIRoot
             // inherit and these two are pinned to physical buttons.
             kActRotL      = 1u << 10,
             kActRotR      = 1u << 11,
+            // ★LT's empty-cursor meaning. Both triggers used to carry the
+            // split/compare modifier; RT keeps it (one modifier is enough),
+            // and LT becomes the recharge key the board and the doll already
+            // listen for as T -- the one hover verb a pad had no way to say.
+            kActRecharge  = 1u << 12,
         };
 
         std::atomic<std::uint32_t> g_padRaw{ 0 };       // physical buttons held
@@ -645,6 +666,13 @@ namespace FUI::UIRoot
         std::atomic<float>         g_padScrollY{ 0.0f };  // right stick
         std::atomic<bool>          g_padActive{ false };  // a pad drives the UI
         ImVec2                     g_padCursor{ 0.0f, 0.0f };
+        // ★d-pad nudges accumulate here and are applied AFTER the frame's
+        // position source has spoken -- in ENGINE mode the engine's read
+        // overwrote g_padCursor every frame, so a nudge written directly
+        // into it never survived to a pos event (the d-pad "stopped
+        // working" for exactly the players whose engine drives the cursor).
+        float                      g_padNudgeX = 0.0f;
+        float                      g_padNudgeY = 0.0f;
 
         constexpr float kPadCursorSpeed = 1400.0f;   // px/s at full deflection
         constexpr float kPadScrollRate  = 26.0f;
@@ -729,6 +757,8 @@ namespace FUI::UIRoot
             if (edge(kActInspect))   io.AddKeyEvent(ImGuiKey_C, down(kActInspect));
             if (edge(kActRotL))      io.AddKeyEvent(ImGuiKey_A, down(kActRotL));
             if (edge(kActRotR))      io.AddKeyEvent(ImGuiKey_D, down(kActRotR));
+            // LT, empty cursor: the same T the recharge hover handlers read
+            if (edge(kActRecharge))  io.AddKeyEvent(ImGuiKey_T, down(kActRecharge));
             if (edge(kActSplit)) {
                 io.AddKeyEvent(ImGuiMod_Shift, down(kActSplit));
                 io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
@@ -741,15 +771,15 @@ namespace FUI::UIRoot
             if (edge(kActNudgeL)) {
                 if (down(kActNudgeL)) s_nudgeLKey = modal;
                 if (s_nudgeLKey) io.AddKeyEvent(ImGuiKey_LeftArrow, down(kActNudgeL));
-                else if (down(kActNudgeL)) g_padCursor.x -= step;
+                else if (down(kActNudgeL)) g_padNudgeX -= step;
             }
             if (edge(kActNudgeR)) {
                 if (down(kActNudgeR)) s_nudgeRKey = modal;
                 if (s_nudgeRKey) io.AddKeyEvent(ImGuiKey_RightArrow, down(kActNudgeR));
-                else if (down(kActNudgeR)) g_padCursor.x += step;
+                else if (down(kActNudgeR)) g_padNudgeX += step;
             }
-            if (edge(kActNudgeU) && down(kActNudgeU)) g_padCursor.y -= step;
-            if (edge(kActNudgeD) && down(kActNudgeD)) g_padCursor.y += step;
+            if (edge(kActNudgeU) && down(kActNudgeU)) g_padNudgeY -= step;
+            if (edge(kActNudgeD) && down(kActNudgeD)) g_padNudgeY += step;
 
             g_padPrev = now;
         }
@@ -822,8 +852,12 @@ namespace FUI::UIRoot
             // ★Rotation is deliberately not looked up in ControlMap above:
             // there is no game action called "turn the thing you are holding",
             // so there would be nothing to ask for.
+            // ★★LT's empty-cursor half is RECHARGE now (user ask), not a
+            // second split modifier. RT alone carries split/compare -- the
+            // two never disagreed anyway, so nothing is lost -- and the
+            // labels below follow: kActSplit resolves to RT, recharge to LT.
             case K::kLeftTrigger:
-                return Grid::IsHolding() ? kActRotL : kActSplit;
+                return Grid::IsHolding() ? kActRotL : kActRecharge;
             case K::kRightTrigger:
                 return Grid::IsHolding() ? kActRotR : kActSplit;
             case K::kLeft:          return kActNudgeL;
@@ -838,7 +872,7 @@ namespace FUI::UIRoot
         // runs the binding lookup above (ControlMap + string compares) once per
         // button, so it is resolved on menu open and cached — KeyLabel() is
         // called every frame a tooltip is up.
-        const char* g_padLabel[8]{};   // indexed by Act
+        const char* g_padLabel[9]{};   // indexed by Act
         bool        g_padLabelReady = false;
 
         void ResolvePadLabels()
@@ -861,6 +895,9 @@ namespace FUI::UIRoot
                 // ★②: rotate has buttons now -- the triggers, while something
                 // is on the cursor -- so the prompts can name them.
                 kActRotL, kActRotR,
+                // LT's empty-cursor half; the loop resolves it naturally
+                // (ResolvePadLabels runs with an empty cursor).
+                kActRecharge,
             };
             static_assert(std::size(kWanted) == std::size(g_padLabel));
 
@@ -1062,6 +1099,24 @@ namespace FUI::UIRoot
                         mc->cursorPosY = g_padCursor.y;
                     }
                 }
+                // ★the pending d-pad step lands on whatever drove the
+                // position this frame, and is pushed back into the engine's
+                // cursor so its next read keeps the step instead of undoing
+                // it. Our write must not read back as "the engine moved".
+                if (g_padNudgeX != 0.0f || g_padNudgeY != 0.0f) {
+                    g_padCursor.x = std::clamp(g_padCursor.x + g_padNudgeX,
+                                               0.0f, io.DisplaySize.x - 1.0f);
+                    g_padCursor.y = std::clamp(g_padCursor.y + g_padNudgeY,
+                                               0.0f, io.DisplaySize.y - 1.0f);
+                    g_padNudgeX = 0.0f;
+                    g_padNudgeY = 0.0f;
+                    if (mc) {
+                        mc->cursorPosX = g_padCursor.x;
+                        mc->cursorPosY = g_padCursor.y;
+                        g_engineLastX = mc->cursorPosX;
+                        g_engineLastY = mc->cursorPosY;
+                    }
+                }
                 io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
                 io.AddMousePosEvent(g_padCursor.x, g_padCursor.y);
                 TranslatePadButtons();
@@ -1177,10 +1232,11 @@ namespace FUI::UIRoot
         // column beside each field. These rows have no width to spare, so the
         // help goes to the bottom bar, which already carries hover help.
         bool SettingSlider(const char* a_id, float* a_v, float a_lo, float a_hi,
-                           float a_w, float a_def, const char* a_fmt = "%.2f")
+                           float a_w, float a_def, const char* a_fmt = "%.2f",
+                           float a_snap = 0.0f)
         {
             const bool ch =
-                Theme::ChromeSliderFloat(a_id, a_v, a_lo, a_hi, a_w, a_fmt, a_def);
+                Theme::ChromeSliderFloat(a_id, a_v, a_lo, a_hi, a_w, a_fmt, a_def, a_snap);
             if (ImGui::IsItemHovered()) {
                 char buf[96];
                 std::snprintf(buf, sizeof(buf), "%s  %.2f",
@@ -1224,6 +1280,70 @@ namespace FUI::UIRoot
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 WinManager::GetSingleton()->Save();
                 Grid::RequestRebuild();   // cell size changes what fits per row
+            }
+        }
+
+        // TEXT SIZE — the automatic display scale is not a setting, and until
+        // now nothing was: a 4K player who found 17px too small had nowhere to
+        // go. This multiplies that automatic value, so 1.00 is exactly what
+        // shipped and the panel keeps sizing itself by resolution underneath.
+        //
+        // ★★A CONTROL MUST NOT MOVE WHILE A HAND IS ON IT. That is the whole
+        // reason this row defers, and it took three wrong theories to see it.
+        //
+        // This panel is made of the very text this row sizes. Applying the
+        // value live re-laid the panel out underneath itself: the caption and
+        // the SCALE row above grew taller, the window grew with them, and the
+        // slider slid DOWN out from under the cursor -- which is still holding
+        // the grab where the mouse is. Grab and track were then in two places,
+        // moving against each other, every frame. That is what looked like a
+        // doubled, ghosted image.
+        //
+        // ★The cell-size slider never did this and the difference is not the
+        // slider, it is what each one resizes: cells live on the BOARD window,
+        // so the panel holding that slider stays still. This one resizes the
+        // panel it is in.
+        // ★It also explains why bigger steps were WORSE rather than better:
+        // fewer reflows, but each one moved the control further.
+        //
+        // So the number follows the hand and the size follows the release.
+        // The arrows and the right-click default apply at once -- they are one
+        // change with nothing held down, so nothing slides anywhere.
+        void RowFontScale(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::FontScaleLabel);
+            RightAlign(a_c.trackW);
+
+            // ★s_held is set ONLY by this widget and cleared the moment the
+            // value lands, so a preset load — which writes the same setting
+            // from elsewhere — is never overwritten by a stale pending number.
+            static float s_want = 1.0f;
+            static bool  s_held = false;
+
+            float fs = s_held ? s_want : Theme::FontScale();
+            // ★NO "and the value moved" test here, and that is the fix for one:
+            // SettingSlider is already true only when something moved it, and
+            // adding `fs != s_want` compared the new value against a static
+            // that starts at 1.0 rather than at the setting. So the FIRST move
+            // to exactly 1.00 in a session was thrown away -- which is the
+            // right-click default, the one gesture most likely to land there.
+            if (SettingSlider("##fontscale", &fs,
+                              Theme::kMinFontScale, Theme::kMaxFontScale, a_c.trackW,
+                              1.0f, "%.2f", Theme::kFontScaleStep)) {
+                s_want = fs;
+                s_held = true;
+            }
+            // ★"Nothing is held" is asked of ImGui rather than of the slider:
+            // IsItemDeactivatedAfterEdit only answers for the drag, while the
+            // right-click default never activates the slider at all and the
+            // step arrows are their own items. One condition, all four ways.
+            if (s_held && !ImGui::IsAnyItemActive()) {
+                s_held = false;
+                // ★The write rides along: true means the value really moved,
+                // so this cannot put the ini through a save per frame.
+                if (Theme::SetFontScale(s_want)) {
+                    WinManager::GetSingleton()->Save();
+                }
             }
         }
 
@@ -1987,7 +2107,11 @@ namespace FUI::UIRoot
         // Favorites binding now, so the place to change it is the game's
         // controls -- a second, private binding for the same key would be a
         // setting that can disagree with the one the player already trusts.
-        constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowLanguage,
+        // ★TEXT SIZE sits right under SCALE: both answer "this is too small",
+        // and putting them together is what lets a player try one and then the
+        // other without hunting.
+        constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowFontScale,
+                                                   RowLanguage,
                                                    RowWheelEnable,
                                                    RowPreset, RowPresetExport };
         // ★SKIN leads DISPLAY rather than sitting in GENERAL: every row under
@@ -2048,6 +2172,7 @@ namespace FUI::UIRoot
             };
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
                 lw(Lang::Str::ScaleLabel),
+                lw(Lang::Str::FontScaleLabel),
                 lw(Lang::Str::SkinLabel),
                 lw(Lang::Str::LanguageLabel),
                 lw(Lang::Str::PresetLabel),
@@ -2342,7 +2467,13 @@ namespace FUI::UIRoot
 
             const bool over = Grid::IsOverloaded();
             const int used = Grid::SpaceUsed(), total = (std::max)(1, Grid::SpaceTotal());
-            std::snprintf(buf, sizeof(buf), "%d / %d", used, total);
+            // ★W3: carry-weight cells are part of the total -- say so, so a
+            // potion or a perk visibly moves this figure
+            if (const int cwb = Grid::CwBonusCells(); cwb > 0) {
+                std::snprintf(buf, sizeof(buf), "%d / %d (+%d)", used, total, cwb);
+            } else {
+                std::snprintf(buf, sizeof(buf), "%d / %d", used, total);
+            }
             const ImU32 spaceCol = over ? IM_COL32(204, 81, 72, 255) : hi;
             row(Lang::T(Lang::Str::StatSpace), buf, spaceCol);
 
@@ -2412,9 +2543,13 @@ namespace FUI::UIRoot
         // glyph and once to reserve the strip the drag zone must not cover.
         // Those two had drifted into a hardcoded 1.55 and a live
         // recomputation of the same thing.
+        // ★The ratio is no longer scale-free in BOTH terms, and that is the
+        // point: the title stays put while the body grows with the text-size
+        // setting, so the multiplier shrinks by exactly as much and the ✕
+        // lands at the same absolute size inside its unchanged bar.
         [[nodiscard]] float TitleCloseMul()
         {
-            return Theme::SnapPx(Theme::S().titleSize) /
+            return Theme::FontTitle() /
                    (std::max)(1.0f, ImGui::GetFontSize());
         }
 
@@ -2981,7 +3116,13 @@ namespace FUI::UIRoot
                     bits.insert(bits.begin() + 1, { K(Act::kRotateCW), T(S::ActRotate) });
                     bits[2].sep = true;   // divider after the rotate group
                 }
-            } else if (Grid::IsTrashOpen()) {
+            // ★(1.5.0 audit) HOVER OUTRANKS the trash's standing row. The verb
+            // resolver already answers "discard" over a board item and
+            // "restore" over a parked one while the bin is open -- but this
+            // branch sat ahead of the hover branch, so the bar kept promising
+            // "restore" over an item the click would BIN. The warning row
+            // stays for the idle bar.
+            } else if (Grid::IsTrashOpen() && !Grid::HoveredPrompt().active) {
                 warn = true;
                 bits = { { "", T(S::WarnTrashClose) },
                          { K(Act::kSecondary), T(S::ActRestore), true } };
@@ -3027,6 +3168,13 @@ namespace FUI::UIRoot
                 }
                 if (hp.hasVerb) {
                     bits.push_back({ K(Act::kSecondary), T(hp.verb) });
+                }
+                // ★(1.5.0) shelf USE MODE: a container's book reads (a tome
+                // learns) in place on Shift+right-click -- the one verb of
+                // that board no click could discover on its own
+                if (hp.canShelfUse) {
+                    bits.push_back({ K(Act::kSplit) + "+" + K(Act::kSecondary),
+                                     T(hp.useVerb) });
                 }
                 if (hp.canCompare) {
                     bits.push_back({ K(Act::kSplit), T(S::ActCompare), !bits.empty() });
@@ -3811,6 +3959,13 @@ namespace FUI::UIRoot
         // this is the reading that matters -- kPostLoadGame fires before the 3D
         // is back, so the report there cannot see what the body actually built.
         g_menuOpenSfx = 10;   // clear of the open transition (3 was too early)
+        // ★Open-transition BURST: for the next few ticks the icon cache may
+        // restore a screenful of pak sprites at once instead of 8 per frame.
+        // The open is already a covered moment (menu fade), so the batch is
+        // invisible where the trickle read as pop-in -- and a CONTAINER
+        // session benefits most, since a chest's contents are exactly the
+        // sprites the player is least likely to have resident.
+        IconCache::GetSingleton()->Burst(4);
         // Re-ask the engine which button carries what: the player may have
         // rebound the controls since the last time the menu was up. Done HERE,
         // on the game thread, so the render thread only ever reads the result.
@@ -3827,7 +3982,8 @@ namespace FUI::UIRoot
                 Theme::S().translucent ? center
                                        : ParkOnScreen(wm->MainCenter(center)));
 
-            // ini scale arrived after the init-time bake -> rebake once
+            // ini display scale arrived after the init-time bake -> rebake
+            // once. NOT the text size: that one never goes through the atlas.
             if (std::fabs(Theme::Scale() - g_bakedScale) > 0.005f) {
                 g_fontsDirty.store(true);
             }
@@ -3964,8 +4120,8 @@ namespace FUI::UIRoot
         };
         const auto i = static_cast<std::size_t>(a_act);
         if (i >= std::size(kKeyboard)) return "";
-        // ★Past the pad table: recharge has no controller binding, so it always
-        // answers with its key rather than reading off the end of g_padLabel.
+        // (recharge used to stop at the keyboard here -- it rides LT now and
+        // reads off the pad table like everything else)
         if (i >= std::size(g_padLabel)) return kKeyboard[i];
         // Read-only on the render thread: the table is filled on the game
         // thread in OnShow, so nothing here touches ControlMap. An unresolved
@@ -4111,6 +4267,28 @@ namespace FUI::UIRoot
         if (a_dl) a_dl->AddCallback(&MipSamplerCB, nullptr);
     }
 
+    void SyncDisplaySize()
+    {
+        // B11(P2): queried per frame — a once-cached size went stale after a
+        // borderless/fullscreen switch and desynced from OnShow's park math.
+        //
+        // ★★★AND IT OVERRULES THE WIN32 BACKEND, which is the whole point.
+        // ImGui_ImplWin32_NewFrame fills DisplaySize from the WINDOW's client
+        // rect, and the window is not the picture: SSE Display Tweaks'
+        // borderless upscale renders 1920x1080 into a 3840x2160 window, so the
+        // backend's answer was twice the render target. Reported against the
+        // quick wheel -- drawn at double size and pushed off the bottom right
+        // -- because the wheel builds its OWN ImGui frame and was the one that
+        // never overruled it. Hence a function: two frames, one answer.
+        // ★Must run AFTER the backend's NewFrame and BEFORE ImGui::NewFrame.
+        // Earlier and the backend overwrites it; later and the frame has
+        // already been laid out against the wrong size.
+        const auto screenSize = RE::BSGraphics::Renderer::GetScreenSize();
+        auto& io = ImGui::GetIO();
+        io.DisplaySize.x = static_cast<float>(screenSize.width);
+        io.DisplaySize.y = static_cast<float>(screenSize.height);
+    }
+
     bool IsConsoleOpen()
     {
         auto* ui = RE::UI::GetSingleton();
@@ -4148,11 +4326,20 @@ namespace FUI::UIRoot
                 // that opens over us.
                 SetGameCursorVisible(true);
             }
+            // (1.5.x) the shelf page still answers E -- see the input sink --
+            // but draws no chip of ours: a drawn prompt over the engine's
+            // page read as foreign (user call), and the HUD channel is held
+            // back while a menu is up. The gesture is the book's own, and
+            // regulars know it from the world's pages.
             return;
         }
         if (g_bookWasOpen) {
             // ★back to us: MouseHandler takes the cursor again from here on
             g_bookWasOpen = false;
+            // ★(1.5.x) the page just closed: if E flagged a shelf take while
+            // it was up, this is where the transfer starts (render thread,
+            // like every other request)
+            LootBarter::ProcessShelfBookTake();
         }
 
         // ★★The console just came up. Keys stop reaching us from this frame on
@@ -4185,14 +4372,30 @@ namespace FUI::UIRoot
         ImGui_ImplWin32_NewFrame();
 
         auto& io = ImGui::GetIO();
-        // B11(P2): queried per frame — a once-cached size went stale after a
-        // borderless/fullscreen switch and desynced from OnShow's park math
-        const auto screenSize = RE::BSGraphics::Renderer::GetScreenSize();
-        io.DisplaySize.x = static_cast<float>(screenSize.width);
-        io.DisplaySize.y = static_cast<float>(screenSize.height);
-        // H′: crisp text at any scale — 1.0 when baked; a live bitmap-scale
-        // preview only while the slider is mid-drag
-        io.FontGlobalScale = Theme::Scale() / g_bakedScale;
+        SyncDisplaySize();
+        // ★★H′: THE text-size setting, applied to every string ImGui sizes.
+        //
+        // 1.92 rounds this product to whole pixels and then rasterises the
+        // glyphs at that size on demand (ImFont::GetFontBaked), so the text is
+        // crisp at any setting and a drag only ever asks for the dozen-odd
+        // integer sizes the range contains. There is no atlas rebuild here and
+        // no bitmap blit -- the old comment about scaled hangul smearing
+        // belongs to the fixed-size atlas this predates.
+        //
+        // ★io.FontGlobalScale is the pre-1.92 spelling of this and is left at
+        // 1: imgui asserts if both are set, and only one of them should ever
+        // be the answer to "how big is the text".
+        // ★★The OTHER half of the setting is Theme::SnapPx, which carries it
+        // for the strings we size ourselves. Both are live, so they move
+        // together -- when only one of them moved, the panel drew itself at
+        // two sizes at once and the strings looked doubled.
+        ImGui::GetStyle().FontScaleMain = Theme::FontScale();
+        io.FontGlobalScale = 1.0f;
+        // the atlas still carries the DISPLAY scale, so a display change (and
+        // a language pack's glyph ranges) still asks for a rebuild
+        if (std::fabs(Theme::Scale() - g_bakedScale) > 0.005f) {
+            g_fontsDirty.store(true);
+        }
 
         MouseHandler();
         ScrollHandler();

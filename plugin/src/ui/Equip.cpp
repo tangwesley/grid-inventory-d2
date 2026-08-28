@@ -550,6 +550,12 @@ namespace FUI::Equip
                         // this check exists to catch -- one hand of a dual wield
                         // drawing nothing -- is about weapons.
                         if (obj->Is(RE::FormType::Ammo)) continue;
+                        // ★The SECOND RING is never engine-worn by design --
+                        // the carrier wears its effect (B4-4) -- so its slot
+                        // legitimately shows a unit the body list lacks.
+                        // Counting it cried "body wears 0 but doll shows 1"
+                        // five times in one test session, all false.
+                        if (DualRing::Second() == obj) continue;
                         auto* e = Grid::LiveEntryOf(player, obj);
                         int wornUnits = 0;
                         if (e && e->extraLists) {
@@ -781,12 +787,21 @@ namespace FUI::Equip
                     // renderer (GI49: this was a THIRD hand copy of the halo
                     // switch; unmasked, it read poison/temper status bits as
                     // "both rarities" red and never drew the rings)
-                    if (eq->glow) {
-                        Grid::DrawGlow(dl, eq->obj, eq->glow,
-                            ImVec2(c.x - dw * 0.5f, c.y - dh * 0.5f),
-                            ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f),
-                            p0, p1);
-                    }
+                    // ★★1.4.4: THE `if (eq->glow)` GUARD IS GONE, and it was
+                    // hiding the museum mark on every worn item that has no
+                    // rarity of its own. Reported as "weapons show it, armour
+                    // does not" -- which was a coincidence of that character's
+                    // gear, not a difference between the two: the worn weapon
+                    // happened to be enchanted and the armour did not.
+                    // The guard was never needed. DrawGlow is one call through
+                    // to DrawRarityWedge, which decides for itself whether
+                    // there is anything to draw -- and the other two boards
+                    // (partner window, stored bag) have always called it
+                    // unguarded for exactly that reason.
+                    Grid::DrawGlow(dl, eq->obj, eq->glow,
+                        ImVec2(c.x - dw * 0.5f, c.y - dh * 0.5f),
+                        ImVec2(c.x + dw * 0.5f, c.y + dh * 0.5f),
+                        p0, p1);
                     // ★1.0.5: the same shadow the grid gives its tiles, so a
                     // pale item does not vanish here either
                     Grid::DrawItemShadow(dl, icon->srv,
@@ -896,9 +911,15 @@ namespace FUI::Equip
                     // pouches are pack tiles and have no biped slot to sit in)
                     if (ImGui::IsKeyPressed(ImGuiKey_F, false) &&
                         !ImGui::GetIO().WantTextInput) {
-                        Grid::ToggleFavoriteUnit(eq->obj, eq->uid, eq->sig);
+                        Grid::ToggleFavoriteUnit(eq->obj, eq->uid, eq->sig,
+                                                 eq->hand);
                         Sfx::Favorite();
-                        Grid::RequestRebuild();
+                        // ★S1: no rebuild -- the doll's own star reads
+                        // IsPoolStarWorn live every frame, and the grid
+                        // tiles' stars refresh in place when the engine
+                        // applies the toggle (ProcessFavorites). Measured
+                        // as the #4 rebuild source of the gate-1 session
+                        // (8 of 85) doing nothing the refresh does not.
                     }
                     // C: the same 3D view the grid offers. Vanilla files Item
                     // Zoom under the kItemMenu context, which every item screen

@@ -1,5 +1,6 @@
-#pragma once
+﻿#pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -34,7 +35,18 @@ namespace FUI::GoldCoins
     [[nodiscard]] const char* FallbackIconKey(RE::FormID a_id);
 
     [[nodiscard]] int PouchStored();   // 0..10000, cosave-persisted
-    [[nodiscard]] int PouchCap();      // 10000
+    // ★Multi-pouch ready: capacity is PER FORM now. The shipped pouch
+    // (0x804) is builtin at 10,000; any future pouch declares itself with
+    // "pouchcap:N" in its item def, discovered through the resolver main.cpp
+    // wires below. PouchCap() stays as the builtin/fallback figure.
+    [[nodiscard]] int PouchCap();                                   // builtin 10,000
+    [[nodiscard]] int PouchCapOfForm(RE::FormID a_id);              // 0 = not a pouch
+    [[nodiscard]] int PouchCapOfKey(const std::string& a_tileKey);  // fallback = builtin
+    [[nodiscard]] int MaxPouchCap();   // parking cap for gold awaiting a tile
+    void SetPouchDefResolver(std::function<int(RE::FormID)> a_capOf);
+    // ★multi-pouch vendor stock (OUR esp only), from main.cpp's def loop --
+    // the same contract SetBagWares keeps for bags.
+    void SetPouchWares(std::vector<RE::TESBoundObject*> a_wares);
     [[nodiscard]] RE::TESBoundObject* PouchForm();
     // ★Is a pouch actually ON the player right now? StoreToPouch does NOT ask
     // -- it only weighs the value against the cap and the walking gold, which
@@ -52,26 +64,21 @@ namespace FUI::GoldCoins
     // G2: value represented by ONE coin tile of a_form at split-stack index
     // a_index (04 tiles show one-per-coin: index < fullThousands -> 1000,
     // last one -> the 100..999 remainder; tiers 1..3 always index 0).
-    [[nodiscard]] int InstanceValue(RE::FormID a_form, int a_index);
     // Same rule, walking total supplied once -- for callers filling every tile
     // in a loop (InstanceValue re-walks the inventory on each call).
-    [[nodiscard]] int InstanceValueAt(int a_walking, int a_index);
 
     // Number of grid tiles this coin form should display, computed from
     // WALKING gold (pending drops already subtracted). The rebuild uses this
     // instead of the live item count, which lags a tick behind a drop.
     // NOTE: AUTO tiles only — pinned purses (below) are counted separately.
-    [[nodiscard]] int CoinTileCount(RE::FormID a_form);
 
     // Total AUTO coin cells (all tiers, 1x1 each) a given WALKING-gold amount
     // would occupy. Grid's spill pass uses this to add back the coin tiles a
     // barter payment just dissolved, so a purchase doesn't reuse the freed
     // cells (the item spills into a bag as if gold still filled the board).
-    [[nodiscard]] int CoinTilesFor(int a_walking);
 
     // Current walking gold (ledger - pouch - pinned): the pool the auto coin
     // tiles decompose from. Grid's spill pass pairs it with CoinTilesFor above.
-    [[nodiscard]] int WalkingGoldValue();
 
     // ---- G4: pinned gold purses (Mabinogi split, symmetric with stacks) ----
     // A split fixes an amount (1..1000) onto a specific grid tile key; that
@@ -79,8 +86,6 @@ namespace FUI::GoldCoins
     // ignores it, and the purse keeps its exact value & position until merged
     // or dropped back. Value cap == one 04 coin (1000); larger never occurs.
     inline constexpr int kCoinCap = 1000;
-    [[nodiscard]] int PinnedValue(const std::string& a_tileKey);   // -1 if not pinned
-    [[nodiscard]] int PinnedTotal();                               // Σ pinned values
     [[nodiscard]] int BandTier(int a_value);                       // value -> coin tier 0..3
     [[nodiscard]] RE::TESBoundObject* CoinForTier(int a_tier);     // 0x800..0x803
 
@@ -89,8 +94,6 @@ namespace FUI::GoldCoins
     // holds is Gold001, and anything that has to name the stored gold to the
     // partner side (a drop-cell note, for one) needs that form rather than ours.
     [[nodiscard]] RE::TESBoundObject* VanillaGold();
-    void PinAmount(const std::string& a_tileKey, int a_value);     // create/replace a purse
-    void UnpinTile(const std::string& a_tileKey);                  // merged / dropped / cancelled
 
     // G2 interactions — mutate the ledger/pouch and mark the mirror dirty.
     // ★★PER POUCH. Every one of these used to be player-wide, which is why
@@ -102,7 +105,8 @@ namespace FUI::GoldCoins
     [[nodiscard]] int PouchStoredOf(const std::string& a_tileKey);
     // The icon band for an amount the CALLER knows -- a tile asks for its
     // own, a stored pouch asks for the one riding in the container spot.
-    [[nodiscard]] RE::TESBoundObject* PouchIconObjectFor(int a_stored);
+    [[nodiscard]] RE::TESBoundObject* PouchIconObjectFor(int a_stored, int a_cap = 0,
+                                                     RE::FormID a_form = 0);
     // A pouch's gold with no tile to sit on yet: a save older than v6, or a
     // pouch that just walked back in. The grid calls this with the pouch
     // tiles it found, split into tiles born THIS rebuild (a_fresh -- the
@@ -115,8 +119,22 @@ namespace FUI::GoldCoins
     // A pouch's gold while the pouch is on a shelf: the container spot takes
     // it on the way out and gives it back on the way in, so the amount rides
     // with the pouch instead of hiding in a player-wide variable.
-    [[nodiscard]] int TakeAwayGold();
-    void GiveAwayGold(int a_amount);
+    [[nodiscard]] int TakeAwayGold(RE::FormID a_form = 0);
+    // ★(1.5.x) the exact away parcel (form + amount) for a claimant that
+    // knows what left with it; 0 = not (yet) away.
+    [[nodiscard]] int TakeAwayParcelExact(RE::FormID a_form, int a_amount);
+    void GiveAwayGold(int a_amount, RE::FormID a_form = 0);
+    // ★(1.5.x) the reverse of TakeAwayGold: a claimed amount goes back on
+    // the away list. Used when a bundled pouch leaves its bag ONTO the
+    // shelf -- the cell being born claims a parcel, so the bundle entry's
+    // amount has to become one again first.
+    void RestoreAwayParcel(RE::FormID a_form, int a_amount);
+    // ★(1.5.x) exact delivery for the bag flow: hand the parked parcel of
+    // exactly (form, amount) to the given pouch TILE -- a wallet that only
+    // travelled keeps its own amount. No-op when no such parcel waits (the
+    // generic ClaimReturned pass handles the rest). Returns what moved.
+    int ClaimParcelForTile(const std::string& a_tileKey, RE::FormID a_form,
+                           int a_amount);
     // ★(1.3.2a) shelf-pouch banking: plain ledger credit/debit (no pouch
     // parking) -- the shelf spot is the book, these settle the engine gold.
     void CreditLedger(int a_amount);
@@ -154,7 +172,6 @@ namespace FUI::GoldCoins
     void WithdrawFrom(const std::string& a_tileKey, int a_value, bool a_sound = true);
     // pouch -> walking gold. a_sound=false when the caller immediately lifts
     // the amount onto the cursor (the pickup sound plays instead).
-    void Withdraw(int a_value, bool a_sound = true);
     // ★P2/3-5: hand gold to a CONTAINER -- a chest, a follower's pack --
     // instead of to the floor. The transfer runs on the Tick like every other
     // ledger op, because moving engine gold from the render pass is exactly the
@@ -187,8 +204,10 @@ namespace FUI::GoldCoins
     //  - everything else: the gold TRAVELS with the pouch (ledger debited);
     //    any pouch re-entering the inventory brings it back (credit).
     // Both are called from the container sink; ledger ops run on Tick.
-    void OnPouchLeftPlayer();
-    void OnPouchReturned();
+    void OnPouchLeftPlayer(RE::FormID a_form);
+    // ★multi-pouch: the returning FORM picks its own away parcel (same-form
+    // FIFO, oldest as the legacy fallback) and steers the tile claim.
+    void OnPouchReturned(RE::FormID a_form);
     // ★(1.3.0-C) The UI names WHICH pouch tile is about to leave (store /
     // sell / drop paths all know their tile; the engine event only knows the
     // form). One-shot: consumed by the next OnPouchLeftPlayer, cleared on
@@ -230,6 +249,10 @@ namespace FUI::GoldCoins
     };
     void SetBagWares(std::vector<BagWare> a_wares);
 
+    // ★S-G: pending ledger ops + announced transfers still in flight.
+    // Grid::CoinCensus refuses to square the tile invariant while this is
+    // non-zero -- the tile half and the ledger half land on different frames.
+    [[nodiscard]] int UnsettledDelta();
     void MarkDirty();   // player's Gold001 (or a coin form) changed
     void Tick();        // reconcile mirror -> inventory (game thread)
 

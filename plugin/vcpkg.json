@@ -1,6 +1,7 @@
 {
   "name": "grid-inventory",
   "version-string": "1.0.0",
+  "builtin-baseline": "ddd0023b0eee70986e42ed49d9d4afb8098f212e",
   "dependencies": [
     "spdlog",
     "fmt",

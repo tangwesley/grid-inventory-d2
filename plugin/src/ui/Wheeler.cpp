@@ -135,6 +135,8 @@ namespace FUI::Wheeler
         // ★On by default: the wheel is what this feature IS, and a player who
         // wants the vanilla screen back can say so once. See Wheeler.h.
         bool  g_enabled = true;
+        // ★Said once per stand-down -- see the probe in OnButton.
+        bool  g_saidPassing = false;
 
         // ---- the item group's contents -----------------------------------------
         // ★★★NO REGISTRATION STEP. The wheel reads the game's OWN favourites --
@@ -345,6 +347,30 @@ namespace FUI::Wheeler
                     const int t = ord[i];
                     if (t == kEmptySlot) continue;
                     if (t < 0 || t >= n) ord[i] = kEmptySlot;   // tab is gone
+                }
+                // ★★A TAB SITS IN ONE PLACE. Nothing here can seat one twice --
+                // the pass below places each tab once, a drag swaps, and the
+                // remove-notice renumbers -- so a repeat means the arrangement
+                // arrived damaged, from a save or from a bug not yet found.
+                //
+                // It is worth healing rather than trusting, because of what a
+                // repeat DOES: the pass below seats a tab only if no slot
+                // mentions it and only where a slot is empty, so ten copies of
+                // tab 0 leave no empty place and every preset the player owns
+                // becomes unreachable. That is the reported shape exactly -- a
+                // wheel full of EQUIP with the bought preset nowhere on it, and
+                // no way out of it, because a wheel you cannot see a preset on
+                // is a wheel you cannot drag one off.
+                // ★The FIRST of each wins: whatever the player arranged, the
+                // earliest place is the one they are likeliest to recognise.
+                for (int i = 0; i < kSlots; ++i) {
+                    if (ord[i] == kEmptySlot) continue;
+                    for (int j = i + 1; j < kSlots; ++j) {
+                        if (ord[j] != ord[i]) continue;
+                        SKSE::log::warn("[WHEEL] tab {} sat in slots {} and {} -- "
+                                        "the later place is cleared", ord[i], i, j);
+                        ord[j] = kEmptySlot;
+                    }
                 }
                 // ...and seat whatever the arrangement does not mention yet, in
                 // the first free place, so a newly bought preset appears
@@ -1839,6 +1865,14 @@ namespace FUI::Wheeler
                 if (!UIRoot::TryInitD3D()) return;
                 ImGui_ImplDX11_NewFrame();
                 ImGui_ImplWin32_NewFrame();
+                // ★★BETWEEN THE TWO NewFrames, and it has to be exactly here:
+                // the Win32 backend has just written the WINDOW's size, and
+                // ImGui::NewFrame is about to lay the frame out against it. A
+                // window is not the picture -- borderless upscale renders
+                // 1920x1080 into a 3840x2160 window -- and this wheel takes its
+                // whole scale from DisplaySize.y, so the window's answer drew
+                // it at double size, off the bottom right. Reported.
+                UIRoot::SyncDisplaySize();
                 ImGui::NewFrame();
                 // ★★This menu draws its OWN ImGui frame, so the mip sampler the
                 // inventory binds at the head of its background list never
@@ -1867,7 +1901,18 @@ namespace FUI::Wheeler
                 m->depthPriority = 12;
                 return m;
             }
+
+            // ★VR's RE::IMenu is 0x40, ours compiles to 0x30 — the engine
+            // writes unk30/unk34/menuName into the sixteen bytes past our
+            // allocation. Same tail, same reason, as GridMenu.h; the full
+            // account of the crash that found it lives there.
+            REX::EnumSet<RE::UI_MENU_Unk09, std::uint32_t> _vrUnk30{ RE::UI_MENU_Unk09::kNone };
+            std::byte                                     _vrUnk34{ std::byte{ 1 } };
+            RE::BSFixedString                             _vrMenuName{};
         };
+
+        static_assert(sizeof(WheelerMenu) >= 0x40,
+            "VR's IMenu is 0x40 -- the engine writes past a 0x30 allocation");
 
         void ShowMenu(bool a_show)
         {
@@ -2661,6 +2706,17 @@ namespace FUI::Wheeler
     // ---- persistence ---------------------------------------------------------
     void SaveGame(SKSE::SerializationInterface* a_intfc)
     {
+        // ★★INITIALISE BEFORE WRITING. g_setOrder is a plain array: until
+        // ResetSetOrder has run it is all ZEROS, and zero is not "empty" here,
+        // it is TAB 0. Writing that state records ten copies of EQUIP into the
+        // save, and every read of that save afterwards believes it.
+        // ★Nothing can reach this today -- the revert callback resets before
+        // any save can happen -- and it is written down anyway, because the
+        // cost is one line and the failure it prevents is a save file that
+        // stays wrong. Every other reader of this array asks the same question
+        // first (TabOf, RebuildSetOrder, MoveSet); the writer was the one place
+        // that did not.
+        if (!g_setInit) ResetSetOrder();
         if (!a_intfc->OpenRecord(kRecordType, kVersion)) return;
         for (int w = 0; w < 2; ++w) {
             a_intfc->WriteRecordData(static_cast<std::uint32_t>(g_order[w].size()));
@@ -2796,6 +2852,7 @@ namespace FUI::Wheeler
     {
         if (g_enabled == a_on) return;
         g_enabled = a_on;
+        g_saidPassing = false;   // a fresh stand-down says its line again
         // ★Shut it if it happens to be up, through the SAME close every other
         // exit uses. This used to be a partial copy of that path -- with a
         // comment saying it was not -- and the copy was missing the drag state.
@@ -2868,13 +2925,39 @@ namespace FUI::Wheeler
     // favourites menu, where the revert power lives. Our wheel is built from
     // starred items, worn gear and loadout presets -- a beast has none of the
     // three -- so eating the key offered nothing and locked the player in the
-    // form (user report ⑬). The test is the RACE being unplayable, which is
-    // what a transformation IS, so modded forms ride the same answer.
+    // form (user report ⑬).
+    //
+    // ★★★ASKED OF THE ENGINE, NOT OF THE RACE, and that is the whole fix.
+    //
+    // This used to be "the race is unplayable", on the reasoning that an
+    // unplayable race is what a transformation IS. It is not. The vanilla
+    // VAMPIRE races are unplayable too -- measured in Skyrim.esm, all twelve
+    // of them, NordRaceVampire through BretonRaceChildVampire, Playable
+    // clear. So the moment a player caught vampirism the wheel stood down for
+    // good and the vanilla menu answered the key forever after. Reported as a
+    // conflict with a vampire overhaul; it was nothing of the kind, and a
+    // Live Another Life vampire start reproduced it with every vampire mod
+    // disabled.
+    //
+    // MenuControls carries the engine's own beast-form flag, and it exists for
+    // exactly this reason: to change what the menus do while transformed. It
+    // is the question this function was always trying to ask.
     bool YieldingToVanilla()
     {
+        if (auto* mc = RE::MenuControls::GetSingleton(); mc && mc->InBeastForm()) {
+            return true;
+        }
+        // ★A modded form that swaps the race without going through the engine's
+        // beast form still has to be caught, and the mark that separates one
+        // from a vampire is a FACE. A vampire keeps yours -- FaceGenHead is set
+        // on every vanilla vampire race -- while a beast wears something that
+        // is not a face at all, and the flag is clear on WerewolfBeastRace.
+        // Unplayable AND faceless is a transformation; unplayable with your own
+        // face is just you, changed.
         auto* p = RE::PlayerCharacter::GetSingleton();
         auto* race = p ? p->GetRace() : nullptr;
-        return race && !race->GetPlayable();
+        if (!race || race->GetPlayable()) return false;
+        return !race->data.flags.any(RE::RACE_DATA::Flag::kFaceGenHead);
     }
 
     bool SomethingElseOwnsTheKey(std::uint32_t a_pressed)
@@ -2895,10 +2978,17 @@ namespace FUI::Wheeler
                     fav = cm->GetMappedKey(ue->favorites, RE::INPUT_DEVICE::kKeyboard);
                 }
             }
+            // ★WHICH HALF fired, because the two mean different things: the
+            // engine's own flag is the answer for a vanilla transformation,
+            // and the faceless-race test is the guess made for a modded one.
+            // A yield reported by the guess on a race nobody expects is the
+            // line that will explain the next report of this.
+            auto* mc = RE::MenuControls::GetSingleton();
             SKSE::log::info("[WHEEL] yielding the favourites key -- "
-                            "transformed into '{}' (unplayable race); "
+                            "transformed into '{}' (engine beastForm={}); "
                             "favourites is bound to {:#04x}, pressed {:#04x}",
-                race->GetName() ? race->GetName() : "?", fav, a_pressed);
+                race->GetName() ? race->GetName() : "?",
+                (mc && mc->InBeastForm()) ? 1 : 0, fav, a_pressed);
             return true;
         }
         return false;
@@ -2910,7 +3000,26 @@ namespace FUI::Wheeler
         // ★★Off means CLAIMING NOTHING -- not "open but hidden". Every route in
         // has to fail here, including the capture path used to rebind, or the
         // wheel would still be eating keys for a menu that cannot appear.
-        if (!g_enabled) return false;
+        // ★PROBE: "the wheel is off and the vanilla menu does not come back"
+        // has two causes that look identical from outside -- the press never
+        // reached the game, or it did and the game declined to raise a menu.
+        // This line is the first half: it fires from OUR sink, before any
+        // decision, so seeing it with no [FAV] line beside it says the key
+        // arrived, we passed it on untouched, and the engine chose nothing.
+        // ★ONCE per stand-down, not once per press: a player who turns the
+        // wheel off stays off, and a line every time they reach for their
+        // favourites is a log that buries the rest of itself.
+        if (!g_enabled) {
+            if (!g_saidPassing && a_event->IsDown() && InCombo(
+                    a_event->GetDevice() == RE::INPUT_DEVICE::kGamepad,
+                    a_event->GetIDCode())) {
+                g_saidPassing = true;
+                SKSE::log::info("[WHEEL] favourites key {:#04x} seen while DISABLED "
+                                "-- passed to the engine untouched",
+                    a_event->GetIDCode());
+            }
+            return false;
+        }
         const auto dev = a_event->GetDevice();
         const auto id = a_event->GetIDCode();
 
@@ -3122,6 +3231,31 @@ namespace FUI::Wheeler
             Loadout::MarkActiveStale();
             CollectFavorites();   // the item group is whatever is starred right now
             RebuildSetOrder();    // ...and the set groups, whatever tabs exist
+            // ★PROBE (1.4.4): a report of the preset wheel coming up FULL of
+            // the EQUIP tab. Ten slots drawn means ten slots answered "filled",
+            // and every one of them wore the current-tick -- which can only
+            // mean every slot holds the same tab index. Nothing that writes
+            // this array can put a value in it twice: the rebuild seats each
+            // tab once, the drag swaps, and the remove-notice renumbers. So
+            // the array is asked what it actually holds, rather than reasoned
+            // about further.
+            {
+                std::string pre, cos;
+                for (int i = 0; i < kSlots; ++i) {
+                    const int p = g_setOrder[kPreset][i];
+                    const int c = g_setOrder[kCostume][i];
+                    pre += (p == kEmptySlot ? std::string("-") : std::to_string(p)) + " ";
+                    cos += (c == kEmptySlot ? std::string("-") : std::to_string(c)) + " ";
+                }
+                std::string names;
+                for (int t = 0; t < Loadout::Count(); ++t) {
+                    names += "[" + std::to_string(t) + "]'" + Loadout::Name(t) + "' ";
+                }
+                SKSE::log::info("[WHEEL] open: tabs={} active={} {}", Loadout::Count(),
+                                Loadout::Active(), names);
+                SKSE::log::info("[WHEEL] order preset = {}", pre);
+                SKSE::log::info("[WHEEL] order costume= {}", cos);
+            }
             // ★Belt and braces: CloseWheel already cleared these on the way
             // out, but an open that assumes the last close ran is an open that
             // trusts every future exit path to have been written correctly.

@@ -631,14 +631,40 @@ namespace FUI
     static std::uint32_t ModelSlot32(RE::TESBoundObject* a_obj)
     {
         const char* p = nullptr;
+        const char* p2 = nullptr;   // armour: the OTHER sex's ground model
         std::uint32_t altCount = 0;
         if (auto* armo = a_obj->As<RE::TESObjectARMO>()) {
             // armor is NOT a TESModel (skyrim_cast returns null — that made
             // every ARMO fall back to per-FormID keys): its GND model lives
             // on TESBipedModelForm::worldModels
             const auto& wm = armo->worldModels[RE::TESBipedModelForm::Sexes::kMale];
-            p = wm.GetModel();
-            altCount = wm.numAlternateTextures;
+            const auto& wf = armo->worldModels[RE::TESBipedModelForm::Sexes::kFemale];
+            // ★★★BOTH SEXES, because an armour record has TWO ground models and
+            // the male one alone is only half its identity.
+            //
+            // Reported against a female-only armour pack: an item's icon comes
+            // up as ANOTHER PIECE OF THE SAME SET, and dragging a rotation
+            // slider in EDIT walks through the set instead of turning the item.
+            // That is what one shared bucket looks like from the outside -- the
+            // key said these records are the same picture, so the first capture
+            // answered for all of them, and rotation was the only axis left to
+            // tell them apart. Setting a unique angle "fixed" it by buying the
+            // item a bucket of its own.
+            //
+            // A pack that dresses one sex routinely leaves the other's ground
+            // model as one shared placeholder across a whole set, so matching on
+            // it alone declares a dozen different garments identical. Two
+            // records that agree on BOTH paths really do render the same
+            // picture -- that is the whole of what the engine draws here -- so
+            // this is the identity the key was reaching for.
+            // ★It costs almost nothing. Measured over Skyrim.esm: 2522 eligible
+            // armours, 326 buckets by the male path and 329 by the pair. Three
+            // more captures, and 99.9% of the saving kept.
+            p  = wm.GetModel();
+            p2 = wf.GetModel();
+            // ★And the female half gets the same alternate-texture veto as the
+            // male: same nif, different pixels, so no sharing either way.
+            altCount = wm.numAlternateTextures + wf.numAlternateTextures;
         } else if (const auto* mdl = skyrim_cast<RE::TESModel*>(a_obj)) {
             p = mdl->GetModel();
             if (const auto* swap = skyrim_cast<RE::TESModelTextureSwap*>(a_obj)) {
@@ -647,16 +673,30 @@ namespace FUI
         }
         if (!p || !*p) return a_obj->GetFormID();
         if (altCount > 0) return a_obj->GetFormID();   // same nif, other pixels
-        const char* s = p;
-        if (_strnicmp(s, "meshes", 6) == 0 && (s[6] == '\\' || s[6] == '/')) {
-            s += 7;
-        }
         std::uint32_t h = 2166136261u;
-        for (; *s; ++s) {
-            char c = *s;
-            if (c >= 'A' && c <= 'Z') c += 32;
-            if (c == '/') c = '\\';
-            h = (h ^ static_cast<std::uint8_t>(c)) * 16777619u;
+        const auto fold = [&h](const char* a_path) {
+            const char* s = a_path;
+            if (_strnicmp(s, "meshes", 6) == 0 && (s[6] == '\\' || s[6] == '/')) {
+                s += 7;
+            }
+            for (; *s; ++s) {
+                char c = *s;
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c == '/') c = '\\';
+                h = (h ^ static_cast<std::uint8_t>(c)) * 16777619u;
+            }
+        };
+        fold(p);
+        // ★The second path is folded behind a SEPARATOR, and only when there is
+        // one -- so every key that has ever existed keeps its value. A weapon, a
+        // potion, a book and an armour with no second ground model all hash
+        // exactly as they did, and the shipped sprite pak still answers for
+        // them. Only the records this fix is about are re-keyed.
+        // ★The separator is not decoration: without it ("a", "bc") and
+        // ("ab", "c") fold to the same number.
+        if (p2 && *p2) {
+            h = (h ^ 0x1Fu) * 16777619u;
+            fold(p2);
         }
         // ★★1.0.5 — the base-form ENCHANTMENT deliberately does NOT join this
         // hash, though it looks like it should: Iron Sword and Iron Sword of
@@ -2998,6 +3038,9 @@ namespace FUI
         m_pending = Pending{};
         m_queue.clear();
         m_queued.clear();
+        // the warm queue names the save being left; kPostLoadGame refills it
+        m_warmQueue.clear();
+        m_warmDelay = 0;
         // ★★★AND EVERY OTHER PLACE A FORM POINTER SLEEPS. The note above got
         // m_pending right and stopped there. A load destroys and remints every
         // dynamic form (0xFF...): a potion the player brewed, a weapon they
@@ -3026,13 +3069,61 @@ namespace FUI
         return n;
     }
 
+    void IconCache::QueueWarm(std::vector<RE::FormID> a_forms)
+    {
+        if (!m_warmEnabled || a_forms.empty()) return;
+        m_warmQueue.assign(a_forms.begin(), a_forms.end());
+        m_warmDelay = kWarmDelayTicks;
+        SKSE::log::info("[ICONS] warm-up queued: {} form(s), starting in ~{}s",
+            m_warmQueue.size(), kWarmDelayTicks / 60);
+    }
+
     void IconCache::TrimToBudget()
     {
         // The refill allowance is per FRAME, and this is the once-a-frame
         // place that runs outside the draw. Reset it here so the two can
         // never drift apart. Same for the clock the ages are measured on.
-        m_refillLeft = kRefillPerFrame;
+        // ★A menu-open BURST widens it for a few ticks: the open transition
+        // is already a covered moment, so a screenful of pak loads there is
+        // invisible, while the same loads trickled at 8/frame read as
+        // pop-in (user report: first open "느리다").
+        if (m_burstFrames > 0) {
+            --m_burstFrames;
+            m_refillLeft = kBurstRefill;
+        } else {
+            m_refillLeft = kRefillPerFrame;
+        }
         const int now = m_tick.fetch_add(1, std::memory_order_relaxed) + 1;
+
+        // ---- post-load warm-up: make the pak sprites the player is carrying
+        // resident BEFORE the first open asks for them. Gentle by design for
+        // slow machines: waits out the load spike, then at most kWarmPerTick
+        // pak restores per tick (two small reads + uploads), pak-only -- a
+        // form with no pak entry is simply dropped; the capture pipeline
+        // remains the menu's business. Runs here because this is the one
+        // per-tick spot that already owns m_icons outside the draw.
+        if (!m_warmQueue.empty() && m_warmEnabled && m_style != Style::kFlat) {
+            if (m_warmDelay > 0) {
+                --m_warmDelay;
+            } else {
+                int loaded = 0, seen = 0;
+                while (!m_warmQueue.empty() && loaded < kWarmPerTick &&
+                       seen < kWarmPerTick * 4) {
+                    ++seen;
+                    const RE::FormID id = m_warmQueue.front();
+                    m_warmQueue.pop_front();
+                    auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(id);
+                    if (!obj) continue;
+                    const std::uint64_t key = KeyFor(obj, ResolveDef(obj));
+                    if (m_icons.contains(key) || m_failed.contains(key)) continue;
+                    if (LoadFromDisk(key)) ++loaded;
+                }
+                if (m_warmQueue.empty()) {
+                    SKSE::log::info("[ICONS] warm-up done ({} resident)",
+                        m_icons.size());
+                }
+            }
+        }
 
         std::uint64_t total = VramBytes();
         if (total <= kVramBudget) return;

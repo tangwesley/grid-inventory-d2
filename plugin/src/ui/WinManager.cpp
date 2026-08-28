@@ -272,6 +272,15 @@ namespace FUI
                 try { Theme::SetScaleSetting(std::stof(rest)); } catch (...) {}
                 continue;
             }
+            // ★The text-size multiplier, beside the display scale it
+            // multiplies. Nothing is baked from it -- it is read every frame by
+            // style.FontScaleMain and by Theme::SnapPx -- so arriving late
+            // would cost nothing; it is here because this is where the other
+            // half of the same number lives.
+            if (key == "!fontscale") {
+                try { Theme::SetFontScale(std::stof(rest)); } catch (...) {}
+                continue;
+            }
             // ★1.0.5: global capture-lamp offset, "az, el" in degrees. Loaded
             // BEFORE any icon is asked for, because it is part of every cache
             // key — reading it late would serve one frame of icons keyed on the
@@ -331,6 +340,14 @@ namespace FUI
                 Census::SetEnabled(rest == "1" || rest == "true");
                 continue;
             }
+            // Post-load icon warm-up (first-open latency). ON by default;
+            // this is the escape hatch for machines where any background
+            // I/O after a load is unwelcome ("!warmicons = 0").
+            if (key == "!warmicons") {
+                IconCache::GetSingleton()->SetWarmEnabled(
+                    rest == "1" || rest == "true");
+                continue;
+            }
             // Carrier biped slot pin (editor 44..60) -- see DualRing.h. A
             // modlist fact, so it is the player's line to write.
             if (key == "!ring2slot") {
@@ -358,6 +375,19 @@ namespace FUI
             // 1.4 / B3-c: where do rebuilds come from.
             if (key == "!rbtrace") {
                 Grid::SetRebuildTrace(rest == "1" || rest == "true");
+                continue;
+            }
+            // ★W3: carry-weight bonus -> extra cells. Three values: CW per
+            // cell (0 = off), baseline (0 = auto: the race's own base), max
+            // bonus cells.
+            if (key == "!cwcells") {
+                int v[3] = { 10, 0, 50 };
+                int n = 0;
+                std::istringstream vs(rest);
+                for (std::string tok; n < 3 && std::getline(vs, tok, ','); ++n) {
+                    try { v[n] = std::stoi(tok); } catch (...) {}
+                }
+                Grid::SetCwCells(v[0], v[1], v[2]);
                 continue;
             }
             // Request ledger -- ON BY DEFAULT since its promotion to permanent
@@ -589,6 +619,7 @@ namespace FUI
         out << "; 상인 옵션(무한 골드·전 품목 매입)은 함께 저장됩니다.\n";
         out << "; Merchant options (unlimited gold / buys anything) DO travel.\n";
         out << "!scale = " << Theme::ScaleSetting() << "\n";
+        out << "!fontscale = " << Theme::FontScale() << "\n";
         out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         // ★★The capture light MUST travel with a preset, and not because it is
         // part of the look: the preset ships the author's icon pak, and every
@@ -664,6 +695,7 @@ namespace FUI
                     else if (key == "!cellscale") Theme::SetScaleSetting(   // old units
                                                       std::stof(rest) / Theme::kScaleBase);
                     else if (key == "!scale")     Theme::SetScaleSetting(std::stof(rest));
+                    else if (key == "!fontscale") Theme::SetFontScale(std::stof(rest));
                     else if (key == "!skin")      Theme::SetSkinLegacy(std::stoi(rest));
                     else if (key == "!skin2")     Theme::SetSkinLegacy2(std::stoi(rest));
                     else if (key == "!skin3")     Theme::SetSkinByName(rest.c_str());
@@ -810,6 +842,7 @@ namespace FUI
         // ★NOT in ExportPreset: a preset never carries window layout.
         out << "!uiscale = " << Theme::Scale() << "\n";
         out << "!scale = " << Theme::ScaleSetting() << "\n";
+        out << "!fontscale = " << Theme::FontScale() << "\n";
         out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         out << "!lang = " << Lang::Id(Lang::Get()) << "\n";
         // Diagnostic / test switches survive a restart once turned on --
@@ -823,6 +856,7 @@ namespace FUI
         // an ordinary install still carries no line.
         if (!Census::Enabled())    out << "!census = 0\n";
         if (!Ledger::Enabled())    out << "!ledger = 0\n";
+        if (!IconCache::GetSingleton()->WarmEnabled()) out << "!warmicons = 0\n";
         if (DualRing::SlotOverride() >= 0) {
             out << "!ring2slot = " << DualRing::SlotOverride() << "\n";
         }
@@ -831,6 +865,12 @@ namespace FUI
         }
         if (Equip::DrawerOpen())   out << "!accdrawer = 1\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
+        // Carry Weight bonus -> extra inventory cells
+        // 소지 중량 보너스의 칸 환전
+        out << "; !cwcells = CW per cell (0 = off), baseline (0 = auto: race base), max bonus cells\n";
+        out << "; !cwcells = 칸당 CW (0 = 끔), 기준선 (0 = 자동: 종족 기본치), 보너스 칸 상한\n";
+        out << "!cwcells = " << Grid::CwPerCell() << ", " << Grid::CwBase()
+            << ", " << Grid::CwMaxCells() << "\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()
             << ", " << Theme::CaptureLightEl() << "\n";
@@ -1343,10 +1383,12 @@ namespace FUI
         // title: tracked uppercase
         ImFont* font = ImGui::GetFont();
         // whole pixels only — a fractional size bakes its own face (rule 102)
-        // ★DESIGN UNITS. SnapPx applies the scale itself — passing
-        // titleSize*S asked for 24·S², which at 4K is a 54px name in a
-        // 51px bar (Theme::SnapAbs).
-        const float fontSize = Theme::SnapPx(sk.titleSize);
+        // ★DESIGN UNITS, applied by the helper — passing titleSize*S asked
+        // for 24·S², which at 4K is a 54px name in a 51px bar.
+        // ★★Theme::FontTitle, not SnapPx: the title is the one string the
+        // text-size setting leaves alone, because TitleBarH below it is
+        // layout and does not grow. The reason lives with the helper.
+        const float fontSize = Theme::FontTitle();
         const float spacing = sk.titleSpacing * S;
         // tornFrame: nudge the title in so it clears the ragged frame edge
         const float insX = Theme::FrameInsetX();

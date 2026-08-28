@@ -2,6 +2,7 @@
 
 #include <source_location>
 
+#include "game/Lotd.h"
 #include "ui/ItemDef.h"
 #include "ui/Lang.h"
 #include "ui/Theme.h"
@@ -60,6 +61,26 @@ namespace FUI::Grid
     // returning (or pre-1.3.0) amount belongs to.
     [[nodiscard]] std::vector<std::string> PouchTiles();
     [[nodiscard]] std::string              AnyPouchTile();
+    // ★Order the given tile keys by BOARD POSITION: main board first, then
+    // bags (row-major within each); keys with no layout entry sort last.
+    // GoldCoins' pinned-purse trim walks the result back-to-front, so the
+    // purse that pays for an over-spend is the rear-most one -- the same
+    // "the rear tiles absorb the spend" rule the auto coin partition already
+    // follows. Main thread only (reads the layout).
+    [[nodiscard]] std::vector<std::string> OrderKeysByPosition(
+        std::vector<std::string> a_keys);
+    // ★Every COIN tile's slot (key + the amount it holds), in board-position
+    // order -- what the spend allocator needs to decide WHO pays for an
+    // external gold drop (shop, trainer, script). Pouch tiles are excluded
+    // (the pouch is storage, not spending money) and so is the tile on the
+    // cursor (money mid-carry cannot be the one a shop consumed). Read from
+    // the layout, so it answers with the menu closed too. Main thread only.
+    struct CoinSlot
+    {
+        std::string key;
+        int         value = 0;
+    };
+    [[nodiscard]] std::vector<CoinSlot> CoinTilesByPosition();
     // ★(1.3.0) hand any waiting return to the pouch tiles, NEW tiles first
     // (the pouch that just walked in claims its own gold before any
     // pre-existing empty pouch gets a look). Called on every rebuild.
@@ -103,6 +124,10 @@ namespace FUI::Grid
                                   // steal / plant / withdraw / unequip
         bool canRecharge = false; // T feeds it a soul gem (enchanted weapon,
                                   // not already full, not the partner's)
+        // ★(1.5.0) shelf USE MODE: a container's book reads in place with
+        // Shift+right-click -- the bar says so while one is hovered
+        bool      canShelfUse = false;
+        Lang::Str useVerb{};
     };
     [[nodiscard]] HoverPrompt HoveredPrompt();
     void CancelHold();
@@ -247,6 +272,10 @@ namespace FUI::Grid
     // inside the render pass. While it is up, UIRoot stands down completely
     // (no draw, no input) so the book is visible and closable.
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig);
+    // ★(1.5.x) a SHELF book (not owned): raise the page in place -- no
+    // engine Use, which needs the player's own copy.
+    void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
+                              std::uint16_t a_sig);
     void ProcessBookRead();   // UIRoot::Tick
 
     // GI32: apply queued favourite toggles. MUST run on the game thread --
@@ -255,8 +284,15 @@ namespace FUI::Grid
     void ProcessFavorites();
     // Queue one unit's favourite toggle, named by uid+sig rather than by a
     // board position -- what the equipment doll and the accessory drawer have.
+    // The request is WORN by definition (that is the only unit those two
+    // show); the hand tells a copy in each fist apart.
     void ToggleFavoriteUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
-                            std::uint16_t a_sig, int a_xlIdx = -1);
+                            std::uint16_t a_sig, int a_hand = 0);
+    // Retire a phantom {Hotkey}-only list left behind by the pre-fix doll
+    // favorite (one item, two lists, two tiles). Runs at menu open; the
+    // star moves back onto a real unit. See the definition for the full
+    // pathology.
+    void HealPhantomHotkeyLists();
     // ★B3: did a CLICK already take this form's tile off the board? The equip
     // event sink asks before deciding what a declined partial update means --
     // an equip from the wheel, a hotkey or a script has no click behind it and
@@ -331,6 +367,14 @@ namespace FUI::Grid
     [[nodiscard]] bool IsOverloaded();   // S2 reads this for the crimson space value
     void MarkCapacityDirty();            // inventory/equip/loadout changed — recompute
     void CapacityTick();                 // per-frame: recompute when dirty + enforce CW
+    // ★W3: carry-weight bonus -> owned cells past the hard board. Settings
+    // (!cwcells = perCell, baseline, maxCells; perCell 0 = off) + the live
+    // bonus for the panel.
+    void SetCwCells(int a_perCell, int a_base, int a_maxCells);
+    [[nodiscard]] int CwPerCell();
+    [[nodiscard]] int CwBase();
+    [[nodiscard]] int CwMaxCells();
+    [[nodiscard]] int CwBonusCells();
 
     // S2: stats panel "Space X / Y" — used cells on the main board (from the
     // last Rebuild; can exceed the total while overloaded) and the hard cap.
@@ -345,16 +389,30 @@ namespace FUI::Grid
     // coin tile is converted whole-to-pin before the split (siblings untouched).
     void PickupPartial(RE::TESBoundObject* a_obj, int a_count,
                        const std::string& a_srcKey, int a_srcTotal = 0);
+    // ★(1.5.x stack flow) drop a_count units of ONE tile into the world -- the
+    // hand behind R's quantity window. R itself still drops a single unit
+    // outright when the tile holds one; a stack asks first (see kDrop), and
+    // the confirmed number comes back here. Silent on a key that no longer
+    // names a tile: the board can be rebuilt between the ask and the answer.
+    void DropTileUnits(const std::string& a_key, int a_count);
 
     // Draw the main tetris grid inside the current ImGui window.
     void Draw();
 
     [[nodiscard]] int GoldAmount();   // v9: UIRoot draws the GOLD bar
 
-    // B: report gold spent by a barter purchase this frame. The next Rebuild's
-    // spill pass adds back the coin tiles the payment dissolved, so the bought
-    // item spills into a bag instead of reusing the freed cells.
-    void NotePaidGold(int a_price);
+    // ★S-G: gold's only mechanisms, called from GoldCoins::Tick (main
+    // thread). The ledger moved, so the coin TILES move -- income fills the
+    // rear-most partial tile and mints capfuls; a spend debits partials
+    // before full thousands, rear board position first. CoinCensus squares
+    // the one invariant that replaced the mirror (Σ tiles == ledger − pouch)
+    // whenever nothing of ours is in flight.
+    void CoinIncome(int a_value);
+    void CoinSpend(int a_value);
+    void CoinCensus(const char* a_why);
+
+    // ★S-G: NotePaidGold is retired -- a payment debits named coin tiles
+    // (Grid::CoinSpend), so the spill pass no longer guesses at freed cells.
 
     // Phase 7: sold/stored units whose engine removal is still queued on the
     // transfer Tick. The rebuild subtracts them immediately and drains the
@@ -557,14 +615,22 @@ namespace FUI::Grid
     // its own ground. It also costs two triangles.
     //
     // Drawn once per ITEM at the footprint's top-right, not per cell.
+    // ★a_relic (1.4.4) rides the same wedge, and says ONE thing: the museum
+    // still wants this. An owed relic takes the colour outright -- even with no
+    // rarity of its own -- and a donated one hands the wedge straight back to
+    // the item's own rarity, or to nothing at all if it has none. There is no
+    // "already donated" colour; that was tried and removed. Full reasoning at
+    // the implementation.
     void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
-                         const ImVec2& a_boxMax, std::uint8_t a_haloBits);
+                         const ImVec2& a_boxMax, std::uint8_t a_haloBits,
+                         Lotd::Status a_relic);
 
     // Rarity glow, shared with the partner (loot/barter) window so its items
     // glow exactly like the player grid's.
     //   bit1 = enchanted (EITM or crafted ExtraEnchantment)  -> halo
     //   bit2 = unique (DESC, cached)                         -> halo
     //   bit4 = poisoned                                      -> corner droplet
+    //   bits 5..7 = EXTENSION TINT TIER (0..7), see TintTierOf below
     // ★Only bits 1|2 are a HALO. Bit 4 is a marker and must never reach the
     // rarity switch, or a poison-only item takes the "both rarities" red.
     // (There was a bit 8 for temper; nothing marks temper any more -- it is in
@@ -579,6 +645,38 @@ namespace FUI::Grid
     [[nodiscard]] std::uint8_t GlowBits(RE::TESBoundObject* a_obj,
                                         RE::InventoryEntryData* a_entry,
                                         RE::ExtraDataList* a_xl);
+
+    // ---- extension tint tier, packed into the glow byte -------------------
+    //
+    // ★★THE TIER RIDES THE BITS WE ALREADY PASS, and that is the entire reason
+    // this feature costs no signatures.
+    //
+    // Rarity is per-INSTANCE, but DrawGlow -- the one call site the doll and the
+    // partner window share -- takes an object and a glow byte and no extra
+    // list. Threading a list through it would change three declarations and
+    // every caller, in a codebase where those callers are the exact places that
+    // have drifted apart before (see the GI1/D2 note above). The glow byte is
+    // already computed per sub-stack, already carried to every draw, and had
+    // five bits spare since the temper bit was retired.
+    //
+    // So the tier is resolved ONCE, where the list is in hand, and read back
+    // wherever the byte arrives. Three bits: 0 = no extension has an opinion,
+    // which is every item for every player without one.
+    inline constexpr std::uint8_t kTintShift = 5;
+    inline constexpr std::uint8_t kTintMask  = 0xE0;   // bits 5..7
+
+    [[nodiscard]] inline std::uint8_t TintTierOf(std::uint8_t a_bits)
+    {
+        return static_cast<std::uint8_t>((a_bits & kTintMask) >> kTintShift);
+    }
+
+    // Folds a tier into a glow byte, replacing whatever tier was there.
+    inline void SetTintTier(std::uint8_t& a_bits, std::uint8_t a_tier)
+    {
+        a_bits = static_cast<std::uint8_t>(
+            (a_bits & ~kTintMask) |
+            ((a_tier & 0x7u) << kTintShift));
+    }
 
     // ★★"Is this a ring?" -- in ONE place, because it was four: the doll slot,
     // the item category, the fallback icon and bag eligibility each asked

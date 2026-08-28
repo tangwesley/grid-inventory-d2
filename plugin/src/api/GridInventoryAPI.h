@@ -86,12 +86,19 @@ namespace GridInvAPI
     inline constexpr std::uint32_t kMsgHostReady        = 0x47494852;  // 'GIHR'
     inline constexpr std::uint32_t kMsgRegisterProvider = 0x47495250;  // 'GIRP'
     inline constexpr std::uint32_t kMsgCostumeState     = 0x47494353;  // 'GICS'
+    inline constexpr std::uint32_t kMsgRegisterTinter   = 0x47495443;  // 'GITC'
 
     // ---- limits -----------------------------------------------------------
 
     inline constexpr std::uint32_t kMaxBadges       = 8;    // D2 caps at 6; 8 is headroom
     inline constexpr std::uint32_t kTooltipTextLen  = 128;  // bytes incl. NUL
     inline constexpr std::uint32_t kMaxTooltipLines = 16;
+
+    // ★A tint tier travels in THREE SPARE BITS of the host's existing glow
+    // byte (bits 5..7), which is what keeps this feature free of signature
+    // churn -- see Grid.h. Three bits is the whole budget: 0 means "no
+    // opinion" and 1..7 are the tiers a tinter may claim.
+    inline constexpr std::uint32_t kMaxTintTier = 7;
 
     // ---- item identity ----------------------------------------------------
 
@@ -302,4 +309,61 @@ namespace GridInvAPI
         std::uint32_t (*OfferDrop)(void* self, const DropQuery* query);
     };
     static_assert(sizeof(Provider) == 48, "Provider is part of the ABI");
+
+    // ---- provider -> host: RARITY TINT -------------------------------------
+
+    // ★★A SECOND, SEPARATE TABLE -- deliberately NOT a fourth hook on Provider.
+    //
+    // Provider is `static_assert(sizeof(Provider) == 48)` and the host refuses
+    // any table whose structSize disagrees, so growing it would silently unload
+    // every extension already built against ABI 1. Worse, the host keeps ONE
+    // provider slot: an extension that only wants to colour items would have to
+    // out-compete whatever registered first and lose its badges to do it.
+    //
+    // A tinter is its own slot, its own message, and its own handshake. The two
+    // are orthogonal -- a plugin may register either, both, or neither -- and
+    // kABIVersion does not move, because nothing that exists today can tell the
+    // difference.
+    //
+    // ★★★WHY THE HOST ASKS, RATHER THAN BEING TOLD. Rarity is per-INSTANCE, and
+    // an instance has no name the two sides can share: ItemKey.uid is
+    // ExtraUniqueID, which is 0 for exactly the items this exists to colour --
+    // the engine never assigns one to a merely renamed or enchanted list, so
+    // every such unit collapses onto the same key. The host therefore hands
+    // over the pointer it is ALREADY HOLDING while it draws, and the tinter
+    // reads whatever it put there itself. That pointer is borrowed FOR THE
+    // DURATION OF THE CALL and must never be stored: the engine rewrites these
+    // lists on every container move.
+    struct Tinter
+    {
+        std::uint32_t structSize;   // = sizeof(Tinter)
+        std::uint32_t abiVersion;   // = kABIVersion
+        const char*   name;         // static string, diagnostics only
+        void*         self;         // opaque; handed back as the first argument
+
+        // HOT PATH -- once per visible tile per frame, again per doll slot, and
+        // again while a tooltip is built. Must be a hash lookup and nothing
+        // more: no allocation, no form lookup, no lock.
+        //
+        //   base  the TESBoundObject FormID
+        //   xl    the RE::ExtraDataList* of THIS sub-stack, or nullptr when the
+        //         unit has none of its own. Read-only, borrowed for the call.
+        //
+        // Return 0 for "no opinion" -- the host then draws exactly what it drew
+        // before this table existed. Otherwise 1..kMaxTintTier; anything above
+        // is clamped by the host rather than refused, so a tinter built against
+        // a later ABI degrades instead of vanishing.
+        std::uint8_t (*GetTier)(void* self, std::uint32_t base, const void* xl);
+
+        // The colour for each tier, ONCE, at registration -- not per frame.
+        // Fill out[0] for tier 1, out[1] for tier 2, and so on; return how many
+        // were written. Packed 0xAABBGGRR, matching ImU32 on this build, which
+        // is what lets the host hand it straight to ImGui with no conversion.
+        //
+        // A tier the palette does not cover is drawn as if the tinter had
+        // returned 0 for it, so a short palette is a narrower feature and never
+        // a wrong colour.
+        std::uint32_t (*GetPalette)(void* self, std::uint32_t* out, std::uint32_t capacity);
+    };
+    static_assert(sizeof(Tinter) == 40, "Tinter is part of the ABI");
 }

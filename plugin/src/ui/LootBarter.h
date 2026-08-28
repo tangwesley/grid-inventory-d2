@@ -76,6 +76,21 @@ namespace FUI::LootBarter
     bool RequestTake(RE::TESBoundObject* a_obj, int a_count,
                      std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
                      bool a_fromWorn = false, bool a_useAfter = false);
+    // ★(1.5.x stack flow) THE WHOLE CELL, clamped to what the boards can hold.
+    //
+    // Right-clicking a stack used to open the quantity window; it hauls the
+    // cell home now, which is the grammar gold has had since 1.5.0 and the
+    // one this replaces it with everywhere a move only changes WHERE a thing
+    // is. Shift+left still splits, so choosing an amount never left.
+    //
+    // The clamp is the slider's own (MaxAcceptUnits) moved to the call site:
+    // whatever fits arrives and the remainder stays in the container -- the
+    // same outcome as confirming the slider at its clamped maximum, minus the
+    // question. Returns the units requested (0 = none fit; the note has
+    // already played, and the caller must not queue anything else).
+    int RequestTakeAll(RE::TESBoundObject* a_obj, int a_count,
+                       std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
+                       bool a_fromWorn = false);
     // a_xlIdx: where the outgoing unit sits, so the sink removes THAT one
     // (see XferReq::xlIdx). -1 = unknown, historical behaviour.
     // a_srcKey: the tile the units leave (B3-b) -- rides the ledger request so
@@ -163,6 +178,22 @@ namespace FUI::LootBarter
         //          inside the bag that owns the bundle.
         std::uint32_t parent = 0;
         std::uint32_t id = 0;
+        // ★(1.5.x) a bundled POUCH's stored amount (cosave v15) -- the
+        // nested twin of ContCell::gold, which is what gives a pouch inside
+        // a shelved bag the same banking a directly shelved one has. -1 =
+        // never claimed (an old save's entry, or a non-pouch); the claim
+        // grace below retries against the away parcels exactly as a cell's
+        // awaitGold does.
+        int           gold = -1;
+        // transient (NOT cosaved): reconcile passes left to claim a parcel.
+        // Re-armed on load for pouch entries whose gold is still -1, which
+        // is the whole v<15 migration -- their parcels are still away.
+        int           awaitGold = 0;
+        // transient: the EXACT parcel this entry expects (stamped from its
+        // tile's amount at the manifest build). The claim matches on it
+        // first, so two same-form pouches stored in one gesture cannot
+        // trade amounts; 0 = no expectation (first-come, the old rule).
+        int           wantGold = 0;
     };
     // ★A fresh, never-reused name for a bundle entry. One counter for the
     // whole session rather than one per container: an entry that crosses from
@@ -179,6 +210,10 @@ namespace FUI::LootBarter
     // a real grid window over its bundle -- items draw at their anchors,
     // lift onto the cursor, and player items drop in. Top level (UIRoot).
     void DrawShelfBag();
+    // ★(1.5.0 audit) is the shelf bag ON this spot showing its window?
+    // The prompt bar's open/close verb for a partner bag cell asks here --
+    // the player-side open-bag book knows nothing about shelf windows.
+    [[nodiscard]] bool IsShelfBagOpen(std::string_view a_spotKey);
     // The active carry was lifted OUT of a shelf-bag bundle. Consuming it
     // (the take home, or a drop on the container board) removes the carried
     // units from the bundle -- which is what lets their engine item's cell
@@ -197,6 +232,40 @@ namespace FUI::LootBarter
     // pouch / no room); the caller settles the player-side ledger.
     void DrawShelfPouch();
     int  DepositOnHoveredPouch(int a_value);
+    // ★(1.4.4) shelf-internal banking: the PARTNER-carried gold cell dropped
+    // on a shelf pouch cell deposits into it (it used to fall through to the
+    // rearrange grammar and SWAP). Moves the amount between the two cells'
+    // books and queues the matching engine debit; returns the amount moved
+    // (0 = pouch full / not applicable -- the caller keeps the carry).
+    int  DepositHeldGoldIntoShelfPouch(const std::string& a_pouchKey);
+    // ★(1.5.x) the bundled twins: a pouch INSIDE an open shelf-bag window
+    // banks like a shelf pouch cell. The bag window records which pouch
+    // entry the cursor is over while a carry rides (per frame); the coin
+    // drop routes ask here first. Deposit writes the entry's own amount and
+    // returns what moved (0 = full / nothing hovered); the caller settles
+    // the player-side ledger, same contract as DepositOnHoveredPouch.
+    [[nodiscard]] bool IsBundlePouchHovered();
+    int  DepositOnHoveredBundlePouch(int a_value);
+    // ...and the PARTNER-carried gold cell dropped on one (the bundled twin
+    // of DepositHeldGoldIntoShelfPouch): moves from the carried cell into
+    // the entry's book and settles the engine stack itself.
+    int  DepositHeldGoldIntoBundlePouch();
+    // ★(1.5.x) player gold dropped on an open shelf-bag window (not on a
+    // pouch): the bag window records the hovered square per frame; the Grid
+    // coin route stores the physical Septims into the container and books
+    // them here as a GOLD ENTRY of that bag. Returns the amount booked.
+    [[nodiscard]] bool IsShelfBagHovered();
+    int  IntakeGoldEntry(int a_amount);
+
+    // ★(1.5.x) a book read OFF THE SHELF (shift+right-click) offers the
+    // world grammar: E takes it home while the page is up. The read branch
+    // notes the cell; the input sink asks Armed and flags the take (thread-
+    // safe); the render thread consumes the flag at the page-close edge.
+    void NoteShelfBookRead(RE::TESBoundObject* a_book, std::uint16_t a_uid,
+                           std::uint16_t a_sig, const std::string& a_spotKey);
+    [[nodiscard]] bool ShelfBookTakeArmed();
+    void FlagShelfBookTake();
+    void ProcessShelfBookTake();   // page-close edge (UIRoot::Render)
 
     // ★(1.3.3) A LIVING FOLLOWER'S PACK IS 10 x 8. Chests, corpses and
     // merchants are unbounded and always answer true; a companion answers
@@ -214,7 +283,15 @@ namespace FUI::LootBarter
     // on the player's board (which is where it becomes a take).
     enum class XferDir { kTake, kStore, kPickup, kBuy, kSell,    // kPickup = split onto cursor
                          kPickTake, kPickStore,                  // F6b pickpocket rolls
-                         kShelfSplit };
+                         kShelfSplit,
+                         // ★(1.5.x stack flow) R on a stack. kTake/kStore no
+                         // longer raise this window at all -- moving a stack
+                         // is a whole-cell act now, like gold -- so the only
+                         // directions left that ASK are the ones where the
+                         // answer cannot be undone with one more click:
+                         // money (kBuy/kSell), the pickpocket roll, the
+                         // deliberate split, and this.
+                         kDrop };
     // a_srcKey (kPickup only): the grid tile the split quantity is taken from.
     // a_unitValue (kBuy/kSell only): the item's base value per unit, so the
     // confirmed quantity is priced (buy/sell price * count).
@@ -353,14 +430,11 @@ namespace FUI::LootBarter
     void NoteStoredUnits(RE::TESBoundObject* a_obj, int a_count,
                          std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);
 
-    // A stack store opens a quantity popup first, and the square the player
-    // aimed at has to survive that round trip -- the drop happened before
-    // the number was known. Remembered here, spent by the confirm (which
-    // then calls PlaceStoredCell with the chosen amount), dropped on cancel.
-    // ★Not a claim on a future cell like the old pending-spot queue: it is
-    // one square, held across one modal, for one carry.
-    void AimStoreAt(RE::TESBoundObject* a_obj, int a_col, int a_row,
-                    std::uint16_t a_sig = 0, int a_rot = 0);
+    // ⛔AimStoreAt is gone (1.5.x stack flow). It held the square a stack was
+    //  dropped on ACROSS the store quantity popup, because the drop happened
+    //  before the number was known. A store asks no number now, so the drop
+    //  path places on that square itself -- and swaps with an occupant, which
+    //  the round trip never could.
 
     // cosave 'GCLY' v1: container ref FormID -> (item key -> spot), LRU 128.
     // main.cpp owns the record loop.

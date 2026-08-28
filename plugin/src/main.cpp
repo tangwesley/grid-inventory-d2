@@ -7,6 +7,7 @@
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
 #include "game/GoldCoins.h"
+#include "game/Lotd.h"
 #include "ui/Editor.h"
 #include "ui/Fallback.h"
 #include "ui/Lang.h"
@@ -24,6 +25,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -162,6 +164,17 @@ namespace
                 }
                 if (auto* base = a_object->GetBaseObject();
                     base && !FUI::Grid::CanFitNewItem(base)) {
+                    // ⓖ PROBE. A refusal used to leave no trace at all, so a
+                    // report of "gold would not pick up" could not be told
+                    // apart from "the torch next to it would not". Gold is
+                    // supposed to be exempt (MaxAcceptUnits returns early on
+                    // IsGold), and this line is what proves whether it was.
+                    logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
+                                 "gold={} coin={} -- board full (PickUpObject)",
+                        base->GetName(), base->GetFormID(),
+                        static_cast<int>(base->GetFormType()),
+                        base->IsGold(),
+                        FUI::GoldCoins::IsCoinForm(base->GetFormID()));
                     FUI::Sfx::FailNote(FUI::Lang::T(FUI::Lang::Str::InventoryFull));
                     return;   // blocked: the reference stays in the world
                 }
@@ -200,6 +213,13 @@ namespace
                 // level as CapacityActivateHook (the sack conversion above
                 // must run first: gold ignores grid space)
                 if (!FUI::Grid::CanFitNewItem(a_this)) {
+                    // ⓖ probe: the same question at the MISC door, which is the
+                    // one gold actually walks through (Gold001 is a MISC record)
+                    logger::info("[PICKUP] refused '{}' ({:08X}) gold={} coin={} "
+                                 "-- board full (MISC activate)",
+                        a_this->GetName(), a_this->GetFormID(),
+                        a_this->IsGold(),
+                        FUI::GoldCoins::IsCoinForm(a_this->GetFormID()));
                     NotifyInventoryFull();
                     return false;   // blocked: the reference stays in the world
                 }
@@ -368,6 +388,16 @@ namespace
         {
             if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
                 a_this->produceItem && !FUI::Grid::CanFitNewItem(a_this->produceItem)) {
+                // ⓖ probe: WHAT the plant would have produced. This gate is
+                // where the vanilla coin purse was dying and it said nothing at
+                // all -- the refusal reached the player as a toast and the log
+                // as silence.
+                logger::info("[PICKUP] refused harvest '{}' -> produce '{}' "
+                             "({:08X}) type={} -- board full",
+                    a_this->GetName(),
+                    a_this->produceItem->GetName(),
+                    a_this->produceItem->GetFormID(),
+                    static_cast<int>(a_this->produceItem->GetFormType()));
                 NotifyInventoryFull();
                 return false;   // blocked: the plant stays harvestable
             }
@@ -399,6 +429,11 @@ namespace
         {
             if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
                 !FUI::Grid::CanFitNewItem(a_this)) {
+                // ⓖ probe: the last of the four gates to get a voice
+                logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
+                             "-- board full (activate)",
+                    a_this->GetName(), a_this->GetFormID(),
+                    static_cast<int>(a_this->GetFormType()));
                 NotifyInventoryFull();
                 return false;   // blocked: the reference stays in the world
             }
@@ -542,9 +577,10 @@ namespace
                     const bool left = a_event->oldContainer == 0x14;
                     const bool back = a_event->newContainer == 0x14;
                     if (left || back) {
-                        SKSE::GetTaskInterface()->AddTask([left]() {
-                            if (left) FUI::GoldCoins::OnPouchLeftPlayer();
-                            else      FUI::GoldCoins::OnPouchReturned();
+                        const RE::FormID pf = a_event->baseObj;   // ★which pouch
+                        SKSE::GetTaskInterface()->AddTask([left, pf]() {
+                            if (left) FUI::GoldCoins::OnPouchLeftPlayer(pf);
+                            else      FUI::GoldCoins::OnPouchReturned(pf);
                         });
                     }
                 }
@@ -630,6 +666,38 @@ namespace
                 // Those hooks blank, call the original, and put the value back.
                 if (FUI::Wheeler::IsOpen()) continue;
 
+                // ★(1.5.x) a shelf-read book page is up: the player's ACTIVATE
+                // key takes the book home, the world page's own grammar. Only
+                // the atomic flag is written here (input thread); the take
+                // itself runs on the render thread at the page-close edge.
+                if (FUI::LootBarter::ShelfBookTakeArmed()) {
+                    if (auto* bt = e->AsButtonEvent(); bt && bt->IsDown()) {
+                        std::uint32_t want = 0;
+                        if (auto* cm = RE::ControlMap::GetSingleton()) {
+                            if (auto* ue = RE::UserEvents::GetSingleton()) {
+                                want = cm->GetMappedKey(ue->activate,
+                                                        e->GetDevice());
+                            }
+                        }
+                        // fallback: the keyboard default (E = 18)
+                        const bool hit =
+                            want != 0xFF && want != 0
+                                ? bt->GetIDCode() == want
+                                : (e->GetDevice() ==
+                                       RE::INPUT_DEVICE::kKeyboard &&
+                                   bt->GetIDCode() == 18);
+                        if (hit) {
+                            FUI::LootBarter::FlagShelfBookTake();
+                            if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
+                                mq->AddMessage(RE::BookMenu::MENU_NAME,
+                                               RE::UI_MESSAGE_TYPE::kHide,
+                                               nullptr);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
                 // A real mouse event hands the pointer back from the pad.
                 // This is the ONLY reliable signal — see UIRoot::NoteMouseInput.
                 if (e->GetDevice() == RE::INPUT_DEVICE::kMouse) {
@@ -650,7 +718,11 @@ namespace
                     if (auto* ts = e->AsThumbstickEvent()) {
                         FUI::UIRoot::NotePadStick(ts->IsRight(), ts->xValue, ts->yValue);
                         // let the engine's cursor move itself (see the header)
-                        FUI::UIRoot::FeedEngineCursor(ts);
+                        // ★LEFT stick only: the right stick is the SCROLL
+                        // wheel, and feeding it here had the engine walking
+                        // the pointer with it -- scroll and cursor moving on
+                        // one stick (user report).
+                        if (!ts->IsRight()) FUI::UIRoot::FeedEngineCursor(ts);
                     } else if (auto* gb = e->AsButtonEvent()) {
                         // held state, not the down EDGE: the UI needs press and
                         // release both (click-drag, the shift modifier)
@@ -1334,21 +1406,30 @@ namespace
         {
             constexpr std::string_view kOurs = "grid inventory.esp|";
             std::vector<FUI::GoldCoins::BagWare> wares;
+            std::vector<RE::TESBoundObject*>     pouchWares;   // ★multi-pouch
             int foreign = 0;
             for (const auto& [key, d] : g_itemDefs) {
-                if (!d.bag) continue;
+                if (!d.bag && d.pouchCap <= 0) continue;
                 std::string lower = key.substr(0, (std::min)(key.size(), kOurs.size()));
                 for (auto& c : lower) {
                     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 }
                 if (lower != kOurs) { ++foreign; continue; }
-                if (auto* obj = FormFromKey(key)) wares.push_back({ obj, d.accept });
+                auto* obj = FormFromKey(key);
+                if (!obj) continue;
+                if (d.bag) {
+                    wares.push_back({ obj, d.accept });
+                } else if (obj != FUI::GoldCoins::PouchForm()) {
+                    // a def-declared pouch (the builtin 0x804 places itself)
+                    pouchWares.push_back(obj);
+                }
             }
             if (foreign > 0) {
-                logger::info("[VENDOR] {} user-designated bag(s) from other plugins"
-                             " are NOT stocked (by design)", foreign);
+                logger::info("[VENDOR] {} user-designated bag(s)/pouch(es) from "
+                             "other plugins are NOT stocked (by design)", foreign);
             }
             FUI::GoldCoins::SetBagWares(std::move(wares));
+            FUI::GoldCoins::SetPouchWares(std::move(pouchWares));
         }
     }
 
@@ -1942,6 +2023,22 @@ namespace
             [](RE::TESBoundObject* a_obj) -> FUI::IconDef { return DefFor(a_obj); });
         FUI::Grid::SetDefResolver(
             [](RE::TESBoundObject* a_obj) -> FUI::Grid::GridDef { return DefFor(a_obj); });
+        // ★Multi-pouch: a pouch's capacity comes from its item def
+        // ("pouchcap:N"), so a future pouch form is an ESP record plus one
+        // ini line -- no code. The builtin 0x804 stays seeded at 10,000.
+        // ★RAW MAP, NOT DefFor. DefFor's own fallback asks IsPouch (the
+        // builtin 2x2 sizing), and IsPouch asks this resolver -- routing the
+        // resolver back through DefFor closed that circle and the first
+        // IsCoinForm on any un-ini'd item recursed to a stack overflow
+        // (crash-2026-08-26-11-40-10). pouchcap only ever comes from an
+        // explicit ini entry, so the raw map is the complete answer.
+        FUI::GoldCoins::SetPouchDefResolver([](RE::FormID a_id) -> int {
+            auto* f = RE::TESForm::LookupByID(a_id);
+            auto* obj = f ? f->As<RE::TESBoundObject>() : nullptr;
+            if (!obj) return 0;
+            const auto it = g_itemDefs.find(FormKey(obj));
+            return it != g_itemDefs.end() ? it->second.pouchCap : 0;
+        });
         FUI::Grid::SetGameCallbacks(
             [](RE::TESBoundObject* a_obj, bool a_up) {   // vanilla per-item sounds (I2)
                 if (auto* player = RE::PlayerCharacter::GetSingleton()) {
@@ -2141,10 +2238,37 @@ namespace
 
         FUI::UIRoot::SetVisibilityCallbacks(
             []() {   // menu shown
-                LoadCategoryDefs();   // hot-reload category defaults (H7)
-                LoadItemDefs();       // hot-reload user overrides (same as legacy path)
-                LoadUniqueDefs();     // ...and the unique declarations beside them
-                LoadFlatIconDefs();   // hot-reload IconStudio's drawn-icon edits
+                // ★Hot-reload BY TIMESTAMP. These four parses ran on every
+                // open -- ~5,000 override lines re-read to produce the same
+                // tables -- because hot reload was implemented as "always
+                // reload". The reload's PURPOSE is picking up edits, and an
+                // edit is visible in the file's write time, so unchanged
+                // files now skip the parse (measured ~20-30ms per open).
+                // The editor's own saves bump the timestamp like any external
+                // edit, so nothing about the reload story changes.
+                namespace fs = std::filesystem;
+                static const char* kWatched[] = { kCatsPath, kDefsPath,
+                                                  kUniquePath, kFlatPath };
+                static fs::file_time_type s_seen[4]{};
+                static bool s_first = true;
+                bool changed = s_first;
+                s_first = false;
+                for (int i = 0; i < 4; ++i) {
+                    std::error_code ec;
+                    const auto t = fs::last_write_time(kWatched[i], ec);
+                    // a missing file reads as epoch -- still a comparable
+                    // value, so deleting or restoring an ini counts as a change
+                    if (t != s_seen[i]) {
+                        s_seen[i] = t;
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    LoadCategoryDefs();   // hot-reload category defaults (H7)
+                    LoadItemDefs();       // hot-reload user overrides (same as legacy path)
+                    LoadUniqueDefs();     // ...and the unique declarations beside them
+                    LoadFlatIconDefs();   // hot-reload IconStudio's drawn-icon edits
+                }
                 // typed bags phase 0: classify what the player is carrying and
                 // write the tally out. ONCE per session — this is an
                 // observation, not a feature, and it must not cost anything on
@@ -2253,6 +2377,8 @@ namespace
             // no cosave load callback fires on new game — start with an empty
             // grid layout instead of migrating the legacy ini (old saves only)
             FUI::Grid::MarkLayoutFresh();
+            // ⓛ probe: the museum index, once the forms are real
+            SKSE::GetTaskInterface()->AddTask([]() { FUI::Lotd::Rebuild(); });
             break;
         case SKSE::MessagingInterface::kPreLoadGame:
             ResetSession();
@@ -2261,6 +2387,9 @@ namespace
             FUI::DeltaWatch::Reset("load");
             FUI::Census::Reset("load");
             FUI::Ledger::Reset("load");
+            // ★The museum handles name THIS game's references. Dropped before
+            // the swap, rebuilt after it (kPostLoadGame).
+            FUI::Lotd::Clear();
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
             ResetSession();
@@ -2278,6 +2407,22 @@ namespace
             // re-read the carrier from the plugin. Re-lend before the player
             // can notice a second ring that stopped working.
             FUI::DualRing::OnLoad();
+            // ⓛ probe: the museum index. Deferred like the rest -- the display
+            // references have to exist before their state means anything.
+            SKSE::GetTaskInterface()->AddTask([]() { FUI::Lotd::Rebuild(); });
+            // ★Icon warm-up: hand the icon cache the forms the player is
+            // carrying so their pak sprites go resident BEFORE the first
+            // open. The cache itself paces the work (grace period + a couple
+            // of reads per tick) -- see IconCache::QueueWarm.
+            SKSE::GetTaskInterface()->AddTask([]() {
+                auto* p = RE::PlayerCharacter::GetSingleton();
+                if (!p) return;
+                std::vector<RE::FormID> forms;
+                for (auto& [obj, pair] : p->GetInventory()) {
+                    if (obj && pair.first > 0) forms.push_back(obj->GetFormID());
+                }
+                FUI::IconCache::GetSingleton()->QueueWarm(std::move(forms));
+            });
             break;
         }
     }
@@ -2338,7 +2483,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 4, 4, 0 },
+    .Version              = { 1, 5, 0, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
