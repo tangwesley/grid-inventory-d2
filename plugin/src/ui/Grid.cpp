@@ -11105,13 +11105,58 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // "<Cool graphic>", which is Bethesda NAMING a picture it does not
             // supply. An <img> tag IS the picture, and the whole reason to
             // open a page.
-            if (t.rfind("<img", 0) == 0 || t.find("<img ") != std::string::npos) {
+            // ★CASE-INSENSITIVE, and measured rather than assumed: Skyrim's
+            // own interface archive carries 3907 lowercase `<img ` tags and
+            // exactly one `<IMG `. One record is all it takes -- a
+            // case-sensitive test answers that one wrongly forever, and mods
+            // are freer with their markup than Bethesda is.
+            // ★Matching `<img` rather than `<img ` as well: the separator after
+            // the tag name may be a tab or a newline in hand-authored text,
+            // and a description that opens with the tag is the whole point.
+            std::string lower = t;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lower.find("<img") != std::string::npos) {
                 return true;
             }
-            // one bracketed marker and nothing else -- "<Cool graphic>"
+            // one bracketed thing and nothing else. Two very different records
+            // look like this and the old test could not tell them apart:
+            //
+            //   "<Cool graphic>"  Elder Scroll -- Bethesda NAMING a picture in
+            //                     English. There is no page; the unfurl is the
+            //                     engine's and ours would stand in front of it.
+            //   " <p>"            Treasure Map IV (000F33D1) -- an empty
+            //                     PARAGRAPH. The page is real; what fills it is
+            //                     the book's own model, which BookMenu renders,
+            //                     and the text was never where the map lived.
+            //
+            // ★★★AND THE <img> RULE ABOVE DOES NOT COVER THE MAPS. That was the
+            // assumption it was written on, and it is wrong: Skyrim's interface
+            // archive holds exactly ONE treasure-map image tag
+            // (dunMiddenTreasureMap). Treasure Map I-X carry none, so the fix
+            // repaired the single Midden map and left every numbered one
+            // refused -- reported as "still does not open", and confirmed by
+            // the line that now prints what it rejected:
+            //
+            //   [BOOK] nothing to read -- the engine has it (desc 4 chars: " <p>")
+            //
+            // ★The separation is a TAG versus a PHRASE, which is what the two
+            // actually are. A tag's name is one markup word; "Cool graphic" is
+            // prose with a space in it. Listing the tags we accept, rather than
+            // guessing from shape, keeps a future "<Some Note>" refused.
             if (t.front() == '<' && t.back() == '>' &&
                 t.find('>') == t.size() - 1) {
-                return false;
+                const size_t nameEnd = lower.find_first_of(" \t/>", 1);
+                const std::string name =
+                    lower.substr(1, (nameEnd == std::string::npos ? lower.size() : nameEnd) - 1);
+                static constexpr const char* kTags[] = {
+                    "p", "br", "hr", "img", "font", "b", "i", "u",
+                    "div", "span", "center", "pre", "a", "ul", "ol", "li",
+                };
+                for (const char* tag : kTags) {
+                    if (name == tag) return true;   // a real page, however empty
+                }
+                return false;   // a bracketed phrase: the engine's, not ours
             }
             return true;
         }
@@ -11269,7 +11314,36 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // to be gone before it plays. Vanilla's inventory closes on a
                 // Use like this; ours stayed open, so the player had to close
                 // it by hand before anything happened.
-                SKSE::log::info("[BOOK] nothing to read -- the engine has it");
+                //
+                // ★★★AND IT SAYS WHAT IT REJECTED. This branch is the one that
+                // has now been wrong twice -- once for the Elder Scroll's
+                // marker, once for every treasure map -- and both times the
+                // report reaching us was "it does not open", which is the same
+                // sentence for an empty description, a marker, a tag we do not
+                // recognise and a description the engine never handed over.
+                // Those are four different bugs and the log could not tell
+                // them apart, so each one cost a build to guess at.
+                // Printing the string ends that: whatever the next surprising
+                // book is, its description is in the line that refused it.
+                //
+                // Bounded and escaped -- a book's text runs to thousands of
+                // characters and newlines would break the line into fragments
+                // that no longer read as one record's evidence.
+                {
+                    const char* raw = d.c_str() ? d.c_str() : "";
+                    const size_t n = std::strlen(raw);
+                    std::string preview;
+                    preview.reserve(96);
+                    for (size_t i = 0; i < n && preview.size() < 90; ++i) {
+                        const unsigned char c = static_cast<unsigned char>(raw[i]);
+                        if (c == '\r' || c == '\n' || c == '\t') preview += ' ';
+                        else if (c < 0x20) preview += '?';
+                        else preview += static_cast<char>(c);
+                    }
+                    SKSE::log::info("[BOOK] nothing to read -- the engine has it "
+                                    "(desc {} chars: \"{}{}\")",
+                                    n, preview, n > preview.size() ? "..." : "");
+                }
                 UIRoot::Close();
                 return;
             }
