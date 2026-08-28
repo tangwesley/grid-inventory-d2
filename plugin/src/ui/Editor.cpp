@@ -187,6 +187,12 @@ namespace FUI::Editor
 
         constexpr float kLabelW = 46.0f;   // * scale
         constexpr float kTrackW = 158.0f;  // * scale
+        // ★The mask painter's side, hoisted so the window's width measurement
+        // and the painter itself cannot disagree about it. Deliberately NOT
+        // scaled -- an 8x8 board of grabbable cells is sized by the mouse, not
+        // by the text -- which is why the column beside it carries its own
+        // minimum rather than a share of some total.
+        constexpr float kPaintBlock = 180.0f;
 
         // ★★★THE TRACK, CLIPPED TO WHAT THE ROW ACTUALLY HAS LEFT.
         //
@@ -491,13 +497,99 @@ namespace FUI::Editor
         // fixed height and snaps one frame later.
         static float s_wantH = 0.0f;
         const float maxH = ImGui::GetIO().DisplaySize.y - 80.0f * s;
+        // ★kept as the fit report's own verdict now that no bar is drawn:
+        //  past this line the body WHEELS, and the log says so
         const bool clamped = s_wantH > 0.0f && s_wantH > maxH;
+        if (Grid::FitTrace() && clamped) {
+            SKSE::log::info("[EDITFIT] editor wants {:.0f} > screen {:.0f}"
+                            " -- body wheels (no bar)", s_wantH, maxH);
+        }
         const float winH = s_wantH > 0.0f
                              ? (std::min)(s_wantH, maxH)
                              : 666.0f * s + 2.0f * Theme::FrameInsetY();
-        const ImVec2 size(342.0f * s + 2.0f * Theme::FrameInsetX() +
-                              (clamped ? ImGui::GetStyle().ScrollbarSize : 0.0f),
+        // ★★★THE WIDTH IS MEASURED NOW, and that -- not the height -- is what
+        // the reports were about.
+        //
+        // 342 was a fixed number scaled by the UI scale, and it survived every
+        // language this mod has shipped in. What it does not survive is
+        // Theme::FontScale(), added in 1.5.0: an INDEPENDENT text multiplier
+        // from 0.85 to 1.60 riding on style.FontScaleMain. Raise it and every
+        // string grows by up to 60% while this number does not move at all, so
+        // the buttons run past the right edge and the value notes lose their
+        // closing bracket. The same growth makes the rows taller, which is the
+        // other half of the same report -- the body then outgrows the screen
+        // clamp and a scrollbar appears. One cause, two symptoms, and the
+        // height arithmetic (twice suspected) was never involved.
+        //
+        // The settings window measures its own content and is why it was never
+        // reported: CalcTextSize reads the live font, FontScaleMain included.
+        // This does the same, against the rows that can actually overflow --
+        // the two button rows, the tab pair, and a gauge row's label + track +
+        // note. Everything else is narrower than those by construction.
+        //
+        // ★The baseline stays: max() means a configuration that already fits
+        // is laid out exactly as before, to the pixel.
+        // ★EVERY ROW THAT CAN OVERFLOW, measured at the live font. The first
+        // pass of this missed two of them and the panel still clipped, so the
+        // list is written out rather than sampled:
+        //   A/B  the two button rows      (localized, and the widest by far)
+        //   C    the tab pair
+        //   D    a gauge row: label + track + its closing note -- and the note
+        //        is NOT always the localized "(unchanged)". The Stack row ends
+        //        in "(default)" / "(override)", which are hardcoded ENGLISH
+        //        literals and stay English in every translation. "(defau..."
+        //        clipped mid-word is exactly what the reporter photographed.
+        //   E    the painter block and the column beside it (Bag / W / H)
+        const float needW = [s]() {
+            const auto& st = ImGui::GetStyle();
+            const float sp = st.ItemSpacing.x;
+            const auto btn = [&](Lang::Str a_id) {
+                return ImGui::CalcTextSize(Lang::T(a_id)).x + st.FramePadding.x * 2.0f;
+            };
+            const auto txt = [](const char* a_t) { return ImGui::CalcTextSize(a_t).x; };
+            // the widest fixed label in the left column, against its slot
+            float labelW = kLabelW * s;
+            for (const char* l : { "Scale", "Stack", "Lgt X", "Lgt Y" }) {
+                labelW = (std::max)(labelW, txt(l) + 6.0f * s);
+            }
+            // the widest closing note any row can end in
+            char unchanged[64];
+            std::snprintf(unchanged, sizeof(unchanged), "(%s)",
+                          Lang::T(Lang::Str::EditUnchanged));
+            char wasNote[64];
+            std::snprintf(wasNote, sizeof(wasNote), "(%s 360.00)",
+                          Lang::T(Lang::Str::EditWas));
+            const float noteW = (std::max)({ txt(unchanged), txt(wasNote),
+                                             txt("(default)"), txt("(override)") });
+            // the Bag checkbox sits in the column beside the painter block
+            const float boxW = ImGui::GetFrameHeight() + st.ItemInnerSpacing.x +
+                               txt(Lang::T(Lang::Str::Bag));
+            float w = 0.0f;
+            w = (std::max)(w, btn(Lang::Str::EditSave) + btn(Lang::Str::ResetDefault) +
+                              btn(Lang::Str::SaveCategory) + 2.0f * sp);
+            w = (std::max)(w, btn(Lang::Str::CopyProps) + btn(Lang::Str::PasteProps) + sp);
+            w = (std::max)(w, btn(Lang::Str::FootRotate) + btn(Lang::Str::FootMove) +
+                              4.0f * s);
+            w = (std::max)(w, labelW + kTrackW * s + sp + noteW);
+            w = (std::max)(w, kPaintBlock + 16.0f + (std::max)(90.0f, boxW));
+            return w;
+        }();
+        // (no scrollbar allowance any more -- the body cannot draw one)
+        const ImVec2 size((std::max)(342.0f * s, needW + 2.0f * Theme::PadX()) +
+                              2.0f * Theme::FrameInsetX(),
                           winH);   // +Stack row (G3)
+        // ★What the panel decided and why. Reported clipping has now survived
+        // three fixes aimed at guesses; these are the numbers that end the
+        // guessing -- the width the rows asked for, the floor they were
+        // measured against, and both scales, since the FONT one is the input
+        // this window never used to read.
+        if (Grid::FitTrace()) {
+            SKSE::log::info("[EDITFIT] editor W: need {:.0f} (+pad {:.0f}) vs floor "
+                            "{:.0f} -> win {:.0f} | uiScale {:.2f} fontScale {:.2f} "
+                            "lang {}", needW, needW + 2.0f * Theme::PadX(),
+                            342.0f * s, size.x, s, Theme::FontScale(),
+                            Lang::Id(Lang::Get()));
+        }
         ImVec2 defPos(60.0f, 120.0f);
         if (auto* mw = wm->Find("main")) {
             defPos = ImVec2(mw->pos.x - size.x - 8.0f, mw->pos.y);
@@ -521,7 +613,17 @@ namespace FUI::Editor
         // ★where the body begins, so the measurement below can say how tall the
         // WINDOW wants to be rather than just the body
         const float childTop = ImGui::GetCursorPosY();
-        ImGui::BeginChild("##editor_body", ImVec2(0.0f, 0.0f));
+        // ★★★NO SCROLLBAR, the way the board has none. The main grid wheels
+        // its overflow rows behind ImGuiWindowFlags_NoScrollbar and shows no
+        // bar at all; this panel is part of the same UI and had no business
+        // sprouting one. A bar here is worse than elsewhere, too -- it takes
+        // its width out of the rows, which is how "a scrollbar appeared" and
+        // "the text is cut off" arrived as one report.
+        // ★NoScrollWithMouse is deliberately NOT set: the wheel still moves
+        // the body, so nothing becomes unreachable when the panel is taller
+        // than the screen. It is the BAR that goes, not the scrolling.
+        ImGui::BeginChild("##editor_body", ImVec2(0.0f, 0.0f),
+            ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
 
         if (!g_sel) {
             ImGui::TextDisabled("%s", Lang::T(Lang::Str::SelectHint));
@@ -738,7 +840,7 @@ namespace FUI::Editor
             // ★The painter grew from 6x6 to 8x8 but its BLOCK did not: 180px
             // was tuned against the bag column beside it, so the cell shrinks
             // to keep the same total. 22.5 * 8 == 30 * 6.
-            constexpr float kPaintBlock = 180.0f;
+            // (kPaintBlock is file-scope now -- see the layout constants)
             const float cell = kPaintBlock / static_cast<float>(kPaintN);
             auto* dl = ImGui::GetWindowDrawList();
             const float availW = ImGui::GetContentRegionAvail().x;
@@ -1082,7 +1184,34 @@ namespace FUI::Editor
         // EndChild, where the cursor still sits at the bottom of the content.
         const float bodyH = ImGui::GetCursorPosY() + 4.0f * s;   // bottom margin
         ImGui::EndChild();
+        // ★★★MEASURED, AND THE OBVIOUS SUSPECT IS INNOCENT.
+        //
+        // This line was once "+ 2 * WindowPadding.y", on the reasoning that
+        // the pushed WindowPadding is inherited by the body child and so the
+        // frame inset is owed twice. It is not: ImGui gives a NON-BORDERED
+        // child zero padding by default ("no padding by default for
+        // non-bordered child windows", ImGuiChildFlags_AlwaysUseWindowPadding),
+        // and this child is created with no flags. The change only made every
+        // window taller, which pushed borderline setups PAST the screen clamp
+        // below and produced scrollbars on skins that had none. Reverted.
+        //
+        // With the padding accounted honestly the child always has 8 + 4*scale
+        // of slack, so the body cannot overflow on its own. Every scrollbar
+        // seen in this window is therefore the maxH CLAMP: the content is
+        // genuinely taller than the screen allows. That is a content problem,
+        // not an arithmetic one -- see the [EDITFIT] line below, which reports
+        // the numbers rather than leaving the next reader to re-derive them.
         s_wantH = childTop + bodyH + 8.0f + Theme::FrameInsetY();
+        if (Grid::FitTrace()) {
+            SKSE::log::info("[EDITFIT] editor content {:.0f} (child {:.0f} + body "
+                            "{:.0f}) want {:.0f} maxH {:.0f} scale {:.2f} disp {:.0f} "
+                            "inset {:.0f}{}",
+                            childTop + bodyH, childTop, bodyH, s_wantH,
+                            ImGui::GetIO().DisplaySize.y - 80.0f * s, s,
+                            ImGui::GetIO().DisplaySize.y, Theme::FrameInsetY(),
+                            s_wantH > ImGui::GetIO().DisplaySize.y - 80.0f * s
+                                ? "  ★CLAMPED -- scrollbar is the clamp" : "");
+        }
         ImGui::End();
         ImGui::PopStyleVar();   // WindowPadding (torn-frame inset)
     }

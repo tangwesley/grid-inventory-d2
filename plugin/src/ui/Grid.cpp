@@ -1474,6 +1474,7 @@ namespace FUI::Grid
         // it shadows anything a mod folder ships. Compiling the default in is
         // the only form of the switch that reaches them.
         bool g_poolTrace = false;
+        bool g_fitTrace = false;   // !fittrace -- window fit report
 
         // *TEST ONLY ("!simdrift = 1" in GridInventory_ui.ini), ships OFF.
         // Hands the carry-exclusion a DELIBERATELY WRONG identity -- the
@@ -7797,8 +7798,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (g_needRebuild.load(std::memory_order_relaxed)) return false;
         // Menu closed: the coalesced flag is already the cheap path -- the
         // next open (or a capacity gate) rebuilds once for the whole batch.
-        auto* ui = RE::UI::GetSingleton();
-        if (!ui || !ui->IsMenuOpen("GridInventoryMenu")) return false;   // quiet: normal
+        // (IsBoardLive: this path exists to patch a board that is on screen)
+        if (!UIRoot::IsBoardLive()) return false;   // quiet: normal
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !player->Is3DLoaded()) return false;              // 원칙 4
         if (g_views.empty()) return false;   // board never built yet this session
@@ -9687,9 +9688,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // flag coalesces, so this costs one rebuild per burst of changes.
         void FreshenLayoutForGates()
         {
-            if (auto* ui = RE::UI::GetSingleton();
-                ui && ui->IsMenuOpen("GridInventoryMenu")) {
-                return;   // menu open: FinishFrame owns the flag
+            // ★IsBoardLive, not IsMenuOpen. This steps back because the
+            // render loop is about to do the work -- but a SUPPRESSED menu
+            // draws no frame, so FinishFrame never comes and nobody freshens
+            // the layout at all. The gates would then answer from a stale
+            // board: a pickup refused with room in plain sight, or allowed
+            // into a cell that is taken.
+            if (UIRoot::IsBoardLive()) {
+                return;   // on screen: FinishFrame owns the flag
             }
             // ★B5: OR the board was never built this session. The gates ran
             // fine on a stale flag alone while the sims re-derived everything
@@ -10207,6 +10213,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     void MarkCapacityDirty() { g_capacityDirty = true; }
 
     bool PoolTrace() { return g_poolTrace; }
+    bool FitTrace() { return g_fitTrace; }
+    void SetFitTrace(bool a_on)
+    {
+        if (g_fitTrace == a_on) return;
+        g_fitTrace = a_on;
+        SKSE::log::info("[EDITFIT] window fit report {}", a_on ? "ON" : "OFF");
+    }
     bool SimDrift()  { return g_simDrift; }
 
     void SetSimDrift(bool a_on)
@@ -11068,6 +11081,33 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 t.pop_back();
             }
             if (t.empty()) return false;
+            // ★★★A PICTURE IS A PAGE. Checked FIRST, because the marker rule
+            // below cannot tell the two apart and got this wrong.
+            //
+            // A treasure map's whole description is one image tag, taken from
+            // Skyrim.esm and its strings rather than guessed at:
+            //
+            //   dunTreasMapIlinaltasDeep
+            //     "<img src='img://Textures/Interface/Books/...png'
+            //           width='290' height='389'>"
+            //
+            // Trimmed, that starts with '<', ends with '>', and holds exactly
+            // one '>' -- all three of the marker test's conditions -- so every
+            // treasure map in the game was answered "nothing to read". The
+            // page was never raised and the inventory closed instead, which is
+            // what the report described: the use sound plays and the menu
+            // shuts. Confirmed in the log before this line was written:
+            //
+            //   [BOOK] read 'Treasure Map, Shimmermist Cave' -- Read=false Use=true
+            //   [BOOK] nothing to read -- the engine has it
+            //
+            // The marker rule was written for the Elder Scroll's
+            // "<Cool graphic>", which is Bethesda NAMING a picture it does not
+            // supply. An <img> tag IS the picture, and the whole reason to
+            // open a page.
+            if (t.rfind("<img", 0) == 0 || t.find("<img ") != std::string::npos) {
+                return true;
+            }
             // one bracketed marker and nothing else -- "<Cool graphic>"
             if (t.front() == '<' && t.back() == '>' &&
                 t.find('>') == t.size() - 1) {
