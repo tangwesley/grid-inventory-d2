@@ -146,7 +146,7 @@ if(GI_CAPTURE_DIAG)
     message(STATUS "GridInventory: icon capture diagnostics ENABLED (slow build)")
 endif()
 
-# --- Deploy DLL to a local MO2 mod folder (developer convenience) ---
+# --- Deploy DLL + PDB to a local MO2 mod folder (developer convenience) ---
 # Point MOD_ROOT at your own mod folder (-DMOD_ROOT=...). The copy step is
 # skipped entirely when the folder does not exist, so a plain clone builds
 # without any local setup.
@@ -159,4 +159,25 @@ if(EXISTS "${MOD_ROOT}")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:${PROJECT_NAME}>" "${DLL_DEPLOY}/"
         VERBATIM
     )
+    # ★★THE PDB TRAVELS WITH THE DLL, and it is not a convenience -- it is the
+    # difference between a crash log that is right and one that is confidently
+    # wrong. Copying only the DLL leaves whatever PDB was there last beside a
+    # binary it no longer describes, and a mismatched symbol file does not fail
+    # loudly: it resolves the log's addresses against the PREVIOUS build's
+    # symbol table and names real-looking functions that are the wrong ones.
+    # No PDB at all would at least say "unknown". Reported after a deployed
+    # build and a hand-copied PDB drifted apart by one merge.
+    #
+    # ★Its own command, not a second argument to the one above: TARGET_PDB_FILE
+    # is empty on any generator or configuration that produces no PDB (a
+    # RelWithDebInfo-less single-config build, a non-MSVC toolchain), and an
+    # empty source argument makes `copy_if_different` fail the whole step --
+    # taking the DLL copy down with it. Guarded so the DLL always lands.
+    if(MSVC)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_PDB_FILE:${PROJECT_NAME}>" "${DLL_DEPLOY}/"
+            VERBATIM
+        )
+    endif()
 endif()
