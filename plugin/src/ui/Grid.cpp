@@ -11831,6 +11831,56 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 break;
             }
         }
+        // ★★WHAT AN EXTENSION HAS TO SAY, and it belongs HERE rather than at
+        // the bottom because it qualifies what the item IS -- the same job the
+        // slot and the armour class above it do -- instead of measuring it. A
+        // loot mod's rarity reads beside "Body / Heavy Armor"; under the price
+        // it would read as another number.
+        //
+        // ★`scoped` AGAIN, NOT THE ENTRY, and for the GI61 reason: the entry's
+        // extra data is its FIRST sub-stack's, so handing it over here would
+        // let three plain daggers borrow the affixed one's line -- the same bug
+        // the name resolution above exists to prevent, arriving by a new door.
+        //
+        // Skipped whole when nobody has registered, which is every player
+        // without such an extension.
+        if (HostApi::HasAnnotator()) {
+            GridInvAPI::TooltipLine ext[GridInvAPI::kMaxTooltipLines]{};
+            const std::uint32_t     extN = HostApi::AnnotationLines(
+                a_obj ? a_obj->GetFormID() : 0, scoped, ext, GridInvAPI::kMaxTooltipLines);
+            for (std::uint32_t i = 0; i < extN; ++i) {
+                const auto& ln = ext[i];
+
+                // ★BOUNDED, NOT TRUSTED. `text` is a fixed buffer across a DLL
+                // boundary and nothing here can make the other side terminate
+                // it. Measuring up to the field's own size and printing with a
+                // precision means an unterminated line costs a truncated
+                // tooltip rather than a read off the end of the struct.
+                int len = 0;
+                while (len < static_cast<int>(GridInvAPI::kTooltipTextLen) &&
+                       ln.text[len] != '\0') {
+                    ++len;
+                }
+                // An empty line is not a blank row: an extension that fills its
+                // array lazily leaves zeroed entries behind, and drawing those
+                // would punch holes in the tooltip.
+                if (len == 0) continue;
+
+                if (ln.separatorBefore) ImGui::Separator();
+
+                const float indent = static_cast<float>(ln.indent > 3 ? 3 : ln.indent) *
+                                     ImGui::GetStyle().IndentSpacing;
+                if (indent > 0.0f) ImGui::Indent(indent);
+                // rgba 0 means "no opinion" -- the host's own body colour, so a
+                // provider that does not care about colour still matches the
+                // theme the player chose.
+                const ImVec4 col = ln.rgba ? ImGui::ColorConvertU32ToFloat4(ln.rgba)
+                                           : Theme::TipBody();
+                ImGui::TextColored(col, "%.*s", len, ln.text);
+                if (indent > 0.0f) ImGui::Unindent(indent);
+            }
+        }
+
         const bool isPouch = GoldCoins::IsPouch(a_obj->GetFormID());
         if (a_coinValue >= 0) {   // G2: represented / stored gold
             // GI64: the pouch prints "stored / cap". Without the cap there was

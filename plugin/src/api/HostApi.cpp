@@ -92,6 +92,13 @@ namespace FUI::HostApi
         std::uint32_t g_tintPalette[GridInvAPI::kMaxTintTier]{};
         std::uint32_t g_tintPaletteCount = 0;
 
+        // ---- registered annotator ----------------------------------------
+        //
+        // A third slot on the same terms as the other two: its own handshake,
+        // and holding it implies nothing about holding either of the others.
+        GridInvAPI::Annotator g_annot{};
+        bool                  g_haveAnnot = false;
+
         void Notify(const char* a_text)
         {
             FUI::Sfx::Notify(a_text);
@@ -209,6 +216,46 @@ namespace FUI::HostApi
                          t->name ? t->name : "<unnamed>", who, t->abiVersion, n);
         }
 
+        // The annotation handshake. Same shape and same rigour as the two
+        // above -- this listener takes every sender, so nothing in the payload
+        // may be trusted until its size has been proven.
+        void OnRegisterAnnot(SKSE::MessagingInterface::Message* a_msg)
+        {
+            if (!a_msg->data || a_msg->dataLen < sizeof(GridInvAPI::Annotator)) {
+                logger::error("[API] ANNOT REFUSED '{}': payload is {} bytes, an Annotator is {}",
+                              a_msg->sender ? a_msg->sender : "<unknown>",
+                              a_msg->data ? a_msg->dataLen : 0u,
+                              sizeof(GridInvAPI::Annotator));
+                return;
+            }
+            const auto* n   = static_cast<const GridInvAPI::Annotator*>(a_msg->data);
+            const char* who = a_msg->sender ? a_msg->sender : "<unknown>";
+
+            if (n->abiVersion != GridInvAPI::kABIVersion ||
+                n->structSize != sizeof(GridInvAPI::Annotator)) {
+                logger::error("[API] ANNOT REFUSED '{}': abiVersion {} (need {}), structSize {} (need {})",
+                              who, n->abiVersion, GridInvAPI::kABIVersion,
+                              n->structSize, sizeof(GridInvAPI::Annotator));
+                Notify("Grid Inventory: tooltip extension version mismatch - not loaded");
+                return;
+            }
+            if (!n->GetLines) {
+                logger::error("[API] ANNOT REFUSED '{}': null function pointer", who);
+                Notify("Grid Inventory: tooltip extension is incomplete - not loaded");
+                return;
+            }
+            if (g_haveAnnot) {
+                logger::warn("[API] annotator '{}' ignored: one is already registered ('{}')",
+                             who, g_annot.name ? g_annot.name : "?");
+                return;
+            }
+
+            g_annot     = *n;   // copy; the caller's pointer is borrowed only
+            g_haveAnnot = true;
+            logger::info("[API] annotator registered: '{}' (from '{}') abi={}",
+                         n->name ? n->name : "<unnamed>", who, n->abiVersion);
+        }
+
         // This listener sees EVERY sender, so it must only ever act on our own
         // 4CC message types -- never on a lifecycle number.
         void OnApiMessage(SKSE::MessagingInterface::Message* a_msg)
@@ -218,6 +265,8 @@ namespace FUI::HostApi
                 OnRegisterProvider(a_msg);
             } else if (a_msg->type == GridInvAPI::kMsgRegisterTinter) {
                 OnRegisterTinter(a_msg);
+            } else if (a_msg->type == GridInvAPI::kMsgRegisterAnnot) {
+                OnRegisterAnnot(a_msg);
             }
         }
     }
@@ -351,5 +400,27 @@ namespace FUI::HostApi
     {
         if (a_tier == 0 || a_tier > g_tintPaletteCount) return 0;
         return g_tintPalette[a_tier - 1];
+    }
+
+    bool HasAnnotator()
+    {
+        return g_haveAnnot;
+    }
+
+    std::uint32_t AnnotationLines(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                                  GridInvAPI::TooltipLine* a_out, std::uint32_t a_capacity)
+    {
+        if (!g_haveAnnot || !a_out || a_capacity == 0 || a_base == 0) return 0;
+
+        // ★THE COUNT IS CLAMPED, THE WRITES CANNOT BE. An extension that
+        // overruns a_out has already corrupted this stack frame by the time we
+        // see the return value -- which is why the ABI states the capacity rule
+        // as the annotator's obligation rather than the host's check. Clamping
+        // here is the half that IS ours: a plugin returning a count larger than
+        // it wrote (or larger than it was given) must not make the draw loop
+        // read lines nobody filled in.
+        const auto n = g_annot.GetLines(g_annot.self, a_base,
+                                        static_cast<const void*>(a_xl), a_out, a_capacity);
+        return (std::min)(n, a_capacity);
     }
 }
