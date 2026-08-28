@@ -117,8 +117,9 @@ namespace FUI
         inline constexpr DefField kDefFields[] = {
             // ★★A CEILING, THE SAME ONE THE BAG BLOCK USES. These two were the
             // only fields in the table left open-ended, and h is the one that
-            // reaches memory unchecked: MaskOf trims w to kCols and then does
-            // rows.assign(h, ...). A preset with `h:500000` -- and sharing
+            // reaches memory unchecked: MaskOf trims w to the board's column
+            // count (Grid::BaseCols) and then does rows.assign(h, ...).
+            // A preset with `h:500000` -- and sharing
             // presets is a shipped feature, so the file need not be ours --
             // costs tens of megabytes per item, on every rebuild. The tallest
             // real item is 4 cells.

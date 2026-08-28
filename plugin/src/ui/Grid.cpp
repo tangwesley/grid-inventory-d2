@@ -166,11 +166,11 @@ namespace FUI::Grid
             std::string      bagName;  // window title for bags
             std::string      accept;   // typed bag: the BagFilter id it takes
             bool             carried = false;   // its tile is on the cursor
-            int              cols = kCols;
-            int              minRows = kMinRows;
+            int              cols = BaseCols();
+            int              minRows = BaseRows();
             int              maxRows = 4096;
             std::vector<int> items;    // indices into g_items
-            int              rows = kMinRows;
+            int              rows = BaseRows();
             bool             open = true;   // false = holds items, draws no window
         };
 
@@ -322,10 +322,22 @@ namespace FUI::Grid
             bool                     valid = false;
         };
 
+        // The main board, as set by "!basegrid" (Grid.h). Read through
+        // BaseCols()/BaseRows() everywhere else — including from this file, so
+        // there is exactly one name for it and the accessors stay the only
+        // thing a future per-save override would have to touch.
+        int g_baseCols = kDefCols;
+        int g_baseRows = kDefRows;         // effective (display-clamped)
+        int g_baseRowsWanted = kDefRows;   // what "!basegrid" asked for
+
         bool g_overloaded = false;      // W2: hard board can't hold everything
         bool g_capacityDirty = true;    // recompute on next CapacityTick
         int  g_spaceUsed = 0;           // S2: cells occupied (main board + bags)
-        int  g_spaceTotal = kCols * kMinRows;   // + every owned bag's grid
+        // ★Not BaseCols() * BaseRows(): this runs at static-init, before the
+        // ini has been read, and CapacityTick overwrites it on the first frame
+        // regardless. A dynamic initializer here would only be a static-order
+        // question with no answer worth having.
+        int  g_spaceTotal = kDefCols * kDefRows;   // + every owned bag's grid
 
         // ★W3: CARRY WEIGHT -> OWNED CELLS. External CW past the baseline
         // converts to cells appended past the hard board (left-to-right in a
@@ -2234,11 +2246,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
                 if (m.rows.empty()) m.rows.push_back({ true });
                 for (auto& r : m.rows) r.resize(w, false);
-                m.w = (std::min)(w, kCols);
+                m.w = (std::min)(w, BaseCols());
                 m.h = static_cast<int>(m.rows.size());
                 return m;
             }
-            m.w = (std::min)(kCols, (std::max)(1, a_def.w));
+            m.w = (std::min)(BaseCols(), (std::max)(1, a_def.w));
             m.h = (std::max)(1, a_def.h);
             m.rows.assign(m.h, std::vector<bool>(m.w, true));
             return m;
@@ -2442,17 +2454,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
 
 
-        // ★W3: the ownership predicates. Rows below kMinRows are always the
+        // ★W3: the ownership predicates. Rows below BaseRows() are always the
         // player's; carry-weight bonus cells extend ownership past the hard
         // board, filling the next row left-to-right -- so the boundary is a
         // step, and a footprint is owned only when EVERY occupied cell is.
         [[nodiscard]] bool OwnedCellAt(int a_col, int a_row)
         {
-            if (a_row < kMinRows) return true;
-            const int full = g_cwBonusCells / kCols;
-            const int part = g_cwBonusCells % kCols;
-            if (a_row < kMinRows + full) return true;
-            return a_row == kMinRows + full && a_col < part;
+            if (a_row < BaseRows()) return true;
+            const int full = g_cwBonusCells / BaseCols();
+            const int part = g_cwBonusCells % BaseCols();
+            if (a_row < BaseRows() + full) return true;
+            return a_row == BaseRows() + full && a_col < part;
         }
         [[nodiscard]] bool OwnedFootprint(int a_col, int a_row, const Mask& a_m)
         {
@@ -2469,8 +2481,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // visible to drop into, not only reachable by overflow)
         [[nodiscard]] int OwnedRowSpan()
         {
-            return kMinRows + g_cwBonusCells / kCols +
-                   (g_cwBonusCells % kCols ? 1 : 0);
+            return BaseRows() + g_cwBonusCells / BaseCols() +
+                   (g_cwBonusCells % BaseCols() ? 1 : 0);
         }
 
         int PlaceItems(std::vector<Item*>& a_list, int a_cols, int a_minRows,
@@ -2626,8 +2638,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // ★W3: the boundary is the OWNERSHIP edge now -- carry-weight
             // bonus cells push it down, and a partial row makes it a step.
             {
-                const int  full = kMinRows + g_cwBonusCells / kCols;
-                const int  part = g_cwBonusCells % kCols;
+                const int  full = BaseRows() + g_cwBonusCells / BaseCols();
+                const int  part = g_cwBonusCells % BaseCols();
                 const auto tintC = IM_COL32(204, 81, 72, 14);
                 const auto lineC = IM_COL32(204, 81, 72, 200);
                 if (a_viewIdx == 0 && a_view.rows > full) {
@@ -7161,7 +7173,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 std::vector<Item*> probe;
                 probe.reserve(mainList.size());
                 for (auto* it : mainList) probe.push_back(it);
-                PlaceItems(probe, kCols, kMinRows, kMinRows,
+                PlaceItems(probe, BaseCols(), BaseRows(), BaseRows(),
                            g_cwBonusCells);   // hard board + CW bonus (W3)
                 for (auto* cand : probe) {
                     // real items only (dummies have no obj); coins keep the ledger
@@ -7221,7 +7233,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             View main;
             main.bagKey.clear();
             std::vector<Item*> mainPtrs = mainList;
-            main.rows = PlaceItems(mainPtrs, kCols, kMinRows, 4096);
+            main.rows = PlaceItems(mainPtrs, BaseCols(), BaseRows(), 4096);
             // ★W3: a fresh unlock is a place to drop into, so the owned
             // region always shows even while empty
             main.rows = (std::max)(main.rows, OwnedRowSpan());
@@ -7369,7 +7381,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Growth rows are included in `used`, so it can exceed the total
             // while overloaded — e.g. 147 / 140.
             g_spaceUsed = 0;
-            g_spaceTotal = kCols * kMinRows + g_cwBonusCells;   // W3
+            g_spaceTotal = BaseCols() * BaseRows() + g_cwBonusCells;   // W3
             for (const auto& v : g_views) {
                 if (v.bagKey == kTrashKey) continue;
                 // ★Typed bags are excluded from BOTH halves. Their cells cannot
@@ -8112,7 +8124,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         return decline("no room (growth/spill)");
                     }
                     // ★★★A GROWTH ROW IS NOT A PLACE THE PARTIAL CAN LEAVE IT.
-                    // MakeDisplayTile treats rows past kMinRows as temporary
+                    // MakeDisplayTile treats rows past BaseRows() as temporary
                     // and blanks the coordinates -- correctly, because the
                     // rebuild's PlaceItems runs straight afterwards and seats
                     // them properly. The partial has no such second pass, so
@@ -9774,7 +9786,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             probes[i].mask = MaskOf(aDef, probes[i].rot);
             list.push_back(&probes[i]);
         }
-        PlaceItems(list, kCols, kMinRows, kMinRows,
+        PlaceItems(list, BaseCols(), BaseRows(), BaseRows(),
                g_cwBonusCells);   // HARD board + CW bonus (W3)
 
         int fitTiles = 0;
@@ -9848,7 +9860,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (it.inBag.empty()) list.push_back(&it);
         }
 
-        PlaceItems(list, kCols, kMinRows, kMinRows,
+        PlaceItems(list, BaseCols(), BaseRows(), BaseRows(),
                    g_cwBonusCells);   // hard board + CW bonus (W3)
 
         for (const auto& it : ct.tiles) {
@@ -9898,7 +9910,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
 
-            PlaceItems(list, kCols, kMinRows, kMinRows,
+            PlaceItems(list, BaseCols(), BaseRows(), BaseRows(),
                        g_cwBonusCells);   // hard board + CW bonus (W3)
 
             // B: hard-board overflow drains into bag space, open or closed
@@ -10221,6 +10233,59 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         std::set<std::string> g_knownPouchTiles;
     }
 
+    // ---- the main board's size, as a setting (see Grid.h) -----------------
+    int BaseCols() { return g_baseCols; }
+    int BaseRows() { return g_baseRows; }
+    int BaseRowsSetting() { return g_baseRowsWanted; }
+
+    bool SetBaseSize(int a_cols, int a_rows)
+    {
+        const int c = std::clamp(a_cols, kMinCols, kMaxCols);
+        const int r = std::clamp(a_rows, kMinBoardRows, kMaxBoardRows);
+        if (c != a_cols || r != a_rows) {
+            SKSE::log::warn("[GRID] base board {}x{} is out of range -- clamped to {}x{}",
+                            a_cols, a_rows, c, r);
+        }
+        // ★Compared against the REQUEST, never against the effective rows. On a
+        // display-clamped board those two differ permanently, and testing the
+        // effective value would make "set it to what it already is" look like a
+        // change every time -- undoing the clamp for a frame, on every call.
+        if (c == g_baseCols && r == g_baseRowsWanted) return false;
+        g_baseCols = c;
+        g_baseRowsWanted = r;
+        // The request stands until a display is known to disagree with it;
+        // ClampBaseRowsToDisplay runs on the next frame's layout regardless.
+        g_baseRows = r;
+        // ★The board IS the capacity figure. Every sim (WouldOverflow,
+        // ComputeOverloaded, the take-all budget) places against these, and
+        // g_spaceTotal is what the stats panel reads -- leaving it stale means
+        // the pickup gate keeps answering for a board the player no longer has.
+        g_capacityDirty = true;
+        SKSE::log::info("[GRID] base board = {}x{} ({} cells)", c, r, c * r);
+        return true;
+    }
+
+    bool ClampBaseRowsToDisplay(float a_displayH, float a_chromeH)
+    {
+        const float cell = CellPx();
+        if (cell <= 0.0f || a_displayH <= 0.0f) return false;
+        const int fits = static_cast<int>((a_displayH - a_chromeH) / cell);
+        // ★From the REQUEST, not from the current effective value -- so a
+        // player who lowers SCALE (smaller cells, more rows on the same
+        // screen) gets the rows they asked for back. Trimming in place could
+        // only ever ratchet downwards.
+        const int eff = std::clamp(fits, kMinBoardRows, g_baseRowsWanted);
+        if (eff == g_baseRows) return false;
+        if (eff < g_baseRowsWanted) {
+            SKSE::log::warn("[GRID] {} rows do not fit a {:.0f}px display at this cell "
+                            "size -- showing {}. Lower the SCALE setting for more.",
+                            g_baseRowsWanted, a_displayH, eff);
+        }
+        g_baseRows = eff;
+        g_capacityDirty = true;
+        return true;
+    }
+
     // ★W3: settings + the live bonus (see CapacityTick for the measurement)
     void SetCwCells(int a_perCell, int a_base, int a_maxCells)
     {
@@ -10301,13 +10366,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (g_overloaded && !was) {
                 Sfx::FailNote(Lang::T(Lang::Str::Overloaded));
                 // ★The panel shows main + GENERAL bags; the hard board is only
-                // kCols x kMinRows of that. Printing both is what turns "why is
-                // it red, I have room" into an answerable question -- the room
-                // is real, it is just somewhere these units cannot go.
+                // BaseCols() x BaseRows() of that. Printing both is what turns
+                // "why is it red, I have room" into an answerable question --
+                // the room is real, it is just somewhere these units cannot go.
                 SKSE::log::info("[GRID] capacity: OVERLOADED -- hard board {}x{}={}, "
                                 "panel shows {}/{} (the free cells include general "
                                 "bag space)",
-                    kCols, kMinRows, kCols * kMinRows, g_spaceUsed, g_spaceTotal);
+                    BaseCols(), BaseRows(), BaseCols() * BaseRows(),
+                    g_spaceUsed, g_spaceTotal);
                 for (const auto& l : why.lines) {
                     SKSE::log::info("[GRID]   stranded: {}", l);
                 }
@@ -12446,13 +12512,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // back (it just did). The pixel cannot leak if it does not exist, and
         // the frame is free to sit wherever it looks right — it draws on its
         // own clip now (GI79) and no longer needs room inside the child.
-        const float boardH = kMinRows * CellPx();
+        const float boardH = BaseRows() * CellPx();
         ImGui::BeginChild("fablerim_grid", ImVec2(gridW, boardH), ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar);
         // ROOT CAUSE of the "items spill past the frame" saga: the grid's
         // draw commands were NOT clipped to this child (overflow rows — and,
         // once wheel-scrolled, even the top rows — rendered right through
-        // the window). Clip every grid pass to the 10x14 board explicitly;
+        // the window). Clip every grid pass to the hard board explicitly;
         // a small margin keeps the rarity glow's soft bleed from cutting
         // square at the edges.
         {
@@ -12464,7 +12530,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             cdl->PopClipRect();
 
             // Border ON TOP of the item sprites (they z-cover the pass-1
-            // chrome outline): fixed to the 10x14 board, so it does not move
+            // chrome outline): fixed to the hard board, so it does not move
             // when the overflow rows scroll. Must be on THIS child's list
             // AFTER the passes: the child renders above its parent, so a
             // parent-list border sat under the items (user-reported). Other
@@ -16096,7 +16162,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_knownPouchTiles.clear();   // (1.3.0) tile keys from another save are lies
         g_overloaded = false;
         g_spaceUsed = 0;
-        g_spaceTotal = kCols * kMinRows + g_cwBonusCells;   // W3
+        g_spaceTotal = BaseCols() * BaseRows() + g_cwBonusCells;   // W3
         // F2: trash state is per-session — parked items simply reappear on
         // their boards after a load (the engine inventory was never touched)
         g_trashOpen = false;

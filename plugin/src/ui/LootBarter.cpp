@@ -4774,7 +4774,15 @@ namespace
         // and hand the drawn list its positions.
         int PlacePartnerCells(std::vector<PartnerCell>& cells)
         {
-            const int cols = Grid::kCols;
+            // ★The partner board FOLLOWS the player's column count, and that is
+            // a decision rather than an inheritance -- it shared Grid::kCols
+            // when there was only one number to share. The two windows sit side
+            // by side and items are dragged straight between them, so a chest
+            // laid out 10 wide beside a 9-wide pack reads as two different
+            // grids and every drag has to be re-aimed. Note the cost: wide
+            // boards make the PAIR wide, and at kMaxCols on 16:9 they meet in
+            // the middle.
+            const int cols = Grid::BaseCols();
             // (1.3.3) a living follower's pack is capped -- see CompanionPartner
             const bool companionBoard = CompanionPartner();
             std::vector<std::vector<bool>> occ;
@@ -4879,7 +4887,7 @@ namespace
             auto* cache = IconCache::GetSingleton();
             const auto& sk = Theme::S();
             const float cell = Grid::CellPx();
-            const int cols = Grid::kCols;
+            const int cols = Grid::BaseCols();
             // ★The board, drawn by the SAME function the player's grid uses.
             // This was a private accent hairline, which meant a skin that
             // carves or tiles its cells did so on one half of the screen only
@@ -5481,7 +5489,7 @@ namespace
                     const ImVec2 m = ImGui::GetIO().MousePos;
                     int gc = static_cast<int>(std::lround((m.x - base.x - ox) / cell));
                     int gr = static_cast<int>(std::lround((m.y - base.y - oy) / cell));
-                    gc = (std::max)(0, (std::min)(Grid::kCols - hw, gc));
+                    gc = (std::max)(0, (std::min)(Grid::BaseCols() - hw, gc));
                     gr = (std::max)(0, (std::min)(rows - hh, gr));
                     int blockers = 0;
                     for (const auto& pc : cells) {
@@ -5648,7 +5656,7 @@ namespace
         const auto& sk = Theme::S();
         const float S    = Theme::Scale();
         const float cell = Grid::CellPx();
-        const int   cols = Grid::kCols;
+        const int   cols = Grid::BaseCols();
         // the measurement belongs to ONE skin at ONE scale: both change the
         // title bar's height and the padding, so a stale figure would size
         // the window for the skin the player just left
@@ -5683,7 +5691,7 @@ namespace
 
         auto* wm = WinManager::GetSingleton();
         // width = grid + scrollbar gutter + symmetric frame insets (no lopsided
-        // right margin). The child below is gridW + sbW so the 10 columns stay
+        // right margin). The child below is gridW + sbW so every column stays
         // full and the scrollbar sits in its own gutter, not over the tiles.
         // +30: bottom strip — barter = merchant GOLD bar (mirrors the player
         // window's), loot = shortcut hint line (design pass C/G)
@@ -5875,11 +5883,16 @@ namespace
                 return true;   // room inside a stack already on the shelf
             }
         }
-        // ...otherwise it needs a free rect inside the 10 x kCompanionRows
-        // pack, measured against the board the player is looking at.
+        // ...otherwise it needs a free rect inside the BaseCols() x
+        // kCompanionRows pack, measured against the board the player is
+        // looking at. ★The follower's cap therefore moves with the player's
+        // GRID SIZE: the pack is as wide as every other board on screen, so a
+        // narrower setting makes followers carry less. That follows from the
+        // partner board sharing the column count and is the honest reading of
+        // "the same grid everywhere" -- kCompanionRows still fixes the depth.
         const auto d = Grid::ResolveDef(a_obj);
         const int w = (std::max)(1, d.w), h = (std::max)(1, d.h);
-        const int cols = Grid::kCols;
+        const int cols = Grid::BaseCols();
         std::vector<char> occ(static_cast<std::size_t>(cols) * kCompanionRows, 0);
         for (const auto& c : g_lastCells) {
             if (c.col < 0) continue;
@@ -5938,7 +5951,7 @@ namespace
         const float cell = Grid::CellPx();
         int c = static_cast<int>(std::lround((m.x - g_partnerBase.x - offX) / cell));
         int r = static_cast<int>(std::lround((m.y - g_partnerBase.y - offY) / cell));
-        c = (std::max)(0, (std::min)(Grid::kCols - hw, c));
+        c = (std::max)(0, (std::min)(Grid::BaseCols() - hw, c));
         r = (std::max)(0, (std::min)(g_partnerRows - hh, r));
         d.onCell = true;
         d.col = c;
@@ -5965,7 +5978,7 @@ namespace
             }
         }
         if (blockers == 0) {
-            d.freeSpot = hw <= Grid::kCols && hh <= g_partnerRows;
+            d.freeSpot = hw <= Grid::BaseCols() && hh <= g_partnerRows;
         } else if (blockers > 1) {
             d.occ = nullptr;   // 2+ blockers: neither free nor a swap
         }

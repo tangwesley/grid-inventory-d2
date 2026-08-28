@@ -345,8 +345,9 @@ namespace FUI::Grid
 
     // Capacity system: true when a_obj could be added right now — it stacks
     // onto an existing tile, or its footprint first-fits into the HARD
-    // 10 x 14 main board after every current occupant placed (bag-assigned
-    // items consume their bag, not main). Headless: no UI, no persistence.
+    // BaseCols() x BaseRows() main board after every current occupant placed
+    // (bag-assigned items consume their bag, not main).
+    // Headless: no UI, no persistence.
     [[nodiscard]] bool CanFitNewItem(RE::TESBoundObject* a_obj);
 
     // Phase 7: how many units (<= a_want) the inventory can accept right now —
@@ -953,8 +954,62 @@ namespace FUI::Grid
     void NoteFormSeen(RE::TESBoundObject* a_obj);
 
     // Grid pixel metrics (main window sizes itself around these).
-    inline constexpr int   kCols    = 10;
-    inline constexpr int   kMinRows = 14;
+    // ★★THE MAIN BOARD'S SIZE IS A SETTING ("!basegrid = cols, rows"), not a
+    // constant. It was kCols/kMinRows = 10x14, and every BAG on the board has
+    // always been an arbitrary bw x bh — the main view was the one grid whose
+    // dimensions were compiled in, for no reason beyond it having been written
+    // first. A survival setup wants a small board and a hoarder wants a large
+    // one, and both were a rebuild away.
+    // ★Nothing has to be saved or migrated for this. PlaceItems' pass 1 already
+    // validates a remembered spot against the CURRENT board (col + w <= cols,
+    // rows bounded by limRows), so a tile whose seat no longer exists falls
+    // through to first-fit. Shrinking the board reflows it; it does not strand
+    // anything, and the cosave record needs no version bump.
+    inline constexpr int kDefCols = 9;
+    inline constexpr int kDefRows = 4;
+    // ★THE COLUMN FLOOR IS NOT COSMETIC. MaskOf trims a footprint's width to
+    // the column count, so a board narrower than an item silently CROPS it —
+    // a greatsword that parses, saves and draws while being a different item
+    // than the one authored. 4 covers every real footprint; the 16 ItemDef.h
+    // allows for modded oddities simply overflows instead, which is honest.
+    inline constexpr int kMinCols = 4;
+    inline constexpr int kMaxCols = 24;
+    inline constexpr int kMinBoardRows = 1;
+    // ★The row ceiling is the SCREEN, not a preference: board height is
+    // rows * CellPx(), and past the display the window's foot — the GOLD bar,
+    // the trash button — walks off the bottom edge where no one can reach it.
+    // This is the absolute cap; ClampBaseRowsToDisplay tightens it to what the
+    // real backbuffer can show.
+    inline constexpr int kMaxBoardRows = 40;
+
+    // ★★TWO ROW COUNTS, and the difference is load-bearing. BaseRows() is the
+    // board actually drawn and placed into; BaseRowsSetting() is what the
+    // player asked for. They differ only when the display cannot show the
+    // whole board (see ClampBaseRowsToDisplay).
+    // ★★★SAVE MUST WRITE THE SETTING, NEVER THE EFFECTIVE VALUE. Save()
+    // truncates and rewrites the ini, so persisting the trimmed number would
+    // make a temporary "your screen is too short" into a permanent edit of the
+    // player's file -- their 30-row board silently becomes a 20-row board the
+    // first time they touch any setting, and lowering SCALE afterwards would
+    // never give the rows back, because the request they would be restored
+    // from is gone.
+    [[nodiscard]] int BaseCols();
+    [[nodiscard]] int BaseRows();          // effective — draw, place, capacity
+    [[nodiscard]] int BaseRowsSetting();   // requested — persistence only
+    // Clamped to [kMinCols, kMaxCols] x [kMinBoardRows, kMaxBoardRows]. Returns
+    // true when either dimension actually moved, so a live caller knows whether
+    // it owes a rebuild.
+    bool SetBaseSize(int a_cols, int a_rows);
+    // ★Called once the backbuffer height is known. The ini is read at
+    // kDataLoaded, long before D3D exists, so the setting cannot be checked
+    // against the screen where it is parsed.
+    // Recomputes the effective rows from the REQUEST every call rather than
+    // shrinking what is already there: the cell size moves with the SCALE
+    // slider, so the same request fits a different number of rows at different
+    // scales, and a player who lowers SCALE to get their board back must
+    // actually get it back. Returns true when the effective rows moved.
+    bool ClampBaseRowsToDisplay(float a_displayH, float a_chromeH);
+
     inline constexpr float kCell    = 48.0f;   // base cell at UI scale 1.0
 
     // H′: every layout metric goes through the global UI scale.

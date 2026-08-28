@@ -64,7 +64,10 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
 ## Features
 
 ### The grid
-- 10×14 = **140 squares, fixed**. Real footprints per item (1×1 rings to 2×4
+- **9×4 = 36 squares by default, and the size is yours to set** — GRID SIZE in
+  SETTINGS, or `!basegrid = cols, rows` in `GridInventory_ui.ini`. Columns
+  4–24, rows 1–40; the container and merchant boards follow your column count
+  so items drag straight across. Real footprints per item (1×1 rings to 2×4
   greatbows), free shapes (L-pieces) supported. **Rotate 90° with `A`/`D` while
   carrying.** No auto-sort and no search — organising it yourself is the point.
 - **Pick-up-and-place**: left-click to lift, left-click the target square to set
@@ -73,9 +76,11 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
   the top-right, markers (favourite ◆ / quest ▲ / stolen ●), **newly acquired
   squares lit a shade brighter**, Shift comparison tooltip with an
   *Equipped* card.
-- **Capacity**: exceeding 140 squares shows an overflow row and slows movement.
+- **Capacity**: exceeding the board shows an overflow row and slows movement.
   A full grid blocks pickups (quest/script-granted items are deliberately never
-  blocked — they come in and push you into overflow instead).
+  blocked — they come in and push you into overflow instead). Shrinking the
+  board never strands anything: whatever no longer fits its old square is
+  re-placed, and the remainder falls into overflow.
 - **`C` inspect in 3D**: rotate and zoom the actual model (Dragon Claw glyphs etc.).
   Works on your grid, the equipment panel and container/merchant cells alike.
   **Opens at its smallest zoom.**
@@ -175,7 +180,8 @@ everything the game measures still comes from what you are really wearing.
   wearing the same thing twice).
 
 ### Settings (SETTINGS in the title bar)
-- Scale, 19 skins (two of them brush-and-ink), languages (live switch), icon
+- Scale, text size, **grid size**, 19 skins (two of them brush-and-ink),
+  languages (live switch), icon
   brightness/style, item shadow (distance/blur/opacity), capture light, icon
   cache reset, precache all, **quick wheel on/off**, trade options (unlimited
   merchant gold / merchant buys anything).

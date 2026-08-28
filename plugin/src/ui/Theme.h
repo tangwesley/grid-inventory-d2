@@ -177,10 +177,13 @@ namespace FUI::Theme
 
     // ★★THE scale — what the SCALE slider moves, persisted as "!scale".
     // Measured on the main window: the item grid and the equipment doll are
-    // both built out of cell-sized blocks (10x14 cells; every slot is 2x2 of
-    // them, weapons 2x4), and together they are 97% of the window's width.
-    // Padding is 4%. So "make the window smaller" has exactly one lever and
-    // this is it — which is why it inherited the name.
+    // both built out of cell-sized blocks (the board is BaseCols() x BaseRows()
+    // of them; every slot is 2x2, weapons 2x4), and together they are most of
+    // the window's width — how much depends on how wide the board is set.
+    // So "make the window smaller" has exactly one lever and this is it —
+    // which is why it inherited the name. ★GRID SIZE is the other half of the
+    // same question and deliberately not this control: that one changes how
+    // MANY cells there are, this one changes how big they are drawn.
     //
     // ★★TWO NUMBERS, deliberately. The board's shipped size was 0.90 of the
     // cell constants, and a slider that reads 0.90 at the default invites the

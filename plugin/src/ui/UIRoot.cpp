@@ -1347,6 +1347,85 @@ namespace FUI::UIRoot
             }
         }
 
+        // GRID SIZE — the main board, in cells. Every bag has always been an
+        // arbitrary bw x bh; this is the main view finally saying its own.
+        //
+        // ★A HELD VALUE, like TEXT SIZE and for a sharper reason. Applying
+        // mid-drag would re-place the whole board and resize the window on
+        // every frame of the drag -- and the window resizing under the cursor
+        // is what made the SCALE row ghost (see RowCellScale). Worse here: the
+        // settings window is anchored to the main window's right edge, so the
+        // slider itself would walk away from the hand holding it.
+        //
+        // ★The two numbers share one pair of flags. Testing
+        // IsItemDeactivatedAfterEdit after the row would only ever see the
+        // second slider, so releasing COLUMNS would never commit.
+        void RowBoardSize(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::BoardSizeLabel);
+            // The label carries the warning: both sliders spend their own
+            // hover on the right-click hint, and the cost of shrinking the
+            // board (items fall into overflow = over-encumbered) is the one
+            // thing the row's name cannot say.
+            if (ImGui::IsItemHovered()) NoteHoverHint(Lang::T(Lang::Str::BoardSizeHint));
+            RightAlign(a_c.trackW);
+
+            static float s_cols = 0.0f, s_rows = 0.0f;
+            static bool  s_held = false;
+            if (!s_held) {
+                // ★The REQUEST, not BaseRows(): a board trimmed to fit a short
+                // screen must still show what the player asked for, or the row
+                // would ratchet their setting down every time they touched it.
+                s_cols = static_cast<float>(Grid::BaseCols());
+                s_rows = static_cast<float>(Grid::BaseRowsSetting());
+            }
+
+            const float half = (a_c.trackW - 6.0f * a_c.S) * 0.5f;
+            const auto axis = [&](const char* a_id, float* a_v, int a_lo, int a_hi,
+                                  int a_def, const char* a_fmt) {
+                if (SettingSlider(a_id, a_v, static_cast<float>(a_lo),
+                                  static_cast<float>(a_hi), half,
+                                  static_cast<float>(a_def), a_fmt, 1.0f)) {
+                    s_held = true;
+                }
+            };
+            // Axis named inside the value ("W 9"), the way CAPTURE LIGHT does
+            // it — two labelled rows for two numbers always read together
+            // would push the section past the panel height for nothing.
+            axis("##boardcols", &s_cols, Grid::kMinCols, Grid::kMaxCols,
+                 Grid::kDefCols, "W %.0f");
+            ImGui::SameLine(0.0f, 6.0f * a_c.S);
+            axis("##boardrows", &s_rows, Grid::kMinBoardRows, Grid::kMaxBoardRows,
+                 Grid::kDefRows, "H %.0f");
+
+            // ★★ROUNDED, NOT TRUNCATED, and it has to happen HERE rather than
+            // at the commit. The track is continuous (a_step only sizes the
+            // arrows), so a drag leaves 8.6 in the float -- which "%.0f" shows
+            // as 9 and a static_cast<int> would commit as 8. The player would
+            // release on a 9 and get an 8, with nothing on screen to explain
+            // it. Rounding the held value instead makes the number shown and
+            // the number committed the same number, and snaps the track to
+            // whole cells on the way, which is all this setting has.
+            s_cols = std::round(s_cols);
+            s_rows = std::round(s_rows);
+
+            // ★"Nothing is held" asked of ImGui, not of the slider: the
+            // right-click default never activates a slider at all and the step
+            // arrows are their own items. One condition, all four ways in.
+            if (s_held && !ImGui::IsAnyItemActive()) {
+                s_held = false;
+                if (Grid::SetBaseSize(static_cast<int>(s_cols),
+                                      static_cast<int>(s_rows))) {
+                    // The board changed shape: everything seated on it has to
+                    // be re-placed, and the capacity figure the pickup gate
+                    // reads has to be recomputed before the next question.
+                    Grid::MarkCapacityDirty();
+                    Grid::RequestRebuild();
+                    WinManager::GetSingleton()->Save();
+                }
+            }
+        }
+
         // SKIN — ★GI73: grouped by CHROME FAMILY, two colour variants each.
         //
         // Six flat colour chips could not say what any of them were: 3/4 are
@@ -2110,7 +2189,13 @@ namespace FUI::UIRoot
         // ★TEXT SIZE sits right under SCALE: both answer "this is too small",
         // and putting them together is what lets a player try one and then the
         // other without hunting.
+        // ★GRID SIZE follows the two scale rows. All three answer "the board
+        // is the wrong size", and they answer it differently — the first two
+        // change how big the cells are drawn, this one changes how many there
+        // are. A player who tries SCALE and finds it was capacity they wanted
+        // should find this on the next line, not in another section.
         constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowFontScale,
+                                                   RowBoardSize,
                                                    RowLanguage,
                                                    RowWheelEnable,
                                                    RowPreset, RowPresetExport };
@@ -2173,6 +2258,7 @@ namespace FUI::UIRoot
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
                 lw(Lang::Str::ScaleLabel),
                 lw(Lang::Str::FontScaleLabel),
+                lw(Lang::Str::BoardSizeLabel),
                 lw(Lang::Str::SkinLabel),
                 lw(Lang::Str::LanguageLabel),
                 lw(Lang::Str::PresetLabel),
@@ -3255,7 +3341,7 @@ namespace FUI::UIRoot
             const float leftW  = compact ? 0.0f : Equip::PanelW();
             // exact grid width — the legacy +20 scrollbar slack made the
             // right margin visibly wider than the left (v10.7 feedback)
-            const float gridW  = Grid::kCols * Grid::CellPx();
+            const float gridW  = Grid::BaseCols() * Grid::CellPx();
             // grid column height = ITEMS label row + the grid itself + the
             // 30px bottom strip (GOLD bar / trash button). The label row was
             // missing here, so the strip's baseline sat ON the last grid row
@@ -3272,7 +3358,25 @@ namespace FUI::UIRoot
                     itemsLabelH = slotsTop;
                 }
             }
-            const float gridBodyH = itemsLabelH + Grid::kMinRows * Grid::CellPx() + 30.0f * S;
+            // ★The board is a setting now, and a setting can ask for more rows
+            // than the screen has. Everything below sizes the window from
+            // BaseRows(), and nothing in ImGui or WinManager will stop that
+            // window running off the bottom of the display — taking the GOLD
+            // bar and the trash button with it, where no click can reach them.
+            // So the screen gets a say, HERE: the ini is parsed at kDataLoaded,
+            // where no backbuffer exists yet, and this is the first point that
+            // knows both the display height and the cell size the SCALE slider
+            // is currently at. Cheap and idempotent — it recomputes from the
+            // request and returns false unless the answer actually moved.
+            {
+                const float chromeH = barH + itemsLabelH + 30.0f * S + 8.0f * S +
+                                      padB + 2.0f * insY;
+                if (Grid::ClampBaseRowsToDisplay(io.DisplaySize.y, chromeH)) {
+                    Grid::MarkCapacityDirty();
+                    Grid::RequestRebuild();   // the board changed shape: reflow
+                }
+            }
+            const float gridBodyH = itemsLabelH + Grid::BaseRows() * Grid::CellPx() + 30.0f * S;
             // left column must fit doll + stats panel + GOLD bar (S1); compact
             // reserves the GOLD-bar strip under the grid instead
             // ★The doll-to-stats gap is what's LEFT OVER, not a fixed 44.

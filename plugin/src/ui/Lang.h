@@ -35,6 +35,8 @@ namespace FUI::Lang
         X(Settings, "SETTINGS")                                                                             \
         X(ScaleLabel, "SCALE")                                                                        \
         X(FontScaleLabel, "TEXT SIZE")   /* player's font multiplier over the automatic scale */      \
+        X(BoardSizeLabel, "GRID SIZE")   /* main board, in cells: columns x rows */                   \
+        X(BoardSizeHint, "How many cells the inventory holds. Items that no longer fit move to the overflow rows below the board, which counts as over-encumbered.") \
         X(SkinLabel, "SKIN")                                                                                \
         X(LanguageLabel, "LANGUAGE")                                                                        \
         X(Gold, "GOLD")                                                                                     \
