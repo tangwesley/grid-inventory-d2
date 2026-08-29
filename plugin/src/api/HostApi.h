@@ -82,4 +82,29 @@ namespace FUI::HostApi
     // the tier is out of range or unpainted. Reads a cached palette -- the
     // tinter is NOT called here.
     [[nodiscard]] std::uint32_t TintColour(std::uint8_t a_tier);
+
+    // ---- tooltip annotation ------------------------------------------------
+    //
+    // A THIRD extension slot, independent of the other two. See the Annotator
+    // note in GridInventoryAPI.h for why the Provider's own GetTooltipLines
+    // cannot serve this: it is keyed by ItemKey, whose uid is 0 for exactly the
+    // units an extension has anything to say about.
+
+    // True once an annotator has passed the handshake. Checked before the call
+    // below so a tooltip costs nothing for the players who have no such
+    // extension, which is most of them.
+    [[nodiscard]] bool HasAnnotator();
+
+    // Extra tooltip lines for ONE unit. Returns how many were written into
+    // a_out, never more than a_capacity.
+    //
+    // a_xl is the sub-stack's own list, or nullptr when the unit has none --
+    // the same value TintTier is given, and for the same reason: it is the only
+    // handle that names one unit rather than every copy of the base form.
+    //
+    // Called once while a tooltip is built, NOT per frame.
+    [[nodiscard]] std::uint32_t AnnotationLines(std::uint32_t a_base,
+                                                const RE::ExtraDataList* a_xl,
+                                                GridInvAPI::TooltipLine* a_out,
+                                                std::uint32_t a_capacity);
 }

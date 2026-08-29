@@ -279,9 +279,13 @@ namespace FUI::UIRoot
                 // (The mouse is deliberately NOT blocked — the console does not
                 // use it, and freezing a window the player can still see is
                 // worse than letting them point at it.)
+                // ★IsBoardLive, not IsMenuOpen: while suppressed the window
+                // over us owns the keyboard, and this road bypasses Scaleform
+                // entirely -- leaving it open would feed every keystroke into
+                // our ImGui behind somebody else's editor.
                 if (auto* ui = RE::UI::GetSingleton();
-                    ui && ui->IsMenuOpen("GridInventoryMenu"sv) &&
-                    !ui->IsMenuOpen(RE::Console::MENU_NAME) &&
+                    IsBoardLive() &&
+                    ui && !ui->IsMenuOpen(RE::Console::MENU_NAME) &&
                     ImGui::GetCurrentContext()) {
                     if (m == WM_CHAR) {
                         g_wmCharSeen.fetch_add(1, std::memory_order_relaxed);
@@ -692,7 +696,12 @@ namespace FUI::UIRoot
         float         g_engineLastX = 0.0f;
         float         g_engineLastY = 0.0f;
         int           g_engineStillFrames = 0;
-        bool              g_bookWasOpen = false;   // Book Menu edge (see Render)
+        bool              g_hiddenWas = false;   // off-screen edge: book OR suppressed
+        // ★suppression (UIRoot.h): open, but neither drawing nor listening.
+        // atomic because the menu message arrives on the game thread while
+        // Render reads it on the render thread.
+        std::atomic<bool> g_suppressed{ false };
+        int               g_suppressTicks = 0;   // safety-net age, in Ticks
 
         // Called from the input sink (game thread, but not the render pass) —
         // only flags are touched here; the cursor is seeded during the frame.
@@ -1342,6 +1351,85 @@ namespace FUI::UIRoot
                 // ★The write rides along: true means the value really moved,
                 // so this cannot put the ini through a save per frame.
                 if (Theme::SetFontScale(s_want)) {
+                    WinManager::GetSingleton()->Save();
+                }
+            }
+        }
+
+        // GRID SIZE — the main board, in cells. Every bag has always been an
+        // arbitrary bw x bh; this is the main view finally saying its own.
+        //
+        // ★A HELD VALUE, like TEXT SIZE and for a sharper reason. Applying
+        // mid-drag would re-place the whole board and resize the window on
+        // every frame of the drag -- and the window resizing under the cursor
+        // is what made the SCALE row ghost (see RowCellScale). Worse here: the
+        // settings window is anchored to the main window's right edge, so the
+        // slider itself would walk away from the hand holding it.
+        //
+        // ★The two numbers share one pair of flags. Testing
+        // IsItemDeactivatedAfterEdit after the row would only ever see the
+        // second slider, so releasing COLUMNS would never commit.
+        void RowBoardSize(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::BoardSizeLabel);
+            // The label carries the warning: both sliders spend their own
+            // hover on the right-click hint, and the cost of shrinking the
+            // board (items fall into overflow = over-encumbered) is the one
+            // thing the row's name cannot say.
+            if (ImGui::IsItemHovered()) NoteHoverHint(Lang::T(Lang::Str::BoardSizeHint));
+            RightAlign(a_c.trackW);
+
+            static float s_cols = 0.0f, s_rows = 0.0f;
+            static bool  s_held = false;
+            if (!s_held) {
+                // ★The REQUEST, not BaseRows(): a board trimmed to fit a short
+                // screen must still show what the player asked for, or the row
+                // would ratchet their setting down every time they touched it.
+                s_cols = static_cast<float>(Grid::BaseCols());
+                s_rows = static_cast<float>(Grid::BaseRowsSetting());
+            }
+
+            const float half = (a_c.trackW - 6.0f * a_c.S) * 0.5f;
+            const auto axis = [&](const char* a_id, float* a_v, int a_lo, int a_hi,
+                                  int a_def, const char* a_fmt) {
+                if (SettingSlider(a_id, a_v, static_cast<float>(a_lo),
+                                  static_cast<float>(a_hi), half,
+                                  static_cast<float>(a_def), a_fmt, 1.0f)) {
+                    s_held = true;
+                }
+            };
+            // Axis named inside the value ("W 9"), the way CAPTURE LIGHT does
+            // it — two labelled rows for two numbers always read together
+            // would push the section past the panel height for nothing.
+            axis("##boardcols", &s_cols, Grid::kMinCols, Grid::kMaxCols,
+                 Grid::kDefCols, "W %.0f");
+            ImGui::SameLine(0.0f, 6.0f * a_c.S);
+            axis("##boardrows", &s_rows, Grid::kMinBoardRows, Grid::kMaxBoardRows,
+                 Grid::kDefRows, "H %.0f");
+
+            // ★★ROUNDED, NOT TRUNCATED, and it has to happen HERE rather than
+            // at the commit. The track is continuous (a_step only sizes the
+            // arrows), so a drag leaves 8.6 in the float -- which "%.0f" shows
+            // as 9 and a static_cast<int> would commit as 8. The player would
+            // release on a 9 and get an 8, with nothing on screen to explain
+            // it. Rounding the held value instead makes the number shown and
+            // the number committed the same number, and snaps the track to
+            // whole cells on the way, which is all this setting has.
+            s_cols = std::round(s_cols);
+            s_rows = std::round(s_rows);
+
+            // ★"Nothing is held" asked of ImGui, not of the slider: the
+            // right-click default never activates a slider at all and the step
+            // arrows are their own items. One condition, all four ways in.
+            if (s_held && !ImGui::IsAnyItemActive()) {
+                s_held = false;
+                if (Grid::SetBaseSize(static_cast<int>(s_cols),
+                                      static_cast<int>(s_rows))) {
+                    // The board changed shape: everything seated on it has to
+                    // be re-placed, and the capacity figure the pickup gate
+                    // reads has to be recomputed before the next question.
+                    Grid::MarkCapacityDirty();
+                    Grid::RequestRebuild();
                     WinManager::GetSingleton()->Save();
                 }
             }
@@ -2110,7 +2198,13 @@ namespace FUI::UIRoot
         // ★TEXT SIZE sits right under SCALE: both answer "this is too small",
         // and putting them together is what lets a player try one and then the
         // other without hunting.
+        // ★GRID SIZE follows the two scale rows. All three answer "the board
+        // is the wrong size", and they answer it differently — the first two
+        // change how big the cells are drawn, this one changes how many there
+        // are. A player who tries SCALE and finds it was capacity they wanted
+        // should find this on the next line, not in another section.
         constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowFontScale,
+                                                   RowBoardSize,
                                                    RowLanguage,
                                                    RowWheelEnable,
                                                    RowPreset, RowPresetExport };
@@ -2173,6 +2267,7 @@ namespace FUI::UIRoot
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
                 lw(Lang::Str::ScaleLabel),
                 lw(Lang::Str::FontScaleLabel),
+                lw(Lang::Str::BoardSizeLabel),
                 lw(Lang::Str::SkinLabel),
                 lw(Lang::Str::LanguageLabel),
                 lw(Lang::Str::PresetLabel),
@@ -2234,12 +2329,17 @@ namespace FUI::UIRoot
             static float s_wantH = 0.0f;   // desired full window height
             const ImVec2 disp = ImGui::GetIO().DisplaySize;
             const float maxH = disp.y - 80.0f * S;
+            // ★see Editor.cpp: no bar is drawn, so this is the report's
+            //  verdict rather than a width allowance
             const bool clamped = s_wantH > 0.0f && s_wantH > maxH;
+            if (Grid::FitTrace() && clamped) {
+                SKSE::log::info("[EDITFIT] settings wants {:.0f} > screen {:.0f}"
+                                " -- body wheels (no bar)", s_wantH, maxH);
+            }
             const float winH = s_wantH > 0.0f ? (std::min)(s_wantH, maxH)
                                               : 440.0f * S + 2.0f * insY;
             const ImVec2 size(
-                12.0f + insX + labelW + ctrlW + 12.0f + insX +
-                    (clamped ? ImGui::GetStyle().ScrollbarSize : 0.0f),
+                12.0f + insX + labelW + ctrlW + 12.0f + insX,   // no bar to allow for
                 winH);
             ImVec2 defPos(200.0f, 200.0f);
             if (auto* mw = wm->Find("main")) {
@@ -2265,8 +2365,11 @@ namespace FUI::UIRoot
 
             const SettingsCtx ctx{ labelW, trackW, S };
             const float childTop = ImGui::GetCursorPosY();
+            // ★No bar here either -- see the note on the editor's body. The
+            // wheel still scrolls; only the bar is gone, and with it the width
+            // it used to take out of the rows.
             ImGui::BeginChild("##settings_body", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,
-                ImGuiWindowFlags_NoBackground);
+                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
             ImGui::Dummy(ImVec2(0.0f, 4.0f * S));
             for (size_t s = 0; s < std::size(kSettingsSections); ++s) {
                 const auto& sec = kSettingsSections[s];
@@ -2279,8 +2382,17 @@ namespace FUI::UIRoot
             }
             const float bodyH = ImGui::GetCursorPosY() + 4.0f * S;   // bottom margin
             ImGui::EndChild();
+            // ★See the [EDITFIT] note in Editor.cpp: a non-bordered child
+            // gets NO window padding, so this window cannot overflow on its
+            // own either -- a scrollbar here is the maxH clamp, meaning the
+            // content is taller than the screen allows.
             s_wantH = childTop + bodyH + 8.0f + insY;   // + bottom window padding
-
+            if (Grid::FitTrace()) {
+                SKSE::log::info("[EDITFIT] settings content {:.0f} want {:.0f} "
+                                "maxH {:.0f} scale {:.2f} disp {:.0f} inset {:.0f}{}",
+                                childTop + bodyH, s_wantH, maxH, S, disp.y, insY,
+                                s_wantH > maxH ? "  ★CLAMPED" : "");
+            }
             ImGui::End();
             ImGui::PopStyleVar();   // WindowPadding (torn-frame inset)
         }
@@ -3255,7 +3367,7 @@ namespace FUI::UIRoot
             const float leftW  = compact ? 0.0f : Equip::PanelW();
             // exact grid width — the legacy +20 scrollbar slack made the
             // right margin visibly wider than the left (v10.7 feedback)
-            const float gridW  = Grid::kCols * Grid::CellPx();
+            const float gridW  = Grid::BaseCols() * Grid::CellPx();
             // grid column height = ITEMS label row + the grid itself + the
             // 30px bottom strip (GOLD bar / trash button). The label row was
             // missing here, so the strip's baseline sat ON the last grid row
@@ -3272,7 +3384,25 @@ namespace FUI::UIRoot
                     itemsLabelH = slotsTop;
                 }
             }
-            const float gridBodyH = itemsLabelH + Grid::kMinRows * Grid::CellPx() + 30.0f * S;
+            // ★The board is a setting now, and a setting can ask for more rows
+            // than the screen has. Everything below sizes the window from
+            // BaseRows(), and nothing in ImGui or WinManager will stop that
+            // window running off the bottom of the display — taking the GOLD
+            // bar and the trash button with it, where no click can reach them.
+            // So the screen gets a say, HERE: the ini is parsed at kDataLoaded,
+            // where no backbuffer exists yet, and this is the first point that
+            // knows both the display height and the cell size the SCALE slider
+            // is currently at. Cheap and idempotent — it recomputes from the
+            // request and returns false unless the answer actually moved.
+            {
+                const float chromeH = barH + itemsLabelH + 30.0f * S + 8.0f * S +
+                                      padB + 2.0f * insY;
+                if (Grid::ClampBaseRowsToDisplay(io.DisplaySize.y, chromeH)) {
+                    Grid::MarkCapacityDirty();
+                    Grid::RequestRebuild();   // the board changed shape: reflow
+                }
+            }
+            const float gridBodyH = itemsLabelH + Grid::BaseRows() * Grid::CellPx() + 30.0f * S;
             // left column must fit doll + stats panel + GOLD bar (S1); compact
             // reserves the GOLD-bar strip under the grid instead
             // ★The doll-to-stats gap is what's LEFT OVER, not a fixed 44.
@@ -3673,8 +3803,50 @@ namespace FUI::UIRoot
     void Close()
     {
         if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
-            mq->AddMessage(GridInventoryMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+            // ★kForceHide, not kHide: kHide is the courtesy another mod sends
+            // to put a window over us, and it suppresses now instead of
+            // closing (see the contract in UIRoot.h). Our own close has to say
+            // so unambiguously, and kForceHide is the engine's own word for it.
+            mq->AddMessage(GridInventoryMenu::MENU_NAME,
+                           RE::UI_MESSAGE_TYPE::kForceHide, nullptr);
         }
+    }
+
+    void Suppress(bool a_on, const char* a_why)
+    {
+        if (g_suppressed.exchange(a_on) == a_on) return;
+        if (a_on) {
+            g_suppressTicks = 0;
+            // ★Step 0 of the plan, done in the field instead of guessed at:
+            // whoever suppressed us has a menu open, and the safety net has to
+            // tell it from the ones that are always there. Naming them here
+            // means a report carries the list rather than a theory about it.
+            std::string open;
+            if (auto* ui = RE::UI::GetSingleton()) {
+                for (const auto& [name, entry] : ui->menuMap) {
+                    // ★menuMap is every REGISTERED menu, not the open ones --
+                    // the first version of this line printed all forty-five
+                    // of them and said nothing at all.
+                    if (!ui->IsMenuOpen(name)) continue;
+                    if (name == GridInventoryMenu::MENU_NAME) continue;
+                    open += ' ';
+                    open += name.c_str();
+                }
+            }
+            SKSE::log::info("[SUPPRESS] on ({}) -- open menus:{}", a_why,
+                            open.empty() ? " (none)" : open.c_str());
+        } else {
+            SKSE::log::info("[SUPPRESS] off ({})", a_why);
+        }
+    }
+
+    bool IsSuppressed() { return g_suppressed.load(std::memory_order_relaxed); }
+
+    bool IsBoardLive()
+    {
+        if (IsSuppressed()) return false;
+        auto* ui = RE::UI::GetSingleton();
+        return ui && ui->IsMenuOpen(GridInventoryMenu::MENU_NAME);
     }
 
     void OpenInspect(RE::TESBoundObject* a_obj, const std::string& a_key)
@@ -4307,9 +4479,14 @@ namespace FUI::UIRoot
         // The book the player just right-clicked is a real Scaleform menu
         // UNDER our overlay. Skip the whole frame (not just the windows) so
         // nothing of ours is drawn and no ImGui state is touched meanwhile.
-        if (IsBookOpen()) {
-            if (!g_bookWasOpen) {
-                g_bookWasOpen = true;
+        // ★★The book was the first thing that ever needed us off the screen
+        // while staying open, and everything it does here is what SUPPRESSION
+        // needs too -- so the book is now one reason among others rather than
+        // a case of its own. (UIRoot.h has the message contract; the tutorial
+        // popup and the engine MessageBox arrive through it.)
+        if (IsBookOpen() || IsSuppressed()) {
+            if (!g_hiddenWas) {
+                g_hiddenWas = true;
                 // ★The click that opened the book never gets its release here
                 // (our input relay stands down too), so queue one. Without it
                 // ImGui resumes with the button still down and the first
@@ -4333,9 +4510,9 @@ namespace FUI::UIRoot
             // regulars know it from the world's pages.
             return;
         }
-        if (g_bookWasOpen) {
+        if (g_hiddenWas) {
             // ★back to us: MouseHandler takes the cursor again from here on
-            g_bookWasOpen = false;
+            g_hiddenWas = false;
             // ★(1.5.x) the page just closed: if E flagged a shelf take while
             // it was up, this is where the transfer starts (render thread,
             // like every other request)
@@ -4527,6 +4704,61 @@ namespace FUI::UIRoot
         // -- refreshed HERE because this tick runs on the main thread in both
         // worlds (the update hook unpaused, AdvanceMovie paused).
         DeltaWatch::RefreshMenuSnapshot();
+        // ★★★THE SAFETY NET, and suppression is not safe without it.
+        //
+        // Whoever suppressed us is expected to send kShow when their window
+        // closes. If they forget -- or if the engine ever means "close" by a
+        // kHide we answered with a hide -- we would sit here open, invisible
+        // and PAUSING THE GAME. That is a soft lock, so it cannot depend on
+        // anyone else's good manners.
+        //
+        // The test is simply whether anything is still up that could have
+        // wanted us out of the way. Whoever suppressed us had a window; if no
+        // window but the permanent furniture remains, nobody is there any
+        // more and we come back. The grace lets a mod close one window and
+        // open the next without us flashing in between.
+        if (IsSuppressed()) {
+            // ★★A NAME LIST WOULD HAVE BEEN WRONG, and the first measurement
+            // said so: a real session had BTPS, TrueHUD and SegmentedHUD open
+            // the whole time. Any list I could write would go stale the next
+            // time somebody installs a HUD mod I have never heard of, and a
+            // stale entry here disables the net silently.
+            //
+            // So ask a PROPERTY instead. A window that wanted us out of the
+            // way is a window the player is interacting with -- it takes the
+            // cursor, pauses the game, or is modal. A HUD overlay does none of
+            // those, whoever wrote it.
+            static constexpr std::string_view kOurs[] = {
+                "GridInventoryMenu", "GridWheelerMenu", "Cursor Menu",
+            };
+            bool blocker = false;
+            if (auto* ui = RE::UI::GetSingleton()) {
+                for (const auto& [name, entry] : ui->menuMap) {
+                    if (!ui->IsMenuOpen(name)) continue;
+                    if (std::find(std::begin(kOurs), std::end(kOurs),
+                                  std::string_view(name.c_str())) !=
+                        std::end(kOurs)) {
+                        continue;
+                    }
+                    const auto m = ui->GetMenu(name);
+                    if (!m) continue;
+                    if (m->UsesCursor() || m->PausesGame() || m->Modal()) {
+                        blocker = true;
+                        break;
+                    }
+                }
+            }
+            // ★...and a hard backstop regardless, because a window we cannot
+            // see in the menu map (a mod drawing without registering one) must
+            // not be able to strand us either.
+            constexpr int kGrace   = 20;      // ~0.3s: covers a window swap
+            constexpr int kBackstop = 60 * 60;   // ~1 min of being nobody's guest
+            ++g_suppressTicks;
+            if ((!blocker && g_suppressTicks > kGrace) ||
+                g_suppressTicks > kBackstop) {
+                Suppress(false, !blocker ? "nothing left above us" : "backstop");
+            }
+        }
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
         Grid::ProcessFavorites();  // GI32: favourites, same reason
         Grid::ProcessRecharge();   // (1.3.1) soul-gem recharge, same reason

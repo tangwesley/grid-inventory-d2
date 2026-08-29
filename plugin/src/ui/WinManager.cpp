@@ -327,6 +327,11 @@ namespace FUI
                 Grid::SetPoolTrace(rest == "1" || rest == "true");
                 continue;
             }
+            // EDIT / SETTINGS window fit report -- see Grid::FitTrace
+            if (key == "!fittrace") {
+                Grid::SetFitTrace(rest == "1" || rest == "true");
+                continue;
+            }
             // 1.4 / B0: engine-delta observation. Writes a lot and changes
             // nothing -- see DeltaWatch.h.
             if (key == "!delta") {
@@ -375,6 +380,26 @@ namespace FUI
             // 1.4 / B3-c: where do rebuilds come from.
             if (key == "!rbtrace") {
                 Grid::SetRebuildTrace(rest == "1" || rest == "true");
+                continue;
+            }
+            // ★The main board's size. Two values: columns, rows. Out-of-range
+            // numbers are clamped and logged by SetBaseSize rather than
+            // refused -- a hand-edited "!basegrid = 2, 200" should give the
+            // player the nearest board that works, with a line saying so, not
+            // a silent revert to the default they were trying to change.
+            // ★Read HERE, at kDataLoaded, which is before the first Rebuild
+            // and before any cosave record is applied -- so the placement pass
+            // that reads a saved layout already knows the board it is fitting
+            // into. The display clamp cannot happen yet (no backbuffer); that
+            // is UIRoot's, once D3D exists.
+            if (key == "!basegrid") {
+                int v[2] = { Grid::kDefCols, Grid::kDefRows };
+                int n = 0;
+                std::istringstream vs(rest);
+                for (std::string tok; n < 2 && std::getline(vs, tok, ','); ++n) {
+                    try { v[n] = std::stoi(tok); } catch (...) {}
+                }
+                Grid::SetBaseSize(v[0], v[1]);
                 continue;
             }
             // ★W3: carry-weight bonus -> extra cells. Three values: CW per
@@ -849,6 +874,7 @@ namespace FUI
         // a tester should not have to re-arm them every session. Written
         // only while ON, so an ordinary install never carries them.
         if (Grid::PoolTrace()) out << "!pooltrace = 1\n";
+        if (Grid::FitTrace())  out << "!fittrace = 1\n";
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
         // ★Inverted since their promotions: ON is the default, so the line is
@@ -865,6 +891,21 @@ namespace FUI
         }
         if (Equip::DrawerOpen())   out << "!accdrawer = 1\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
+        // The main board's size, in cells
+        // 기본 인벤토리 격자 크기
+        // ★★WRITTEN UNCONDITIONALLY, like !cwcells and unlike the test
+        // switches above. Save() truncates and rewrites the whole file, so a
+        // key that is only read and never written is a key the next settings
+        // change silently deletes -- the player's board would quietly revert
+        // the first time they touched the SCALE slider.
+        out << "; !basegrid = main board columns, rows (default "
+            << Grid::kDefCols << ", " << Grid::kDefRows << "; cols "
+            << Grid::kMinCols << "-" << Grid::kMaxCols << ", rows "
+            << Grid::kMinBoardRows << "-" << Grid::kMaxBoardRows << ")\n";
+        out << "; !basegrid = 기본 격자의 가로 칸, 세로 칸 (기본값 "
+            << Grid::kDefCols << ", " << Grid::kDefRows << ")\n";
+        out << "!basegrid = " << Grid::BaseCols() << ", "
+            << Grid::BaseRowsSetting() << "\n";   // the REQUEST — see Grid.h
         // Carry Weight bonus -> extra inventory cells
         // 소지 중량 보너스의 칸 환전
         out << "; !cwcells = CW per cell (0 = off), baseline (0 = auto: race base), max bonus cells\n";

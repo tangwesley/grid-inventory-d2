@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 // =============================================================================
 //  Grid Inventory -- extension ABI v1
 // =============================================================================
@@ -24,9 +24,9 @@
 //      AND the allocator, and any version drift between the two plugins would
 //      be an undiagnosable CTD.
 //
-//  THREADING -- GetOverlay / GetTooltipLines / OfferDrop are all called from the
-//  host's render thread inside an active ImGui frame. Do not block, do not
-//  allocate, and do not call a game API that can open or close a menu.
+//  THREADING -- GetOverlay / GetTooltipLines / OfferDrop / GetTier / GetLines are
+//  all called from the host's render thread inside an active ImGui frame. Do not
+//  block, allocate, or call a game API that can open or close a menu.
 //
 //  HANDSHAKE (SKSE messaging, both plugins register a listener in
 //  SKSEPluginLoad so ordering does not matter):
@@ -87,6 +87,24 @@ namespace GridInvAPI
     inline constexpr std::uint32_t kMsgRegisterProvider = 0x47495250;  // 'GIRP'
     inline constexpr std::uint32_t kMsgCostumeState     = 0x47494353;  // 'GICS'
     inline constexpr std::uint32_t kMsgRegisterTinter   = 0x47495443;  // 'GITC'
+    inline constexpr std::uint32_t kMsgRegisterAnnot    = 0x4749414E;  // 'GIAN'
+
+    // ★(1.5.x) SUPPRESS THE GRID'S OWN WINDOW while yours sits over it.
+    //
+    // Sending UI_MESSAGE_TYPE::kHide to "GridInventoryMenu" does the same
+    // thing and needs no header -- that is the standard courtesy and it is
+    // answered. This message exists for the case where the intent should be
+    // unambiguous: the engine also sends kHide, so a host that wants to know
+    // the request came from a MOD rather than from the game reads this one.
+    //
+    // The grid stays OPEN throughout: its board, the item on the cursor and
+    // every sub-window survive, and IsMenuOpen("GridInventoryMenu") keeps
+    // answering true. What stops is drawing and input.
+    //
+    // ★Release it when your window closes. The host restores itself if
+    // nothing is left above it, but that costs a fraction of a second of
+    // nobody being able to see either window.
+    inline constexpr std::uint32_t kMsgSuppressUI      = 0x47495355;  // 'GISU'
 
     // ---- limits -----------------------------------------------------------
 
@@ -275,6 +293,14 @@ namespace GridInvAPI
     //  shield and a quiver -- a costume leaves all of those alone, because they
     //  are held rather than worn. Only the pieces that actually reach the body
     //  are listed here, so every entry is something the player is now seen in.
+    struct SuppressUI
+    {
+        std::uint32_t structSize;   // = sizeof(SuppressUI)
+        std::uint32_t abiVersion;   // = kABIVersion
+        std::uint32_t suppress;     // 1 = hide the grid, 0 = give it back
+    };
+    static_assert(sizeof(SuppressUI) == 12, "SuppressUI is part of the ABI");
+
     struct CostumeState
     {
         std::uint32_t  structSize;   // = sizeof(CostumeState)
@@ -366,4 +392,58 @@ namespace GridInvAPI
         std::uint32_t (*GetPalette)(void* self, std::uint32_t* out, std::uint32_t capacity);
     };
     static_assert(sizeof(Tinter) == 40, "Tinter is part of the ABI");
+
+    // ---- provider -> host: TOOLTIP ANNOTATION ------------------------------
+
+    // ★★A THIRD TABLE, FOR THE SAME REASON THERE WAS A SECOND.
+    //
+    // Provider already has a GetTooltipLines and it CANNOT DO THIS JOB. It is
+    // handed an ItemKey and nothing else, and ItemKey.uid is ExtraUniqueID --
+    // 0 for every merely renamed or enchanted unit, which is precisely the
+    // population an extension has something to say about. Every affixed iron
+    // sword in a chest arrives at that hook under the same key as every plain
+    // one, so a line built from it would be right by luck or not at all. The
+    // reasoning that gave Tinter its `xl` argument gives this its own table.
+    //
+    // ★★WHY NOT SIMPLY GROW Tinter. Rule 2 at the top of this file: adding a
+    // field to a released struct is a breaking change, and the host refuses any
+    // table whose structSize disagrees. Growing Tinter would stop every already
+    // built extension from colouring anything, and bumping kABIVersion to cover
+    // that would ALSO refuse every existing Provider -- a socket mod losing its
+    // badges because a loot mod wanted a tooltip line. Additive costs nobody
+    // anything: kABIVersion does not move, no released struct changes size, and
+    // a plugin that has never heard of this message simply never sends one.
+    //
+    // Provider, Tinter and Annotator are three independent slots. Register any
+    // combination; holding one has never implied holding another.
+    struct Annotator
+    {
+        std::uint32_t structSize;   // = sizeof(Annotator)
+        std::uint32_t abiVersion;   // = kABIVersion
+        const char*   name;         // static string, diagnostics only
+        void*         self;         // opaque; handed back as the first argument
+
+        // Lines to add to ONE unit's tooltip. Return how many were written into
+        // `out`. Zero means "nothing to say about this one", which is the
+        // answer for most of an inventory and must stay cheap.
+        //
+        //   base      the TESBoundObject FormID
+        //   xl        the RE::ExtraDataList* of THIS sub-stack, or nullptr when
+        //             the unit has none of its own. Read-only, and BORROWED FOR
+        //             THE DURATION OF THE CALL -- the engine rewrites these
+        //             lists on every container move, so a stored copy is a
+        //             dangling pointer by the next transfer.
+        //   out       host-owned buffer of `capacity` lines, never null.
+        //
+        // NOT the hot path: once per tooltip, not once per tile per frame. It
+        // still runs inside the host's ImGui frame on the render thread, so do
+        // not block, do not open or close a menu, and never call ImGui.
+        //
+        // ★NEVER WRITE MORE THAN `capacity` LINES. The host clamps the return
+        // value, which protects its own reads -- it cannot undo a write past
+        // the end of its buffer.
+        std::uint32_t (*GetLines)(void* self, std::uint32_t base, const void* xl,
+                                  TooltipLine* out, std::uint32_t capacity);
+    };
+    static_assert(sizeof(Annotator) == 32, "Annotator is part of the ABI");
 }
