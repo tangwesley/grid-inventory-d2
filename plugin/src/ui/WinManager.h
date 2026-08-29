@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <cstdint>
+#include <filesystem>   // file_time_type: the ini stamp Load/Save compare on
 #include <functional>
 #include <iosfwd>
 
@@ -64,6 +65,13 @@ namespace FUI
         // read earlier, for the one setting that is needed before any menu
         // exists. Returns the default when the file or key is absent.
         [[nodiscard]] static bool ReadWheelEnabled(bool a_default);
+        // ★Same shape, same reason, one stage earlier still: the grid's menu
+        // object is BUILT before Load() runs (Creator, then OnShow), so the
+        // cached value would always describe the previous open. Read straight
+        // from the file so an ini edit lands on the very next open -- which is
+        // what makes a paused/unpaused A/B possible inside one session.
+        // See GridInventoryMenu::NoPause.
+        [[nodiscard]] static bool ReadNoPause(bool a_default);
         // GI46-48: NAMED share files. "Default" -> GridInventory_Default.ini,
         // "P1" -> GridInventory_P1.ini ... each beside its icon bundle
         // (GridInventory_<name>_icons.pak). One ini carries the style subset
@@ -253,5 +261,14 @@ namespace FUI
         DragState        m_drag;
         bool             m_dragLock = false;
         bool             m_loaded = false;
+        // ★The last bytes we successfully put on disk, and the timestamp they
+        // landed with. Save() compares against the first to decide whether the
+        // write is needed at all; Load() compares against the second to decide
+        // whether the read is. Both are "has anything actually changed?", asked
+        // on the two frames the player can feel -- the close and the open.
+        // ★mutable because Save() is const and always has been; what it caches
+        // is a fact about the DISK, not about this object's settings.
+        mutable std::string                   m_lastWritten;
+        mutable std::filesystem::file_time_type m_iniStamp{};
     };
 }

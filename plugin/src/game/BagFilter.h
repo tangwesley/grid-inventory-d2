@@ -49,4 +49,14 @@ namespace FUI::BagFilter
     // is checked whether or not anyone owns one. Run both.
     void DumpPlayerInventory();
     void DumpFormDatabase();
+
+    // ★★OFF unless GridInventory_ui.ini says "!bagdump = 1", and the reason is
+    // cost, not tidiness. DumpFormDatabase walks every named bound object in
+    // the load order; it runs once per session, but that once lands on the
+    // FIRST menu open, on the open frame. A paused game hid it -- the world was
+    // frozen for the whole sweep -- and an unpaused one does not.
+    // Same shape as DeltaWatch's "!delta" switch and for the same reason: an
+    // observation nobody asked for should not be charged to everybody.
+    [[nodiscard]] bool DumpsEnabled();
+    void               SetDumpsEnabled(bool a_on);
 }

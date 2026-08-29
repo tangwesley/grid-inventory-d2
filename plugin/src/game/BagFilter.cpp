@@ -257,6 +257,21 @@ book    = cat:book, cat:book_note, cat:book_skill, cat:book_spell, cat:scroll, v
                    : "";
     }
 
+    namespace
+    {
+        bool g_dumpsOn = false;   // "!bagdump" -- see BagFilter.h
+    }
+
+    bool DumpsEnabled() { return g_dumpsOn; }
+
+    void SetDumpsEnabled(bool a_on)
+    {
+        if (g_dumpsOn == a_on) return;
+        g_dumpsOn = a_on;
+        SKSE::log::info("[BAGFILTER] dumps {} -- the load-order sweep runs on the "
+                        "first menu open when on", a_on ? "ENABLED" : "disabled");
+    }
+
     void DumpFormDatabase()
     {
         auto* dh = RE::TESDataHandler::GetSingleton();

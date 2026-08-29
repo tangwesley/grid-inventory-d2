@@ -10,6 +10,7 @@
 #include "game/Lotd.h"
 #include "ui/Editor.h"
 #include "ui/Fallback.h"
+#include "ui/GridMenu.h"   // NoPause -- the gameplay-input mask is that mode's
 #include "ui/Lang.h"
 #include "ui/Theme.h"
 #include "ui/WinManager.h"
@@ -101,6 +102,73 @@ namespace
         auto* pc = RE::PlayerControls::GetSingleton();
         if (pc && pc->movementHandler) {
             pc->movementHandler->inputEventHandlingEnabled = a_enable;
+        }
+    }
+
+    // ★★★THE A3 NOTE'S PREMISE EXPIRED, and this is what replaces it.
+    //
+    // A3 (2026-07-13, see the menu-shown callback below) left the gameplay
+    // layer alone on the grounds that "kPausesGame + the kInventory menu
+    // context already keep clicks from the gameplay layer". That is true only
+    // while we pause. Under "!nopause" the world is live, and every binding the
+    // grid shares a button with fires underneath it -- attack, shout, activate,
+    // jump -- while the player is only trying to move an item (user report).
+    //
+    // ★★NOT inputEventHandlingEnabled. That is exactly what A3 tried and
+    // reverted: toggling a handler's own flag mid-hold corrupts its held-input
+    // bookkeeping, and the symptom was a POWER ATTACK firing on close after an
+    // in-menu right-click. ControlMap masks the USER EVENTS instead -- the same
+    // door Papyrus's DisablePlayerControls goes through -- so a button held
+    // across the boundary leaves no half-state behind to be completed later.
+    //
+    // ★★SAVE THE WORD THE ENGINE ACTUALLY HAD, and put that back. A blanket
+    // re-enable on close is not a restore: a quest, a cutscene or another mod
+    // may have disabled controls for its own reasons before we ever opened, and
+    // handing them all back would be us ending someone else's scene. That is
+    // what GetControlsState/SetControlsState are for.
+    std::uint32_t g_savedEnabled = 0;
+    std::uint32_t g_savedStored  = 0;
+    bool          g_gameplayOff  = false;
+
+    void SetGameplayInput(bool a_enable)
+    {
+        using UEFlag = RE::UserEvents::USER_EVENT_FLAG;
+        auto* cm = RE::ControlMap::GetSingleton();
+        if (!cm) return;
+
+        if (!a_enable) {
+            if (g_gameplayOff) return;   // already ours; do not re-save over it
+            cm->GetControlsState(g_savedEnabled, g_savedStored);
+            // ★kMenu and kConsole are DELIBERATELY absent. kMenu is the channel
+            // our own menu is fed on (Creator sets the kInventory context for
+            // exactly that reason), so masking it would silence the grid along
+            // with the world; and the console is a separate window the player
+            // must keep being able to raise -- ProcessScaleformEvent already
+            // stands aside for it rather than fighting it.
+            // ★No enum operators on USER_EVENT_FLAG in this CommonLib line, so
+            // the mask is built in the underlying type and cast back once.
+            constexpr auto kBlocked = static_cast<UEFlag>(
+                static_cast<std::uint32_t>(UEFlag::kMovement)  |
+                static_cast<std::uint32_t>(UEFlag::kLooking)   |
+                static_cast<std::uint32_t>(UEFlag::kActivate)  |
+                static_cast<std::uint32_t>(UEFlag::kPOVSwitch) |
+                static_cast<std::uint32_t>(UEFlag::kFighting)  |
+                static_cast<std::uint32_t>(UEFlag::kSneaking)  |
+                static_cast<std::uint32_t>(UEFlag::kMainFour)  |
+                static_cast<std::uint32_t>(UEFlag::kWheelZoom) |
+                static_cast<std::uint32_t>(UEFlag::kJumping));
+            // a_storeState false: WE are holding the previous state above, and
+            // letting the engine stack its own copy as well is two restores
+            // racing for the same word.
+            cm->ToggleControls(kBlocked, false, false);
+            g_gameplayOff = true;
+            logger::info("[INPUT] gameplay controls masked (enabled was {:#010x})",
+                         g_savedEnabled);
+        } else {
+            if (!g_gameplayOff) return;
+            cm->SetControlsState(g_savedEnabled, g_savedStored);
+            g_gameplayOff = false;
+            logger::info("[INPUT] gameplay controls restored to {:#010x}", g_savedEnabled);
         }
     }
     void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
@@ -2319,8 +2387,28 @@ namespace
                 // write the tally out. ONCE per session — this is an
                 // observation, not a feature, and it must not cost anything on
                 // every open. Nothing is routed or moved.
+                //
+                // ★★★"MUST NOT COST ANYTHING ON EVERY OPEN" WAS HALF THE BILL.
+                // It is once per session, yes -- and that once is the FIRST
+                // open, on the open frame, and DumpFormDatabase sweeps the
+                // WHOLE LOAD ORDER: every named bound object in every array,
+                // a FilterOf() per form, a map insert per form, and a wall of
+                // log lines after it. On a 93-plugin list that is unpleasant;
+                // on the 3826-plugin list this project has measured against it
+                // is the open hitch, all by itself.
+                //
+                // Paused, nobody could see it -- the world was frozen for the
+                // whole sweep and the first frame drawn was already past it.
+                // Unpaused it is a stall in a live game, which is how it got
+                // noticed at all.
+                //
+                // ★So it becomes what it always was: a diagnostic, off by
+                // default, named like every other one in this file ("!delta",
+                // "!pooltrace", "!simdrift"). Turning it on still answers the
+                // same question, and nobody pays for an answer they did not
+                // ask for. See BagFilter::DumpsEnabled.
                 static bool s_bagDumped = false;
-                if (!s_bagDumped) {
+                if (!s_bagDumped && FUI::BagFilter::DumpsEnabled()) {
                     s_bagDumped = true;
                     FUI::BagFilter::DumpFormDatabase();
                     FUI::BagFilter::DumpPlayerInventory();
@@ -2332,8 +2420,24 @@ namespace
                 // bookkeeping — closing after an in-menu right-click fired a
                 // POWER ATTACK (the legacy PrismaUI-era block was for a
                 // context-less overlay and no longer applies).
+                //
+                // ★★...WHILE WE PAUSE. That sentence is a statement about
+                // kPausesGame, so it stops being true the moment the flag comes
+                // off: measured under "!nopause", the player could still swing,
+                // shout and activate while navigating the board, and any grid
+                // key sharing a button with a gameplay binding did both things
+                // at once (user report). Masked only in that mode -- the paused
+                // path is exactly as A3 left it, and an ordinary install never
+                // reaches this call. See SetGameplayInput.
+                if (FUI::GridInventoryMenu::NoPause()) SetGameplayInput(false);
             },
             []() {   // menu hidden
+                // ★Unconditional, unlike the mask above: "!nopause" is read
+                // fresh per open (Creator), so a session that opened masked and
+                // had the switch turned off underneath it must still be given
+                // its controls back. SetGameplayInput no-ops when it holds
+                // nothing, so the ordinary paused close costs one branch.
+                SetGameplayInput(true);
             });
 
         if (auto* idm = RE::BSInputDeviceManager::GetSingleton()) {
@@ -2361,6 +2465,12 @@ namespace
             SetMoveInput(true);
             g_movementOff = false;
         }
+        // ★★AND THE SAME DEBT, ONE SIZE LARGER. A load taken with the grid open
+        // never delivers our hide, so a mask laid down before it would outlive
+        // the save that owns it -- and a player who cannot attack, activate or
+        // move is a soft lock, not a glitch. Same shape as the movement restore
+        // above, and same rule: only if it is ours to give back.
+        SetGameplayInput(true);
         g_planBPendingOpen = false;
         // ★suppression does not survive a load either: the window that
         //  asked for it belongs to the session being left

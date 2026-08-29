@@ -8,6 +8,7 @@
 #include "ui/ItemPreview.h"
 #include "ui/Sfx.h"
 #include "ui/UIRoot.h"
+#include "ui/WinManager.h"   // ReadNoPause -- the "!nopause" test switch
 
 // Ported from ModExplorerMenu (Modex) by patchulidev — UIMenuImpl.cpp.
 // https://github.com/patchulidev/ModExplorerMenu (GPL-3.0 with Modding Exception)
@@ -107,6 +108,27 @@ namespace FUI
         }
     }
 
+    // ★The state behind "!nopause" -- see GridMenu.h. Held here rather than in
+    // WinManager because the flag it controls is this menu's, and every other
+    // test switch lives in the module that owns the behaviour (Grid::SimDrift,
+    // DeltaWatch::Enabled). WinManager only carries it to and from the file.
+    namespace
+    {
+        bool g_noPause = false;
+    }
+
+    bool GridInventoryMenu::NoPause() { return g_noPause; }
+
+    void GridInventoryMenu::SetNoPause(bool a_on)
+    {
+        if (g_noPause == a_on) return;
+        g_noPause = a_on;
+        SKSE::log::warn("[UI] ★!nopause = {} -- the grid will open onto a {} world "
+                        "from the NEXT open. This is a measurement mode; equip "
+                        "conflict resolution assumes a frozen engine.",
+                        a_on ? 1 : 0, a_on ? "LIVE" : "paused");
+    }
+
     void GridInventoryMenu::ForceCursor()
     {
         // Keep asking UNLESS we have taken the pointer over ourselves — the
@@ -140,7 +162,20 @@ namespace FUI
         // kPausesGame stops the PlayerCharacter::Update hook, so pre-render
         // parking must run here: menus still advance every frame while the
         // game is paused, BEFORE the frame renders.
-        UIRoot::Tick();
+        //
+        // ★★ASK, DO NOT ASSUME. The sentence above is conditional and used to
+        // be written as if it were not: if the game is NOT paused the update
+        // hook is running and ALREADY called Tick this frame, so doing it here
+        // too pumps the whole deferred layer twice -- Equip::ProcessPending,
+        // LootBarter::ProcessTransfers, Grid::ProcessTrashDeletes, Costume,
+        // DualRing, CapacityTick, GoldCoins (see UIRoot::Tick's body). Frame
+        // countdowns like Equip's g_rebuildLag would run at half their
+        // intended patience.
+        // ★GameIsPaused(), not our own flag: another menu stacked over ours can
+        // pause the game just as well, and then the hook is stopped again.
+        if (auto* ui = RE::UI::GetSingleton(); !ui || ui->GameIsPaused()) {
+            UIRoot::Tick();
+        }
         // ★Frames, not wall clock (Ledger.h): AdvanceMovie keeps running while
         // the menu pauses the game, which is exactly the clock we want.
         FUI::Ledger::Tick();
@@ -362,7 +397,24 @@ namespace FUI
         // both are on" — Inventory3DManager::Render() draws nothing while the
         // game runs. Realtime policy (PLAN_B A5) is revisited at B-2 via the
         // icon cache (captures become rare one-shots).
-        menu->menuFlags.set(Flags::kPausesGame, Flags::kDisablePauseMenu);
+        //
+        // ★★...AND THAT SENTENCE HAS NEVER BEEN MEASURED HERE. It is Modex's
+        // config note, carried over with the port. "!nopause" drops the flag so
+        // a GI_CAPTURE_DIAG build can answer it with pixels instead: the
+        // [ICONDIAG] "after-model" line reports how much of the capture rect is
+        // still the magenta we painted, so pure=100% after the model means
+        // Render() drew nothing and the note is right. See GridMenu.h.
+        // ★Read fresh from the file, not from the cached settings -- Load()
+        // runs from OnShow, which is AFTER this, so a cached value would lag
+        // an open behind the edit. Same reason (and same shape) as
+        // WinManager::ReadWheelEnabled.
+        SetNoPause(WinManager::ReadNoPause(NoPause()));
+        if (!NoPause()) {
+            menu->menuFlags.set(Flags::kPausesGame, Flags::kDisablePauseMenu);
+        } else {
+            menu->menuFlags.set(Flags::kDisablePauseMenu);
+            SKSE::log::warn("[UI] ★opening WITHOUT kPausesGame (!nopause)");
+        }
 
         // kInventory, NOT kMenuMode/kItemMenu: this is the vanilla
         // InventoryMenu's own context — its controlmap section TRANSLATES the
