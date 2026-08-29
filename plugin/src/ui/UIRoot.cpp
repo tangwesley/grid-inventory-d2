@@ -448,6 +448,10 @@ namespace FUI::UIRoot
         // ICON CACHE reset request (settings, two-click armed). Consumed in
         // Tick — SRVs must never be released inside the ImGui frame.
         std::atomic<bool> g_iconsReset = false;
+        // ★Set by OnShow, consumed by the next Tick: the carry-wide icon
+        // prefetch, moved off the open frame. Plain bool -- both ends are the
+        // main thread, which is the whole reason it is safe to walk forms in.
+        bool              g_prefetchOwed = false;
         // GI47: a preset icon bundle waits to be merged (frame-outside).
         // The pak path rides in g_presetMergePak (same-thread handoff).
         std::atomic<bool> g_iconsMergePreset = false;
@@ -4175,12 +4179,21 @@ namespace FUI::UIRoot
         // opens — one up-front caching burst instead of per-scroll/per-bag
         // trickle (bag contents live in the same inventory, so this covers
         // them too). Disk-cached items are skipped by pak index (no GPU).
-        if (auto* pl = RE::PlayerCharacter::GetSingleton()) {
-            auto* cache = IconCache::GetSingleton();
-            for (const auto& [obj, data] : pl->GetInventory()) {
-                if (obj && data.first > 0) cache->Prefetch(obj);
-            }
-        }
+        //
+        // ★★"THE MOMENT THE MENU OPENS" DID NOT HAVE TO MEAN "ON THE OPEN
+        // FRAME". GetInventory() builds a whole map of the player's carry --
+        // an allocation and a copy per stack -- and then this queues every one
+        // of them, all inside the frame the menu appears on. A hoarder's pack
+        // is thousands of stacks, and none of that work is needed before the
+        // first frame draws: the queue is consumed one item per frame anyway
+        // (IconCache::PreRender), so filling it on frame 0 versus frame 1 is
+        // invisible to everything except the stall it causes.
+        //
+        // Deferred by one tick, and the tick that runs it is UIRoot::Tick --
+        // main thread, so the form pointers this walks are still being read
+        // where they are legal to read (rule 4). The Burst above still covers
+        // the visible sprites for the open transition.
+        g_prefetchOwed = true;
 
         SKSE::log::info("[UI] menu shown ({} icons cached)",
             IconCache::GetSingleton()->CachedCount());
@@ -4704,6 +4717,18 @@ namespace FUI::UIRoot
         // -- refreshed HERE because this tick runs on the main thread in both
         // worlds (the update hook unpaused, AdvanceMovie paused).
         DeltaWatch::RefreshMenuSnapshot();
+        // ★The open frame's debt, paid on the frame after it (see OnShow).
+        // Cleared FIRST: Prefetch can log, and an early return anywhere below
+        // must not leave this owed forever.
+        if (g_prefetchOwed) {
+            g_prefetchOwed = false;
+            if (auto* pl = RE::PlayerCharacter::GetSingleton()) {
+                auto* cache = IconCache::GetSingleton();
+                for (const auto& [obj, data] : pl->GetInventory()) {
+                    if (obj && data.first > 0) cache->Prefetch(obj);
+                }
+            }
+        }
         // ★★★THE SAFETY NET, and suppression is not safe without it.
         //
         // Whoever suppressed us is expected to send kShow when their window
