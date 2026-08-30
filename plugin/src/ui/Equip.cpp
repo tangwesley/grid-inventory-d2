@@ -1908,18 +1908,17 @@ namespace FUI::Equip
             center(afford ? btnRow : btnW);
             // GI51: Enter/Space confirm (ESC closes via Equip::CloseTopPopup)
             // GI52: never while a text field (loadout rename) owns the keyboard
-            const bool keyOk = !ImGui::GetIO().WantTextInput &&
-                               (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-                                ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-                                ImGui::IsKeyPressed(ImGuiKey_Space, false));
+            // ★A pointed-at Cancel takes the key first (Sfx::CancelButton).
+            const bool keyOk = Sfx::ConfirmKey();
+            bool buy = false;
             if (afford) {
-                if (Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0)) || keyOk) {
-                    Loadout::RequestPurchase();
-                    g_buyOpen = false;
-                }
+                buy = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0));
                 ImGui::SameLine(0.0f, 8.0f * S);
             }
-            if (Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true)) {
+            if (Sfx::CancelButton(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), keyOk)) {
+                g_buyOpen = false;
+            } else if (afford && (buy || keyOk)) {
+                Loadout::RequestPurchase();
                 g_buyOpen = false;
             }
             ImGui::End();
@@ -1947,16 +1946,15 @@ namespace FUI::Equip
             center(btnRow);
             // GI51: Enter/Space confirm (ESC closes via Equip::CloseTopPopup)
             // GI52: never while a text field (loadout rename) owns the keyboard
-            if (Sfx::Button(Lang::T(Lang::Str::DeleteLabel), ImVec2(btnW, 0)) ||
-                (!ImGui::GetIO().WantTextInput &&
-                 (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-                  ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-                  ImGui::IsKeyPressed(ImGuiKey_Space, false)))) {
-                Loadout::RequestRemove(g_delTarget);
-                g_delTarget = -1;
-            }
+            // ★A pointed-at Cancel takes the key first (Sfx::CancelButton) --
+            // this is the dialog the pad-A-on-Cancel deletion was reported on.
+            const bool keyOk = Sfx::ConfirmKey();
+            const bool del = Sfx::Button(Lang::T(Lang::Str::DeleteLabel), ImVec2(btnW, 0));
             ImGui::SameLine(0.0f, 8.0f * S);
-            if (Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true)) {
+            if (Sfx::CancelButton(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), keyOk)) {
+                g_delTarget = -1;
+            } else if (del || keyOk) {
+                Loadout::RequestRemove(g_delTarget);
                 g_delTarget = -1;
             }
             ImGui::End();

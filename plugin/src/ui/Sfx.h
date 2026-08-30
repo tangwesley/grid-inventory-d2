@@ -254,4 +254,40 @@ namespace FUI::Sfx
         }
         return pressed;
     }
+
+    // ★★★A CONFIRM POPUP ANSWERS ONE KEY, AND THE POINTER DECIDES WHICH
+    // BUTTON HEARS IT.
+    //
+    // While any of these windows is up the pad's A arrives as ImGuiKey_Enter
+    // (UIRoot::TranslatePadButtons) -- it is a KEY, never a mouse click, so it
+    // cannot press the Cancel button a player has deliberately pointed at.
+    // Every popup read Enter as "confirm" unconditionally, so pointing at
+    // Cancel and pressing A deleted the preset anyway (user report) -- the
+    // button being looked at did the opposite of what it said, on the one
+    // gesture that is supposed to undo the whole dialog.
+    //
+    // So the key is read ONCE per popup and a cancel button under the pointer
+    // claims it first. Mouse play is untouched (a click was always a click),
+    // and with the pointer anywhere else A still confirms, which is what the
+    // prompt bar promises.
+    inline bool ConfirmKey()
+    {
+        // GI52: stands down while a text field (the tab rename) has the keyboard
+        return !ImGui::GetIO().WantTextInput &&
+               (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_Space, false));
+    }
+
+    // The cancel half of a confirm popup: the quiet button, true when clicked
+    // OR when the confirm key lands while the pointer is on it. Draw it in
+    // layout order (after the confirm button) but TEST IT FIRST -- it is the
+    // half that has to win a tie.
+    inline bool CancelButton(const char* a_label, const ImVec2& a_size, bool a_confirmKey)
+    {
+        const bool clicked = Button(a_label, a_size, true);
+        const bool claimed = a_confirmKey && ImGui::IsItemHovered();
+        if (claimed && !clicked) SelectOff();
+        return clicked || claimed;
+    }
 }

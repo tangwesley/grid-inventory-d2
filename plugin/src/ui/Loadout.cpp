@@ -56,11 +56,46 @@ namespace FUI::Loadout
         constexpr RE::FormID kGold001 = 0x0000000F;
         constexpr int        kCostStep = 5000;
 
+        // Default name for a new preset: the smallest unused "<Preset> N", so
+        // delete -> rebuy never produces two tabs with the same label.
+        std::string NextPresetName()
+        {
+            auto nameOf = [](int v) {
+                return std::string(Lang::T(Lang::Str::Preset)) + " " + std::to_string(v);
+            };
+            auto used = [&](int v) {
+                for (const auto& lo : g_loadouts) {
+                    if (lo.name == nameOf(v)) return true;
+                }
+                return false;
+            };
+            int n = 1;
+            while (used(n)) ++n;
+            return nameOf(n);
+        }
+
+        // ★THE FIRST PRESET IS A GIFT, not a purchase. A player who has never
+        // spent gold still has somewhere to put a second set, so the feature
+        // shows what it is on a new character instead of being a priced-out
+        // row. Written as an INVARIANT rather than a one-off at new-game: it
+        // also tops up saves made before the gift existed, and it survives the
+        // player deleting the tab -- deleting the only preset empties it
+        // instead of taking the feature away (and instead of leaving
+        // NextCost with zero presets to price against).
+        // ★NextCost counts PURCHASED presets, so the gift does not push the
+        // first real purchase up a tier: buying still starts at 5000.
+        void EnsureFreePreset()
+        {
+            if (g_loadouts.size() >= 2) return;
+            g_loadouts.push_back({ NextPresetName(), {} });
+        }
+
         void EnsureInit()
         {
             if (!g_loadouts.empty()) return;
             g_loadouts.push_back({ "EQUIP", {} });   // Name(0) is localised via Lang
             g_active = 0;
+            EnsureFreePreset();
         }
 
         // A two-hander is reported by the engine in BOTH hands; two copies of one
@@ -350,19 +385,7 @@ namespace FUI::Loadout
                 p->RemoveItem(gold, cost, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
             }
             const int idx = static_cast<int>(g_loadouts.size());
-            // default name: smallest unused "<Preset> N" so delete->rebuy never dupes
-            int n = 1;
-            auto nameOf = [](int v) {
-                return std::string(Lang::T(Lang::Str::Preset)) + " " + std::to_string(v);
-            };
-            auto used = [&](int v) {
-                for (const auto& lo : g_loadouts) {
-                    if (lo.name == nameOf(v)) return true;
-                }
-                return false;
-            };
-            while (used(n)) ++n;
-            g_loadouts.push_back({ nameOf(n), {} });
+            g_loadouts.push_back({ NextPresetName(), {} });
             SKSE::log::info("[LOADOUT] purchased preset [{}] for {} gold", idx, cost);
             DoSwitch(idx);   // switching to a fresh empty tab strips the character
         }
@@ -393,6 +416,7 @@ namespace FUI::Loadout
             // notice -- but a deletion is invisible to a rebuild, because the
             // number it freed is immediately occupied by the tab above.
             Wheeler::OnTabRemoved(a_idx);
+            EnsureFreePreset();   // the free tab always comes back: delete = empty it
             Grid::RequestRebuild();
             SKSE::log::info("[LOADOUT] removed preset [{}]", a_idx);
         }
@@ -428,8 +452,9 @@ namespace FUI::Loadout
     int NextCost()
     {
         EnsureInit();
-        // 5000 * (owned preset tabs + 1); [0] is EQUIP so size() is exactly that
-        return kCostStep * static_cast<int>(g_loadouts.size());
+        // 5000 * (PURCHASED preset tabs + 1): [0] is EQUIP and [1] is the free
+        // preset, so size() - 1 is the count the price is meant to climb with.
+        return kCostStep * (static_cast<int>(g_loadouts.size()) - 1);
     }
 
     bool AtCap()
@@ -626,6 +651,9 @@ namespace FUI::Loadout
             return;
         }
         g_loadouts = std::move(in);
+        // A save written before the free preset existed comes back one tab
+        // short -- the gift is granted to those characters too.
+        EnsureFreePreset();
         g_active = (std::min)(static_cast<int>(active),
             static_cast<int>(g_loadouts.size()) - 1);
         SKSE::log::info("[LOADOUT] cosave: loaded {} tabs (active {})",

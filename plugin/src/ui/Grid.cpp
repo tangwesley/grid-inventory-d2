@@ -13241,12 +13241,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         center(btnRow);
         const bool can = g_pouchSlider > 0;
         // GI51: Enter/Space confirm (ESC already closes via CloseTopWindow)
-        const bool keyOk = !typing &&
-                           (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-                            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-                            ImGui::IsKeyPressed(ImGuiKey_Space, false));
+        // ★A pointed-at Cancel claims the key, so both buttons are drawn
+        // before either one acts (Sfx::CancelButton).
+        const bool keyOk = Sfx::ConfirmKey();
         ImGui::BeginDisabled(!can);
-        if (Sfx::Button(Lang::T(Lang::Str::Withdraw), ImVec2(btnW, 0)) || (can && keyOk)) {
+        const bool takeClick = Sfx::Button(Lang::T(Lang::Str::Withdraw), ImVec2(btnW, 0));
+        ImGui::EndDisabled();
+        ImGui::SameLine(0.0f, 8.0f * S);
+        if (Sfx::CancelButton(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), keyOk)) {
+            g_pouchOpen = false;
+        } else if (can && (takeClick || keyOk)) {
             // the withdrawn amount rides the CURSOR as a pinned purse (same
             // flow as a stack split) instead of dropping straight into the
             // inventory. Carry caps at one purse (kCoinCap); any excess of a
@@ -13263,11 +13267,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_pouchOpen = false;             // window closes; the purse rides
             g_pouchSlider = 0;
             g_pouchTile.clear();
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine(0.0f, 8.0f * S);
-        if (Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true)) {
-            g_pouchOpen = false;
         }
         ImGui::End();
     }
@@ -16352,14 +16351,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         ImGui::TextColored(sk.inkDim, "%s", msg);
         ImGui::Dummy(ImVec2(0.0f, 6.0f * S));
         center(btnRow);
-        const bool typing = ImGui::GetIO().WantTextInput;   // GI52
-        const bool ok = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0)) ||
-                        (!typing && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-                                     ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-                                     ImGui::IsKeyPressed(ImGuiKey_Space, false)));
+        // GI52 typing guard + the pointed-at-Cancel rule live in Sfx::ConfirmKey
+        const bool keyOk = Sfx::ConfirmKey();
+        const bool okClick = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0));
         ImGui::SameLine(0.0f, 8.0f * S);
-        const bool cancel = Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true) ||
+        const bool cancel = Sfx::CancelButton(Lang::T(Lang::Str::Cancel),
+                                              ImVec2(btnW, 0), keyOk) ||
                             ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const bool ok = !cancel && (okClick || keyOk);
         if (ok && g_trashAsk.obj) {
             // ★the TURNED footprint, the same one the drop was validated with
             const Mask m = MaskOf(g_resolver ? g_resolver(g_trashAsk.obj) : GridDef{},

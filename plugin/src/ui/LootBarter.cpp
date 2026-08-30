@@ -2322,14 +2322,15 @@ namespace FUI::LootBarter
             }
         }
         ImGui::SameLine(0.0f, 8.0f * S);
-        const bool ok = maxPress ||
-                        Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0)) ||
-                        (!typing && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-                                     ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-                                     ImGui::IsKeyPressed(ImGuiKey_Space, false)));
+        // ★A pointed-at Cancel claims the confirm key (Sfx::CancelButton), so
+        // the two are decided together after both are drawn.
+        const bool keyOk = Sfx::ConfirmKey();
+        const bool okClick = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0));
         ImGui::SameLine(0.0f, 8.0f * S);
-        const bool cancel = Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true) ||
+        const bool cancel = Sfx::CancelButton(Lang::T(Lang::Str::Cancel),
+                                              ImVec2(btnW, 0), keyOk) ||
                             ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const bool ok = !cancel && (maxPress || okClick || keyOk);
 
         // Confirming at zero means "none of it" -- take the cancel path rather
         // than firing a request for 0 units.
@@ -2465,14 +2466,14 @@ namespace FUI::LootBarter
 
         ImGui::Dummy(ImVec2(0.0f, 6.0f * S));
         center(btnRow);
-        const bool typing = ImGui::GetIO().WantTextInput;   // GI52
-        const bool ok = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0)) ||
-                        (!typing && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-                                     ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-                                     ImGui::IsKeyPressed(ImGuiKey_Space, false)));
+        // GI52 typing guard + the pointed-at-Cancel rule live in Sfx::ConfirmKey
+        const bool keyOk = Sfx::ConfirmKey();
+        const bool okClick = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0));
         ImGui::SameLine(0.0f, 8.0f * S);
-        const bool cancel = Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true) ||
+        const bool cancel = Sfx::CancelButton(Lang::T(Lang::Str::Cancel),
+                                              ImVec2(btnW, 0), keyOk) ||
                             ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const bool ok = !cancel && (okClick || keyOk);
         if (ok) {
             RequestSell(g_confirm.obj, g_confirm.count, g_confirm.price, g_confirm.base,
                         g_confirm.uid, g_confirm.sig, g_confirm.fav, g_confirm.xlIdx,
@@ -3687,13 +3688,16 @@ namespace
         ImGui::Dummy(ImVec2(0.0f, 6.0f * S));
         center(btnRow);
         const bool can = g_shelfPouchSlider > 0;
-        const bool keyOk = !typing &&
-                           (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-                            ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
-                            ImGui::IsKeyPressed(ImGuiKey_Space, false));
+        // ★A pointed-at Cancel claims the confirm key (Sfx::CancelButton), so
+        // both buttons are drawn before either one acts.
+        const bool keyOk = Sfx::ConfirmKey();
         ImGui::BeginDisabled(!can);
-        if (Sfx::Button(Lang::T(Lang::Str::Withdraw), ImVec2(btnW, 0)) ||
-            (can && keyOk)) {
+        const bool takeClick = Sfx::Button(Lang::T(Lang::Str::Withdraw), ImVec2(btnW, 0));
+        ImGui::EndDisabled();
+        ImGui::SameLine(0.0f, 8.0f * S);
+        if (Sfx::CancelButton(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), keyOk)) {
+            g_shelfPouchSpot.clear();
+        } else if (can && (takeClick || keyOk)) {
             const int v = g_shelfPouchSlider;
             // ★(1.5.x) the withdraw shrinks whichever book the window is on
             if (bentry) {
@@ -3708,11 +3712,6 @@ namespace
             g_shelfPouchSpot.clear();
             g_shelfPouchBundle = 0;
             g_shelfPouchSlider = 0;
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine(0.0f, 8.0f * S);
-        if (Sfx::Button(Lang::T(Lang::Str::Cancel), ImVec2(btnW, 0), true)) {
-            g_shelfPouchSpot.clear();
         }
         ImGui::End();
     }

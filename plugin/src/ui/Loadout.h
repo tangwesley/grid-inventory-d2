@@ -25,8 +25,14 @@ namespace FUI::Loadout
     [[nodiscard]] const char* Name(int a_index);
     void SetName(int a_index, const char* a_name);   // presets only (index>=1)
 
-    // purchase economics (L2): cost = 5000 * (owned preset tabs + 1) — deleting
-    // a tab restores the tier. No refunds.
+    // purchase economics (L2): cost = 5000 * (PURCHASED preset tabs + 1) —
+    // deleting a tab restores the tier. No refunds.
+    //
+    // ★THE FIRST PRESET IS FREE and always exists: a new character has EQUIP
+    // and one empty preset, and deleting that preset empties it rather than
+    // removing it. It is not counted by NextCost, so the first tab the player
+    // actually buys still costs 5000. It IS counted by AtCap, since the wheel
+    // has to show it like any other tab.
     //
     // ★★NINE, because the quick wheel has ten places and EQUIP takes one of
     // them. The cap used to be 20, which the inventory strip could show and the
@@ -98,7 +104,7 @@ namespace FUI::Loadout
     // does this when it opens).
     void MarkActiveStale();
 
-    void ResetSession();                 // load/new-game: back to base, clear presets
+    void ResetSession();                 // load/new-game: back to base (EQUIP + free preset)
 
     // L3: SKSE cosave persistence. Revert (fires before every load AND on new
     // game) resets; LoadRecord restores one 'LODT' record (main.cpp owns the
