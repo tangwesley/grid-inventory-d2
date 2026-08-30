@@ -11498,6 +11498,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return base ? base : "";
     }
 
+    // ★A PLAYER TILE'S NAME, resolved the way the tooltip resolves it: by list
+    // POSITION, then by POOL, then -- for a stackable, whose tile is an
+    // aggregate rather than a unit -- from the entry, which is the merged row
+    // vanilla names the same way. Every other place that titles a tile (the
+    // trash question, a split popup) needs all three steps or it prints
+    // TESForm::GetName(), the raw record text: a quest note's FULL is
+    // "Letter from Jarl <Alias=Jarl> of <Alias=HoldCity>" and only the unit's
+    // own ExtraTextDisplayData expands those tokens.
+    const char* TileNameOf(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                           int a_xlIdx, std::uint16_t a_sig)
+    {
+        if (!a_obj) return "";
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* entry = LiveEntryOf(player, a_obj);
+        auto* xl = ExtraForInstance(entry, a_uid, a_xlIdx);
+        if (!xl && a_sig != 0) xl = ExtraForPool(entry, a_uid, a_sig);
+        return DisplayNameOf(a_obj, xl,
+                             (!xl && StackCap(a_obj) > 1) ? entry : nullptr);
+    }
+
     namespace
     {
         // Vanilla builds an effect line from the magic effect's DESCRIPTION
@@ -11885,8 +11905,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // x3) while the temper badge and the rest of the tooltip, which read
         // the unit's own extra data, correctly showed only one. Only an
         // AGGREGATE cell may fall back to the entry.
-        const char* nm = DisplayNameOf(a_obj, scoped,
-            a_scope == ExtraScope::kAny ? entry : nullptr);
+        // ★★★...AND A STACKABLE TILE IS AN AGGREGATE CELL. GI61's ban is about
+        // CAP-1 GEAR, where the tile really is one unit; a cap > 1 tile is a
+        // POOL of interchangeable units — the same merged row vanilla draws,
+        // and vanilla names that row from the entry's lists.
+        //
+        // Which is the whole bug behind "the note reads
+        // 'Letter from Jarl <Alias=Jarl> of <Alias=HoldCity>'": InstanceSig
+        // deliberately does not hash ExtraTextDisplayData (see its note — the
+        // engine drops the name across the worn boundary, so a name is not
+        // identity), so a note carrying nothing but a display name signs 0 and
+        // lands in the PLAIN pool. The stackable branch mints its tiles from
+        // layout slots with no list position, so uid 0 / sig 0 / xlIdx -1 —
+        // ExtraForTile has nothing to walk to and ExtraForPool is never asked.
+        // The name then fell through to TESForm::GetName(), which is the raw
+        // record text with its alias tokens unexpanded. Books are cap 10.
+        //
+        // Only the NAME takes this door. `scoped` stays null, so the temper,
+        // enchantment and poison lines keep the strict per-unit rule.
+        const bool aggregate = a_scope == ExtraScope::kAny ||
+                               (a_scope == ExtraScope::kUnit && !scoped &&
+                                StackCap(a_obj) > 1);
+        const char* nm = DisplayNameOf(a_obj, scoped, aggregate ? entry : nullptr);
         // ★THE NAME TAKES THE TINT, and it is asked for here rather than read
         // off a glow byte because this is a tooltip: `scoped` is the unit's own
         // list, already resolved above by the GI61 rules, and no byte has been
@@ -13093,8 +13133,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             WinManager::Anchor::kTopLeft, topPad);
         ImGui::Begin("##grid_recharge", nullptr, kManagedWinFlags);
         UIRoot::NoteOverlayRect();
-        wm->TitleBar("recharge",
-            obj->GetName() && *obj->GetName() ? obj->GetName() : "?", 0.0f, true);
+        // ★The UNIT's name, not the record's: this window is opened on ONE
+        // enchanted weapon, and its temper prefix / player rename lives on the
+        // list `xl` already resolved above.
+        const char* rname = DisplayNameOf(obj, xl);
+        wm->TitleBar("recharge", rname && *rname ? rname : "?", 0.0f, true);
 
         if (!ImGui::IsWindowAppearing() &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered()) {
@@ -15865,8 +15908,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_searchHit.clear();
             g_searchVersion = g_boardVersion;
             if (g_search.empty()) return;
+            // ★Search the name the tile SHOWS. Reading the base record instead
+            // meant the box could not find what the board was displaying: a
+            // quest note reads "Letter from Jarl Siddgeir of Falkreath" and its
+            // FULL is "Letter from Jarl <Alias=Jarl> of <Alias=HoldCity>", so
+            // "Siddgeir" matched nothing. Runs once per board version (the
+            // cache above), not per frame, so the per-tile entry walk is paid
+            // at the same rate the board is rebuilt.
             for (const auto& it : g_items) {
-                if (SearchMatches(it.obj ? it.obj->GetName() : nullptr)) {
+                if (SearchMatches(TileNameOf(it.obj, it.uid, it.xlIdx, it.sig))) {
                     g_searchHit.insert(it.key);
                 }
             }
@@ -15923,7 +15973,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const float btnW = 96.0f * S;
         const float btnRow = 2.0f * btnW + 8.0f * S;
 
-        const char* name = g_trashAsk.obj ? g_trashAsk.obj->GetName() : "?";
+        const char* name = g_trashAsk.obj
+                               ? TileNameOf(g_trashAsk.obj, g_trashAsk.uid,
+                                            g_trashAsk.xlIdx, g_trashAsk.sig)
+                               : "?";
         const char* msg = Lang::T(Lang::Str::TrashFavConfirm);
         const float lineH = ImGui::GetTextLineHeightWithSpacing();
         const float sp = ImGui::GetStyle().ItemSpacing.y;
