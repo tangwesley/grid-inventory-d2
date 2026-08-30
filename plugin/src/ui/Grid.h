@@ -541,6 +541,14 @@ namespace FUI::Grid
                                             RE::ExtraDataList* a_xl = nullptr,
                                             RE::InventoryEntryData* a_entry = nullptr);
 
+    // ★The same answer for a PLAYER tile named from its identity alone —
+    // position, then pool, then the aggregate rule for a stackable (whose tile
+    // is a pool, not a unit). Use this anywhere a tile is titled outside the
+    // tooltip; see the definition for what reading GetName() instead showed.
+    [[nodiscard]] const char* TileNameOf(RE::TESBoundObject* a_obj,
+                                         std::uint16_t a_uid = 0, int a_xlIdx = -1,
+                                         std::uint16_t a_sig = 0);
+
     // Item base value for barter pricing (InventoryEntryData::GetValue cached
     // at Rebuild). -1 if unknown / not a priceable item.
     [[nodiscard]] int ItemValue(RE::TESBoundObject* a_obj);
