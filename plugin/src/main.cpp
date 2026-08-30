@@ -124,11 +124,80 @@ namespace
     // ★★SAVE THE WORD THE ENGINE ACTUALLY HAD, and put that back. A blanket
     // re-enable on close is not a restore: a quest, a cutscene or another mod
     // may have disabled controls for its own reasons before we ever opened, and
-    // handing them all back would be us ending someone else's scene. That is
-    // what GetControlsState/SetControlsState are for.
+    // handing them all back would be us ending someone else's scene.
+    //
+    // ★★★AND ONE WRITE AT OPEN IS NOT A MASK, IT IS A WISH.
+    //
+    // Reported: the block holds for the inventory and does nothing when the
+    // grid comes up over a chest or a corpse. The log says the mask WAS laid
+    // down on that open, at the same point in the same callback as every other
+    // open ([INPUT] gameplay controls masked, 3ms after the ContainerMenu
+    // close) -- so the mask is not missing, it is being overwritten.
+    //
+    // Which is exactly the shape the loot/barter door has and the inventory
+    // door does not. The container is reached by ACTIVATING a reference: the
+    // engine's own activation bookkeeping runs on the far side of the close
+    // event we open from, and whatever it hands back to enabledControls lands
+    // after our write. Same for the barter screen (dialogue) and the
+    // pickpocket/steal modes, which are the same ContainerMenu.
+    //
+    // The same log carries the second half of it. The word we saved decayed
+    // across the session -- 0xffffffff, then 0xffffffdf (kPOVSwitch), then
+    // 0xffffff9f (kPOVSwitch + kFighting) -- because a lockpicking menu's own
+    // disable was still outstanding when we saved, and SetControlsState wrote
+    // that whole stale word back at close. We were freezing OTHER people's
+    // transient disables permanently.
+    //
+    // So both halves stop being whole-word one-shots:
+    //
+    //   * the mask is RE-ASSERTED every unpaused frame it is meant to hold
+    //     (ReassertGameplayInput, driven from the Update hook, the same
+    //     treatment and the same reason as SetMoveInput above), which does not
+    //     care who overwrites it or when; and
+    //   * we remember the bits WE actually turned off and give back only
+    //     those. A bit that was already off at open is somebody else's to
+    //     restore, and one they turn off during our session stays off.
     std::uint32_t g_savedEnabled = 0;
-    std::uint32_t g_savedStored  = 0;
+    std::uint32_t g_maskedBits   = 0;   // bits this mask actually took down
     bool          g_gameplayOff  = false;
+    bool          g_maskHealing  = false;   // a heal is in flight (log it once)
+
+    // ★kMenu and kConsole are DELIBERATELY absent. kMenu is the channel our own
+    // menu is fed on (Creator sets the kInventory context for exactly that
+    // reason), so masking it would silence the grid along with the world; and
+    // the console is a separate window the player must keep being able to
+    // raise -- ProcessScaleformEvent already stands aside for it rather than
+    // fighting it.
+    // ★No enum operators on USER_EVENT_FLAG in this CommonLib line, so the mask
+    // is built in the underlying type and cast back at the call.
+    constexpr std::uint32_t kBlockedMask =
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kMovement)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kLooking)   |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kActivate)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kPOVSwitch) |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kFighting)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kSneaking)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kMainFour)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kWheelZoom) |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kJumping);
+
+    // Takes down every masked bit that is currently up and records it as ours.
+    // Returns the bits it had to take down this time -- zero means the mask was
+    // already whole, which is what an ordinary re-assert costs.
+    std::uint32_t ApplyGameplayMask(RE::ControlMap* a_cm)
+    {
+        using UEFlag = RE::UserEvents::USER_EVENT_FLAG;
+        std::uint32_t enabled = 0, stored = 0;
+        a_cm->GetControlsState(enabled, stored);
+        const std::uint32_t up = enabled & kBlockedMask;
+        if (up == 0) return 0;
+        // a_storeState false: WE are holding the previous state, and letting
+        // the engine stack its own copy as well is two restores racing for the
+        // same word.
+        a_cm->ToggleControls(static_cast<UEFlag>(up), false, false);
+        g_maskedBits |= up;
+        return up;
+    }
 
     void SetGameplayInput(bool a_enable)
     {
@@ -138,39 +207,50 @@ namespace
 
         if (!a_enable) {
             if (g_gameplayOff) return;   // already ours; do not re-save over it
-            cm->GetControlsState(g_savedEnabled, g_savedStored);
-            // ★kMenu and kConsole are DELIBERATELY absent. kMenu is the channel
-            // our own menu is fed on (Creator sets the kInventory context for
-            // exactly that reason), so masking it would silence the grid along
-            // with the world; and the console is a separate window the player
-            // must keep being able to raise -- ProcessScaleformEvent already
-            // stands aside for it rather than fighting it.
-            // ★No enum operators on USER_EVENT_FLAG in this CommonLib line, so
-            // the mask is built in the underlying type and cast back once.
-            constexpr auto kBlocked = static_cast<UEFlag>(
-                static_cast<std::uint32_t>(UEFlag::kMovement)  |
-                static_cast<std::uint32_t>(UEFlag::kLooking)   |
-                static_cast<std::uint32_t>(UEFlag::kActivate)  |
-                static_cast<std::uint32_t>(UEFlag::kPOVSwitch) |
-                static_cast<std::uint32_t>(UEFlag::kFighting)  |
-                static_cast<std::uint32_t>(UEFlag::kSneaking)  |
-                static_cast<std::uint32_t>(UEFlag::kMainFour)  |
-                static_cast<std::uint32_t>(UEFlag::kWheelZoom) |
-                static_cast<std::uint32_t>(UEFlag::kJumping));
-            // a_storeState false: WE are holding the previous state above, and
-            // letting the engine stack its own copy as well is two restores
-            // racing for the same word.
-            cm->ToggleControls(kBlocked, false, false);
+            std::uint32_t stored = 0;   // the engine's own stash; not ours to hold
+            cm->GetControlsState(g_savedEnabled, stored);
+            g_maskedBits  = 0;
+            g_maskHealing = false;
+            ApplyGameplayMask(cm);
             g_gameplayOff = true;
-            logger::info("[INPUT] gameplay controls masked (enabled was {:#010x})",
-                         g_savedEnabled);
+            logger::info("[INPUT] gameplay controls masked (enabled was {:#010x}, "
+                         "took down {:#010x})", g_savedEnabled, g_maskedBits);
         } else {
             if (!g_gameplayOff) return;
-            cm->SetControlsState(g_savedEnabled, g_savedStored);
+            // ★Give back exactly what we took, and nothing else. Not
+            // SetControlsState: the whole word includes bits somebody else
+            // owns, and writing our open-time copy of it is how a lockpicking
+            // menu's outstanding disable got frozen on for the rest of the
+            // session (see above). The engine's stored word is untouched
+            // because we never asked it to store one.
+            if (g_maskedBits) {
+                cm->ToggleControls(static_cast<UEFlag>(g_maskedBits), true, false);
+            }
             g_gameplayOff = false;
-            logger::info("[INPUT] gameplay controls restored to {:#010x}", g_savedEnabled);
+            logger::info("[INPUT] gameplay controls restored (gave back {:#010x})",
+                         g_maskedBits);
+            g_maskedBits  = 0;
+            g_maskHealing = false;
         }
     }
+
+    // Per-frame, unpaused only -- which is the only mode the mask exists in.
+    // Silent when there is nothing to do; a heal is logged ONCE per stretch so
+    // a report names the moment the world took the controls back instead of
+    // filling the log with one line per frame.
+    void ReassertGameplayInput()
+    {
+        if (!g_gameplayOff) return;
+        auto* cm = RE::ControlMap::GetSingleton();
+        if (!cm) return;
+        const std::uint32_t back = ApplyGameplayMask(cm);
+        if (back && !g_maskHealing) {
+            logger::info("[INPUT] gameplay controls came back ({:#010x}) while the "
+                         "grid was open -- re-masked", back);
+        }
+        g_maskHealing = back != 0;
+    }
+
     void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
     void MenuCloseEchoTick();        // defined below (⑫ — the close nobody heard)
 
@@ -188,6 +268,12 @@ namespace
                 SetMoveInput(true);
                 g_movementOff = false;
             }
+            // ★...and the gameplay mask on the same terms, for the same reason
+            // one line up: the world hands these controls back on its own
+            // schedule (the loot/barter door does it right after our open), and
+            // a mask that is only written once is only true once. Costs a
+            // GetControlsState and a branch on a frame where it holds.
+            ReassertGameplayInput();
             // apply capture defs + park the preview model BEFORE this frame
             // renders. While the menu is open (game paused) GridInventoryMenu::
             // AdvanceMovie drives Tick - this path covers unpaused frames.

@@ -421,6 +421,14 @@ namespace FUI::Grid
     [[nodiscard]] bool FirstSlotCenter(ImVec2& a_out);
     void ForgetSlotCenter();
 
+    // ★The board's VISIBLE rect -- the scrolling child's own -- stamped by the
+    // same draw pass. Two questions need it: "is the pointer on the player's
+    // side or the container's?", which is what the switch-sides key asks, and
+    // where the first-slot centre has to be clamped to when the board is
+    // scrolled down into its overflow rows (the first cell is off-screen then,
+    // and sending the pointer to it would send it outside the window).
+    [[nodiscard]] bool BoardRect(ImVec2& a_min, ImVec2& a_max);
+
     [[nodiscard]] int GoldAmount();   // v9: UIRoot draws the GOLD bar
 
     // ★S-G: gold's only mechanisms, called from GoldCoins::Tick (main

@@ -191,6 +191,9 @@ namespace FUI::UIRoot
         // for it without consulting the controller table (it sits past the
         // end of that array on purpose).
         kRecharge,
+        // ★Switch boards: Q on a keyboard, LS on a pad. Ours too -- vanilla
+        // has no such action, because vanilla's container screen is one list.
+        kSwapSide,
     };
     [[nodiscard]] const char* KeyLabel(Act a_act);
 

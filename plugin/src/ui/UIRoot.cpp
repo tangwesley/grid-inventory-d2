@@ -663,6 +663,17 @@ namespace FUI::UIRoot
             // and LT becomes the recharge key the board and the doll already
             // listen for as T -- the one hover verb a pad had no way to say.
             kActRecharge  = 1u << 12,
+            // ★★SWITCH BOARDS. With a container open there are two grids on
+            // screen, and crossing from one to the other is a whole window's
+            // worth of driving -- the single most repeated motion of a looting
+            // session, and the one thing a pad has no shortcut for. This puts
+            // the pointer straight onto the other board.
+            //
+            // ★Pinned to a button rather than looked up, like rotation: there
+            // is no vanilla action called "the other side of the screen", so
+            // there is nothing to inherit. LS is the one button on the pad
+            // this UI had never given a meaning to.
+            kActSwapSide  = 1u << 13,
         };
 
         std::atomic<std::uint32_t> g_padRaw{ 0 };       // physical buttons held
@@ -697,7 +708,20 @@ namespace FUI::UIRoot
         // (render thread). It cannot be paid at OnShow itself: the board's
         // screen position is whatever the main window's restored layout makes
         // it, and no window has drawn yet when the menu is told to open.
-        std::atomic<bool> g_homeOwed{ false };
+        // ★★WHICH board it goes to is the mode's answer, not a constant: a
+        // chest, a corpse, a merchant and a mark all open onto goods that are
+        // not the player's, and the pointer belongs where the session is
+        // about to happen. Plain inventory homes to the player's own board.
+        enum class HomeSide : std::uint8_t { kNone, kPlayer, kPartner };
+        std::atomic<HomeSide> g_homeOwed{ HomeSide::kNone };
+        // Where the pointer last stood on each board, so switching sides and
+        // switching back puts it on the tile it left rather than on the first
+        // slot again -- taking three things out of a chest and putting two
+        // back is two crossings, and the second one should not lose the place
+        // the first one was working in. Indexed [0] player, [1] partner.
+        ImVec2   g_sideMark[2]{};
+        bool     g_sideMarkOk[2]{};
+        HomeSide g_sideOn = HomeSide::kPlayer;   // the board the pointer is on
 
         // Who owns the pointer on a pad — decided ONCE by observation, never
         // per frame (a per-frame verdict is what made it blink).
@@ -787,6 +811,10 @@ namespace FUI::UIRoot
             if (edge(kActRotR))      io.AddKeyEvent(ImGuiKey_D, down(kActRotR));
             // LT, empty cursor: the same T the recharge hover handlers read
             if (edge(kActRecharge))  io.AddKeyEvent(ImGuiKey_T, down(kActRecharge));
+            // LS: switch boards, which is Q on a keyboard. Sent as that key so
+            // ONE piece of code reads the gesture (HandleSideSwap) and the two
+            // input roads cannot drift apart.
+            if (edge(kActSwapSide))  io.AddKeyEvent(ImGuiKey_Q, down(kActSwapSide));
             if (edge(kActSplit)) {
                 io.AddKeyEvent(ImGuiMod_Shift, down(kActSplit));
                 io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
@@ -858,6 +886,12 @@ namespace FUI::UIRoot
         std::uint32_t ActionForButton(std::uint32_t a_idCode)
         {
             using K = RE::BSWin32GamepadDevice::Keys;
+            // ★LS IS OURS AND IS NOT ASKED ABOUT. The item menu may well have
+            // a name of its own for the left stick's click, and inheriting it
+            // would mean the switch-sides button quietly becoming zoom (or
+            // nothing at all) on some setups. Same reasoning as rotation: an
+            // action vanilla has never had cannot be looked up.
+            if (a_idCode == K::kLeftThumb) return kActSwapSide;
             auto* cm = RE::ControlMap::GetSingleton();
             auto* ue = RE::UserEvents::GetSingleton();
             if (cm && ue) {
@@ -941,7 +975,7 @@ namespace FUI::UIRoot
         // runs the binding lookup above (ControlMap + string compares) once per
         // button, so it is resolved on menu open and cached — KeyLabel() is
         // called every frame a tooltip is up.
-        const char* g_padLabel[9]{};   // indexed by Act
+        const char* g_padLabel[10]{};   // indexed by Act
         bool        g_padLabelReady = false;
 
         void ResolvePadLabels()
@@ -967,6 +1001,9 @@ namespace FUI::UIRoot
                 // LT's empty-cursor half; the loop resolves it naturally
                 // (ResolvePadLabels runs with an empty cursor).
                 kActRecharge,
+                // LS, pinned in ActionForButton -- so the loop below finds it
+                // on the left thumb and the prompt bar can name the button.
+                kActSwapSide,
             };
             static_assert(std::size(kWanted) == std::size(g_padLabel));
 
@@ -1064,6 +1101,64 @@ namespace FUI::UIRoot
             dl->AddPolyline(poly, 4, kPtrEdge, ImDrawFlags_Closed, 2.1f * s);
         }
 
+        // ---- the two boards, asked the same questions -------------------
+        // Both publish the same pair (first slot, visible rect) and the
+        // pointer treats them alike, so the side is a parameter rather than a
+        // branch at every call site. Both answer false until they have drawn.
+        bool SideHome(HomeSide a_side, ImVec2& a_out)
+        {
+            if (a_side == HomeSide::kPlayer)  return Grid::FirstSlotCenter(a_out);
+            if (a_side == HomeSide::kPartner) return LootBarter::FirstSlotCenter(a_out);
+            return false;
+        }
+
+        bool SideRect(HomeSide a_side, ImVec2& a_min, ImVec2& a_max)
+        {
+            if (a_side == HomeSide::kPlayer)  return Grid::BoardRect(a_min, a_max);
+            if (a_side == HomeSide::kPartner) return LootBarter::BoardRect(a_min, a_max);
+            return false;
+        }
+
+        bool OnSide(HomeSide a_side, const ImVec2& a_p)
+        {
+            ImVec2 lo{}, hi{};
+            return SideRect(a_side, lo, hi) &&
+                   a_p.x >= lo.x && a_p.x < hi.x && a_p.y >= lo.y && a_p.y < hi.y;
+        }
+
+        // ★★★MOVING THE POINTER MEANS MOVING ALL THREE OF THEM.
+        //
+        // There is no single cursor here. Ours (g_padCursor) is what a pad
+        // integrates and what DrawPointer draws; the engine's MenuCursor is
+        // the position source for the mouse path and for pad kEngine mode; the
+        // OS cursor is what the no-CursorMenu fallback reads. Writing one and
+        // not the others means the next frame's reader undoes the move -- and
+        // which reader that is depends on the player's setup, which is exactly
+        // the kind of "works here, not there" this has to avoid.
+        //
+        // ★g_engineLast* rides along: without it our own write reads back next
+        // frame as "the engine moved its cursor by itself", which is the
+        // signal the pad ownership probe is measuring.
+        void SendCursorTo(const ImVec2& a_pos)
+        {
+            g_padCursor = a_pos;
+            g_padNudgeX = 0.0f;   // a step pressed before the jump does not
+            g_padNudgeY = 0.0f;   // get to drag the pointer back off it
+            if (auto* mc = RE::MenuCursor::GetSingleton()) {
+                mc->cursorPosX = a_pos.x;
+                mc->cursorPosY = a_pos.y;
+                g_engineLastX  = a_pos.x;
+                g_engineLastY  = a_pos.y;
+            }
+            // ...in CLIENT coordinates, like the fallback that reads it (a
+            // windowed setup is offset from the desktop).
+            if (g_gameWnd) {
+                POINT p{ static_cast<LONG>(std::lround(a_pos.x)),
+                         static_cast<LONG>(std::lround(a_pos.y)) };
+                if (ClientToScreen(g_gameWnd, &p)) SetCursorPos(p.x, p.y);
+            }
+        }
+
         void MouseHandler()
         {
             auto& io = ImGui::GetIO();
@@ -1086,14 +1181,28 @@ namespace FUI::UIRoot
                 }
             }
 
-            // ★★★THE POINTER STARTS ON THE FIRST SLOT.
+            // ★★★THE POINTER STARTS ON THE FIRST SLOT -- ON A PAD.
             //
-            // Opening the inventory used to leave the pointer wherever it had
-            // last been left -- screen centre on a pad's first open, or some
-            // corner the mouse was parked in -- so the first thing every open
-            // asked for was a drive back to the board. It starts on the first
-            // cell now, which is where the eye goes anyway and, on a pad, the
-            // one place a d-pad can count cells FROM.
+            // Opening the inventory used to leave the pointer wherever the
+            // stick had last parked it, so the first thing every open asked a
+            // controller for was a drive back to the board. It starts on the
+            // first cell now, which is where the eye goes anyway and, on a
+            // pad, the one place a d-pad can count cells FROM.
+            //
+            // ★★★AND ONLY ON A PAD (user ask). A mouse pointer is already
+            // where the hand left it: moving it is moving something the player
+            // is holding, and it arrives under a hand that did not ask for the
+            // trip -- the cursor is somewhere new and the hand has to find it
+            // again. A stick has no such position to respect: it integrates
+            // from wherever we say, so putting it on a slot costs nothing and
+            // saves the drive. Same reason the d-pad repeat is a pad feature
+            // and the arrow keys are not.
+            //
+            // ★★WHICH board that is, is the MODE's answer (HomeSide). A chest,
+            // a corpse, a merchant's shelf and a mark's pockets all open onto
+            // goods that are not the player's, and the slot that matters there
+            // is the container's first one -- so the pointer starts on THAT
+            // board, and the player's own is one key away (HandleSideSwap).
             //
             // Paid here rather than at OnShow because the board's position is
             // not knowable until it has drawn once (Grid::FirstSlotCenter):
@@ -1101,30 +1210,49 @@ namespace FUI::UIRoot
             // frame no window has drawn at all. So the debt waits -- one frame,
             // normally -- and is paid before this frame's position is read,
             // whichever source ends up reading it.
-            if (g_homeOwed.load()) {
-                if (ImVec2 home{}; Grid::FirstSlotCenter(home)) {
-                    g_homeOwed.store(false);
-                    g_padCursor = home;
-                    g_padNudgeX = 0.0f;   // nothing pressed before the open
-                    g_padNudgeY = 0.0f;   // gets to drag the pointer off it
-                    // The engine's own cursor is the position source in both
-                    // the mouse path and pad kEngine mode, so it has to be
-                    // told too -- and g_engineLast* with it, or our write
-                    // reads back next frame as "the engine moved by itself".
-                    if (auto* mc = RE::MenuCursor::GetSingleton()) {
-                        mc->cursorPosX = home.x;
-                        mc->cursorPosY = home.y;
-                        g_engineLastX  = home.x;
-                        g_engineLastY  = home.y;
-                    }
-                    // ...and the OS pointer, which is what the no-CursorMenu
-                    // fallback below reads. In CLIENT coordinates, like that
-                    // fallback (a windowed setup is offset from the desktop).
-                    if (g_gameWnd) {
-                        POINT p{ static_cast<LONG>(std::lround(home.x)),
-                                 static_cast<LONG>(std::lround(home.y)) };
-                        if (ClientToScreen(g_gameWnd, &p)) SetCursorPos(p.x, p.y);
-                    }
+            {
+                static int s_wait = 0;   // frames the debt has gone unpaid
+                const HomeSide owed = g_homeOwed.load();
+                ImVec2 home{};
+                if (owed == HomeSide::kNone) {
+                    s_wait = 0;
+                // ★A mouse keeps its own position -- the debt is DROPPED, not
+                // deferred, so picking a controller up later in the session
+                // does not suddenly teleport a pointer the player is watching.
+                // (The pad's own seed handles that handover: it takes over
+                // from wherever the pointer already is.)
+                } else if (!g_padActive.load()) {
+                    g_homeOwed.store(HomeSide::kNone);
+                    // The pointer is wherever the engine parked it -- screen
+                    // centre, typically -- which is on neither board. Start
+                    // the switch key from the player's side so its first press
+                    // in a container session goes to the GOODS; the per-frame
+                    // recorder in HandleSideSwap corrects this the moment the
+                    // pointer is actually over one of the two boards.
+                    g_sideOn = HomeSide::kPlayer;
+                    g_sideMarkOk[0] = false;
+                    g_sideMarkOk[1] = false;
+                    s_wait = 0;
+                } else if (SideHome(owed, home)) {
+                    g_homeOwed.store(HomeSide::kNone);
+                    g_sideOn = owed;
+                    // a paid debt IS the first frame of a session: the places
+                    // remembered on each board belong to the last one
+                    g_sideMarkOk[0] = false;
+                    g_sideMarkOk[1] = false;
+                    s_wait = 0;
+                    SendCursorTo(home);
+                // ★The container side can fail to arrive at all: DrawWindows
+                // stands down when the partner reference cannot be resolved,
+                // and then there is no board to point at, ever. Rather than
+                // hold the debt open for the whole session, fall back to the
+                // player's own board -- the pointer belongs on SOME slot.
+                } else if (owed == HomeSide::kPartner && ++s_wait > 60 &&
+                           Grid::FirstSlotCenter(home)) {
+                    g_homeOwed.store(HomeSide::kNone);
+                    g_sideOn = HomeSide::kPlayer;
+                    s_wait = 0;
+                    SendCursorTo(home);
                 }
             }
 
@@ -1256,6 +1384,74 @@ namespace FUI::UIRoot
                                         static_cast<float>(client.y));
                 }
             }
+        }
+
+        // ★★★ONE KEY, BOTH BOARDS -- Q on a keyboard, LS on a pad.
+        //
+        // A container session is two grids on opposite sides of the screen and
+        // a pointer that has to cross between them for every single move. On a
+        // stick that crossing IS the session: the same long drive, twenty
+        // times, through a window where nothing else is happening. This lands
+        // the pointer on the other board outright, and it is deliberately the
+        // same key for both roads -- a player switching between mouse and pad
+        // should not have to learn the gesture twice.
+        //
+        // ★It goes back to the TILE IT LEFT, not to the first slot, whenever
+        // that tile is still on that board. Taking three things out of a chest
+        // and putting two back is two crossings, and the second one should not
+        // lose the place the first one was working in. The first slot is the
+        // answer only for a board the pointer has not stood on yet.
+        //
+        // ★Runs INSIDE the frame, after both boards have drawn, so the jump is
+        // applied by the next frame's MouseHandler -- the same one-frame
+        // deferral the open's own homing uses, and invisible for the same
+        // reason.
+        void HandleSideSwap()
+        {
+            // a plain inventory has no other side to be on
+            if (LootBarter::CurrentMode() == LootBarter::Mode::kNormal) return;
+
+            auto& io = ImGui::GetIO();
+            const ImVec2 p = io.MousePos;
+            // Where the pointer stands, recorded every frame -- this is what
+            // the return trip aims at. Standing on NEITHER board (a title bar,
+            // the gold strip, empty screen) records nothing and leaves the
+            // last answer standing, so a switch from the chrome still means
+            // "the other board" rather than "the board I am hovering over".
+            if (OnSide(HomeSide::kPlayer, p)) {
+                g_sideOn = HomeSide::kPlayer;
+                g_sideMark[0] = p;
+                g_sideMarkOk[0] = true;
+            } else if (OnSide(HomeSide::kPartner, p)) {
+                g_sideOn = HomeSide::kPartner;
+                g_sideMark[1] = p;
+                g_sideMarkOk[1] = true;
+            }
+
+            // A popup owns the keyboard while it is up -- and on a pad LS is
+            // speaking to ITS buttons -- so the pointer must not be pulled out
+            // from under an unfinished count. The search box takes Q as a
+            // letter, which is the same rule from the other direction.
+            if (LootBarter::SliderActive() || LootBarter::ConfirmActive() ||
+                Grid::IsTrashConfirmOpen() || Equip::IsPopupOpen() ||
+                Grid::IsPouchOpen() || IsInspectOpen() || io.WantTextInput) {
+                return;
+            }
+            if (!ImGui::IsKeyPressed(ImGuiKey_Q, false)) return;
+
+            const HomeSide want = (g_sideOn == HomeSide::kPartner)
+                                      ? HomeSide::kPlayer
+                                      : HomeSide::kPartner;
+            const int wi = (want == HomeSide::kPlayer) ? 0 : 1;
+            ImVec2 to{};
+            if (g_sideMarkOk[wi] && OnSide(want, g_sideMark[wi])) {
+                to = g_sideMark[wi];
+            } else if (!SideHome(want, to)) {
+                return;   // that board has not drawn: there is nowhere to go
+            }
+            g_sideOn = want;
+            SendCursorTo(to);
+            Sfx::Focus();   // the pointer moved without the hand moving it
         }
 
         void ScrollHandler()
@@ -3415,7 +3611,11 @@ namespace FUI::UIRoot
                                  !bits.empty() && !hp.canRecharge });
             } else if (mode == LootBarter::Mode::kPickpocket) {
                 warn = true;
-                bits = { { "", T(S::WarnPickpocket) } };
+                // ★the switch rides the warning rather than replacing it --
+                // the same shape the trash bin's row uses, and the only place
+                // a mark's pockets can say the key exists
+                bits = { { "", T(S::WarnPickpocket) },
+                         { K(Act::kSwapSide), T(S::PromptSwitchSide), true } };
             // ★No barter row on purpose. The tooltip already names the verb
             // (buy / sell, which side of the counter decides) AND offers Shift
             // to set a quantity -- and it only offers it on a stack, which a
@@ -3423,7 +3623,17 @@ namespace FUI::UIRoot
             // duplication this bar exists to avoid, so barter falls through to
             // the overload warning instead.
             } else if (LootBarter::IsLootMode(mode)) {
-                bits = { { K(Act::kDrop), T(S::PromptTakeAll) } };
+                bits = { { K(Act::kDrop), T(S::PromptTakeAll) },
+                         { K(Act::kSwapSide), T(S::PromptSwitchSide), true } };
+            // ★Barter gets a row after all -- but only this one bit of it. The
+            // note above is about the item VERBS, which the tooltip already
+            // carries; switching sides is not an item verb, and nothing on
+            // screen names it, so this row is the only place a player can find
+            // out the key exists. It still yields to the overload warning,
+            // which is the one thing in this window that has to be said
+            // whether or not anyone asked.
+            } else if (mode == LootBarter::Mode::kBarter && !Grid::IsOverloaded()) {
+                bits = { { K(Act::kSwapSide), T(S::PromptSwitchSide) } };
             } else if (Grid::IsOverloaded()) {
                 warn = true;
                 bits = { { "", T(S::WarnOverload) }, { "", T(S::WarnOverloadFix), true } };
@@ -4244,13 +4454,30 @@ namespace FUI::UIRoot
         // rebound the controls since the last time the menu was up. Done HERE,
         // on the game thread, so the render thread only ever reads the result.
         ResolvePadLabels();
-        // ★The pointer goes to the first slot on every open. Forget last
-        // session's board position first: the layout, the scale and even the
-        // resolution may have moved since, and a stale centre would park the
-        // pointer on screen that is no longer board. Render pays the debt on
-        // the first frame that has drawn one (see MouseHandler).
+        // ★The pointer goes to the first slot on every open -- ON A PAD; a
+        // mouse keeps the position the hand left it at, and Render drops the
+        // debt when it sees one (see MouseHandler). The debt is raised either
+        // way because the input device is the RENDER thread's reading, not
+        // something this side of the menu open can answer.
+        //
+        // Forget last session's board positions first: the layout, the scale
+        // and even the resolution may have moved since, and a stale centre
+        // would park the pointer on screen that is no longer board. Render
+        // pays the debt on the first frame that has drawn one.
+        //
+        // ★★A CONTAINER SESSION AIMS AT THE CONTAINER. LootBarter::Enter runs
+        // before the menu is told to open (main.cpp swallows the vanilla menu
+        // first), so the mode is already known here and the side can be
+        // decided once, at the open, rather than guessed at every frame.
+        // ★The debt is the ONLY thing written here: it is atomic, and every
+        // other piece of this state belongs to the render thread. The side
+        // the pointer is on, and the places it is remembered on each board,
+        // are set when the debt is paid -- one frame later, over there.
         Grid::ForgetSlotCenter();
-        g_homeOwed.store(true);
+        LootBarter::ForgetSlotCenter();
+        g_homeOwed.store(LootBarter::CurrentMode() != LootBarter::Mode::kNormal
+                             ? HomeSide::kPartner
+                             : HomeSide::kPlayer);
         // Park anchor = the SAVED main-window centre — set BEFORE the first
         // capture request so no frame is ever exposed.
         {
@@ -4406,7 +4633,7 @@ namespace FUI::UIRoot
         // Mouse/keyboard side is ours to choose (these are hardcoded above in
         // the ImGui translation), so it needs no lookup.
         static constexpr const char* kKeyboard[] = {
-            "LMB", "RMB", "R", "F", "C", "Shift", "A", "D", "T",
+            "LMB", "RMB", "R", "F", "C", "Shift", "A", "D", "T", "Q",
         };
         const auto i = static_cast<std::size_t>(a_act);
         if (i >= std::size(kKeyboard)) return "";
@@ -4768,6 +4995,9 @@ namespace FUI::UIRoot
         DrawMainWindow();
         Grid::DrawBagWindows();   // one managed window per open bag (E2/E5)
         LootBarter::DrawWindows();  // container/merchant partner window (loot/barter)
+        // ★After BOTH boards have drawn: it asks each one where it is, and a
+        // board that has not drawn this frame cannot answer.
+        HandleSideSwap();           // Q / LS: put the pointer on the other board
         DrawSettingsWindow();     // ⚙ popup (scale / skin / language)
         Equip::DrawLoadoutWindows();   // L2: loadout +buy / delete confirm (top level)
         Grid::DrawPouchWindow();       // G2: coin-pouch withdraw (top level)

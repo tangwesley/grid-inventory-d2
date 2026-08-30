@@ -149,7 +149,9 @@ namespace FUI::Lang
         /* (1.5.x) a whole-cell take that only partly fit -- the rest stayed put */                         \
         X(TookWhatFit, "Took what fit - the rest stayed behind")                                            \
         X(EquippedLabel, "Equipped")   /* shift-compare card */                                             \
-        X(HintTakeAll, "R  Take all")                                                                        \
+        /* ★%s = the take-all key from UIRoot::KeyLabel -- R on a keyboard, */                              \
+        /* whatever the pad's own binding turned out to be on a controller.  */                             \
+        X(HintTakeAll, "%s  Take all")                                                                      \
         X(PrecacheLabel, "PRECACHE ALL")                                                                    \
         /* shown after a cache reset: it re-reads the drawn PNGs too, but a file */                         \
         /* ADDED since launch is not in the virtual Data folder to be found.     */                         \
@@ -254,6 +256,7 @@ namespace FUI::Lang
         X(HintRowRevert, "Right-click: revert")                                                             \
         X(PromptMax, "all")                                                                                 \
         X(PromptTakeAll, "take all")                                                                        \
+        X(PromptSwitchSide, "switch side")   /* Q / LS: pointer to the other board (loot & barter) */       \
         X(PromptQty, "set quantity")                                                                        \
         X(PromptSave, "save")                                                                               \
         X(PromptDrag, "drag")                                                                               \

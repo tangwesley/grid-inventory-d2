@@ -1258,6 +1258,10 @@ namespace FUI::Grid
         // over empty screen.
         ImVec2 g_slotHome{ 0.0f, 0.0f };
         bool   g_slotHomeOk = false;
+        // ...and the rect that cell is visible IN (Grid.h: BoardRect). Written
+        // by the same pass, so the pair is always one frame of one board.
+        ImVec2 g_boardMin{ 0.0f, 0.0f };
+        ImVec2 g_boardMax{ 0.0f, 0.0f };
         std::map<std::string, LayoutEntry>             g_layout;
         std::map<std::string, LayoutEntry>& Layout() { return g_layout; }
 
@@ -4129,7 +4133,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the bag loop starts at 1 -- so this is the one cell the pointer
             // is sent to when the menu opens.
             if (a_viewIdx == 0) {
-                g_slotHome = ImVec2(base.x + CellPx() * 0.5f, base.y + CellPx() * 0.5f);
+                // ★CLAMPED INTO WHAT IS ON SCREEN. The board scrolls (the
+                // overflow rows), and `base` scrolls with it -- walked down,
+                // cell (0,0) sits above the window and a pointer sent to it
+                // lands outside the board entirely. The topmost VISIBLE cell
+                // is the honest answer to "the first slot" for anyone who has
+                // scrolled, and the same answer as before for everyone else.
+                g_boardMin = ImGui::GetWindowPos();
+                const ImVec2 ws = ImGui::GetWindowSize();
+                g_boardMax = ImVec2(g_boardMin.x + ws.x, g_boardMin.y + ws.y);
+                const float h  = CellPx() * 0.5f;
+                const float lox = g_boardMin.x + h, hix = g_boardMax.x - h;
+                const float loy = g_boardMin.y + h, hiy = g_boardMax.y - h;
+                g_slotHome = ImVec2(
+                    std::clamp(base.x + h, lox, (std::max)(lox, hix)),
+                    std::clamp(base.y + h, loy, (std::max)(loy, hiy)));
                 g_slotHomeOk = true;
             }
 
@@ -12720,6 +12738,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void ForgetSlotCenter() { g_slotHomeOk = false; }
+
+    bool BoardRect(ImVec2& a_min, ImVec2& a_max)
+    {
+        if (!g_slotHomeOk) return false;   // same stamp, same one frame
+        a_min = g_boardMin;
+        a_max = g_boardMax;
+        return true;
+    }
 
     void Draw()
     {

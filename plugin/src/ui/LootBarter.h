@@ -55,6 +55,19 @@ namespace FUI::LootBarter
     // target). Valid after DrawWindows ran; false in kNormal.
     [[nodiscard]] bool IsPartnerHovered();
 
+    // ★★THE CONTAINER'S FIRST SLOT, and the rect it is visible in -- the
+    // partner's half of the pair Grid publishes for the player's board
+    // (Grid.h: FirstSlotCenter / BoardRect), read by the same two callers:
+    // the pointer that starts on the first slot when a chest opens, and the
+    // key that switches the pointer between the two boards.
+    //
+    // Stamped by DrawWindows, so false until the partner window has drawn once
+    // since ForgetSlotCenter() -- which Enter() calls, so the position of the
+    // LAST container is never handed out for this one.
+    [[nodiscard]] bool FirstSlotCenter(ImVec2& a_out);
+    [[nodiscard]] bool BoardRect(ImVec2& a_min, ImVec2& a_max);
+    void ForgetSlotCenter();
+
     // ---- item transfer (loot mode) ----------------------------------------
     // Queued from the render pass, applied on Tick (game thread) — engine
     // inventory moves must not run mid-frame.

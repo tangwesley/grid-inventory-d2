@@ -42,6 +42,15 @@ namespace FUI::LootBarter
 
         bool g_partnerHovered = false;   // mouse over partner window (drag-to-store)
 
+        // ★The partner board's first cell and its visible rect, in SCREEN
+        // pixels (LootBarter.h: FirstSlotCenter / BoardRect). Stamped by
+        // DrawWindows and by nothing else -- a window that has not drawn has
+        // no position, and a guessed one parks the pointer over empty screen.
+        ImVec2 g_shelfHome{ 0.0f, 0.0f };
+        ImVec2 g_shelfMin{ 0.0f, 0.0f };
+        ImVec2 g_shelfMax{ 0.0f, 0.0f };
+        bool   g_shelfHomeOk = false;
+
         // deferred item transfers — applied on Tick, game thread. Loot uses
         // kTake/kStore (no gold); barter uses kBuy/kSell (price settled too).
         struct XferReq
@@ -972,6 +981,11 @@ namespace FUI::LootBarter
     {
         g_mode = a_mode;
         g_partner = a_partner ? a_partner->CreateRefHandle() : RE::ObjectRefHandle{};
+        // ★A position stamped by the LAST container is not this one's: the
+        // window is placed where the player left it, but the board inside it
+        // is a different height and may not have drawn yet at all. UIRoot
+        // waits for the first real stamp rather than aiming at a stale one.
+        g_shelfHomeOk = false;
         // §2-C: a pouch sold while bartering releases its stored gold first
         GoldCoins::SetBarterContext(a_mode == Mode::kBarter);
 
@@ -4109,6 +4123,23 @@ namespace
 
     bool IsPartnerHovered() { return g_partnerHovered; }
 
+    bool FirstSlotCenter(ImVec2& a_out)
+    {
+        if (!g_shelfHomeOk) return false;
+        a_out = g_shelfHome;
+        return true;
+    }
+
+    bool BoardRect(ImVec2& a_min, ImVec2& a_max)
+    {
+        if (!g_shelfHomeOk) return false;   // same stamp, same one frame
+        a_min = g_shelfMin;
+        a_max = g_shelfMax;
+        return true;
+    }
+
+    void ForgetSlotCenter() { g_shelfHomeOk = false; }
+
 
     // ---- Phase 3: partner-window stages (bodies moved verbatim) ----
     namespace
@@ -5596,8 +5627,17 @@ namespace
                     // repeating the window's own title down here said the same
                     // word twice on one screen.
                 } else {
+                    // ★★THE KEY IS NOT ALWAYS R. The letter used to live INSIDE
+                    // the translated string, so this strip told a controller to
+                    // press a key it does not have -- while the prompt bar at
+                    // the foot of the screen named the right button all along,
+                    // from the same action, through KeyLabel. One source for
+                    // the glyph now; the string only says what it does.
+                    char hint[96];
+                    std::snprintf(hint, sizeof(hint), Lang::T(Lang::Str::HintTakeAll),
+                                  UIRoot::KeyLabel(UIRoot::Act::kDrop));
                     Theme::TextOutlined(wdl, ImVec2(x0, ty), Theme::Col(sk.inkDim, 1.0f),
-                        Lang::T(Lang::Str::HintTakeAll), vpx);
+                        hint, vpx);
                 }
             }
         }
@@ -5780,6 +5820,25 @@ namespace
         {
             const ImVec2 ws = ImGui::GetWindowSize();
             g_partnerClipMax = ImVec2(g_partnerClipMin.x + ws.x, g_partnerClipMin.y + ws.y);
+        }
+
+        // ★★AND WHERE ITS FIRST SLOT IS. Two things aim at it: the pointer
+        // that starts there when a chest or a corpse opens -- the goods are
+        // what you came for, so the cursor begins on THIS board and not the
+        // player's -- and the key that switches the pointer between the two
+        // boards. Clamped into the rect above for the same reason the player's
+        // board clamps its own: this child scrolls, and with a long shelf
+        // walked down, cell (0,0) sits above the window.
+        {
+            const float h   = Grid::CellPx() * 0.5f;
+            const float lox = g_partnerClipMin.x + h, hix = g_partnerClipMax.x - h;
+            const float loy = g_partnerClipMin.y + h, hiy = g_partnerClipMax.y - h;
+            g_shelfHome = ImVec2(
+                std::clamp(base.x + h, lox, (std::max)(lox, hix)),
+                std::clamp(base.y + h, loy, (std::max)(loy, hiy)));
+            g_shelfMin = g_partnerClipMin;
+            g_shelfMax = g_partnerClipMax;
+            g_shelfHomeOk = true;
         }
 
         // F7: publish this frame's grid geometry + placement for the
