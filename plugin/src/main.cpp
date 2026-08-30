@@ -168,6 +168,42 @@ namespace
     // the console is a separate window the player must keep being able to
     // raise -- ProcessScaleformEvent already stands aside for it rather than
     // fighting it.
+    // ★★★kFighting AND kSneaking ARE DELIBERATELY ABSENT TOO, and they cost
+    // more to leave out than the two above.
+    //
+    // Reported, twice, in the same shape. First: opening the inventory -- or
+    // the grid over a body -- always sheathes the player's weapons. Then, with
+    // that fixed: it still stands them up out of sneak.
+    //
+    // Nothing in this plugin sheathes or unsneaks anything; the engine does,
+    // and it does it because of these two bits. Taking them down is the same
+    // door Papyrus's DisablePlayerControls(abFighting, abSneaking) goes
+    // through, and putting the weapon away and standing the player up is part
+    // of what that door DOES. Under kPausesGame nobody ever saw either one,
+    // because the mask did not exist there; the mask arrived with "!nopause"
+    // and brought both with it.
+    //
+    // ★★THE TELL, for the next bit that turns out to belong on this list: a
+    // USER_EVENT_FLAG is not always input-only. Most of them (kMovement,
+    // kLooking, kActivate, kJumping...) only decide whether a button reaches a
+    // handler, and taking one down changes no world state at all. These two
+    // ALSO carry a piece of the player's stance, and the engine settles that
+    // stance the moment the bit drops. A flag that names a STATE the player can
+    // be in, rather than an action they can take, cannot go through ControlMap.
+    //
+    // Neither can be undone after the fact. Re-drawing or re-crouching on close
+    // is a flicker at best and a fight with the engine at worst, and neither
+    // answers the real complaint: the world is LIVE now, so a player who opens
+    // the grid mid-fight has been disarmed while they browse, and one who opens
+    // it while sneaking past a draugr has been stood up in front of it.
+    //
+    // So both bits stay up and the BUTTONS behind them are silenced one layer
+    // earlier instead -- blank-call-restore at PlayerControls' own entry point,
+    // where the wheel already does exactly this for movement (Wheeler.cpp,
+    // InputLock). enabledControls never loses either flag, so the engine is
+    // never told to change anyone's stance, and a button held across the
+    // boundary still reads as released to the handler that has to tidy it up.
+    //
     // ★No enum operators on USER_EVENT_FLAG in this CommonLib line, so the mask
     // is built in the underlying type and cast back at the call.
     constexpr std::uint32_t kBlockedMask =
@@ -175,8 +211,6 @@ namespace
         static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kLooking)   |
         static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kActivate)  |
         static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kPOVSwitch) |
-        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kFighting)  |
-        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kSneaking)  |
         static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kMainFour)  |
         static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kWheelZoom) |
         static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kJumping);
@@ -213,6 +247,11 @@ namespace
             g_maskHealing = false;
             ApplyGameplayMask(cm);
             g_gameplayOff = true;
+            // ★The half of the mask ControlMap cannot carry: kFighting and
+            // kSneaking stay up (they are what sheathe and un-crouch the
+            // player), so the BUTTONS behind them are blanked at
+            // PlayerControls' entry point for as long as this holds.
+            FUI::UIRoot::NoteGameplayMask(true);
             logger::info("[INPUT] gameplay controls masked (enabled was {:#010x}, "
                          "took down {:#010x})", g_savedEnabled, g_maskedBits);
         } else {
@@ -227,6 +266,7 @@ namespace
                 cm->ToggleControls(static_cast<UEFlag>(g_maskedBits), true, false);
             }
             g_gameplayOff = false;
+            FUI::UIRoot::NoteGameplayMask(false);   // the buttons come back too
             logger::info("[INPUT] gameplay controls restored (gave back {:#010x})",
                          g_maskedBits);
             g_maskedBits  = 0;
@@ -1436,11 +1476,11 @@ namespace
             if (const auto eq = key.find('='); eq != std::string::npos) {
                 std::string val = key.substr(eq + 1);
                 key.erase(eq);
-                val.erase(0, val.find_first_not_of(" 	"));
+                val.erase(0, val.find_first_not_of(" \t"));
                 on = !val.empty() && val[0] != '0';
             }
-            key.erase(0, key.find_first_not_of(" 	"));
-            if (const auto e = key.find_last_not_of(" 	"); e != std::string::npos) {
+            key.erase(0, key.find_first_not_of(" \t"));
+            if (const auto e = key.find_last_not_of(" \t\r"); e != std::string::npos) {
                 key.erase(e + 1);
             } else {
                 continue;
@@ -2725,6 +2765,7 @@ namespace
                                                       // against dying forms
     }
 }
+
 
 SKSEPluginInfo(
     .Version              = { 1, 5, 1, 0 },

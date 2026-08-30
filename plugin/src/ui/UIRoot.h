@@ -148,6 +148,16 @@ namespace FUI::UIRoot
     // the raw-input I-key close must not fire while the user is typing
     [[nodiscard]] bool IsTextInputActive();
 
+    // ★★True while main.cpp's "!nopause" gameplay-input mask is held. Set by
+    // the mask itself (one owner, SetGameplayInput) and read from the INPUT
+    // thread by Wheeler's InputLock, which silences the buttons the mask
+    // deliberately does not take down — kFighting and kSneaking carry the
+    // player's STANCE, so dropping them makes the engine sheathe the weapon and
+    // stand the player up. They stay up and the buttons go quiet instead. See
+    // kBlockedMask in main.cpp for the whole argument.
+    void               NoteGameplayMask(bool a_held);
+    [[nodiscard]] bool IsGameplayMasked();
+
     // ---- gamepad -----------------------------------------------------------
     // The engine hides its Cursor Menu (and stops advancing MenuCursor) when a
     // controller is driving, which left this UI with no pointer at all. These

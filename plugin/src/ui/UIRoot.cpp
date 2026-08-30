@@ -201,6 +201,10 @@ namespace FUI::UIRoot
         // assumption is now explicit
         std::atomic<bool> g_showSettings = false;
         std::atomic<bool> g_textInputOn = false;   // ImGui WantTextInput mirror (no engine calls)
+        // ★Written from the UI thread (the menu shown/hidden callbacks), read
+        // from the input thread (InputLock), hence atomic — same reason as the
+        // line above. Nothing here calls the engine.
+        std::atomic<bool> g_gameplayMasked = false;
 
         // ---- INSPECT overlay (C key) ----
         // The rotation is euler, exactly like a def, so the whole capture path
@@ -5179,6 +5183,9 @@ namespace FUI::UIRoot
     {
         return g_textInputOn;
     }
+
+    void NoteGameplayMask(bool a_held) { g_gameplayMasked = a_held; }
+    bool IsGameplayMasked()            { return g_gameplayMasked; }
 
     void AddScrollEvent(float a_x, float a_y)
     {

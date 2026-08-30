@@ -786,9 +786,15 @@ namespace FUI::Grid
                                                       RE::TESBoundObject* a_obj);
 
     // GI1: the sub-stack named by (uid, xlIdx). uid wins when the engine
-    // assigned one; otherwise the recorded position, revalidated against the
-    // CURRENT list. nullptr = a plain unit, or that instance is gone.
+    // assigned one; otherwise the recorded position, TAKEN ON TRUST.
+    // nullptr = a plain unit, or that instance is gone.
     // NEVER store the result -- the engine reallocates and frees these.
+    //
+    // ★An earlier version of this comment said the position was "revalidated
+    // against the CURRENT list". It never was, and a caller reading that would
+    // trust a check nobody wrote -- which is how a stale index came to draw
+    // another item's name and enchantment on the partner board. Prefer
+    // ExtraForUnit below, which does what this used to claim.
     [[nodiscard]] RE::ExtraDataList* ExtraForInstance(RE::InventoryEntryData* a_entry,
                                                       std::uint16_t a_uid, int a_xlIdx);
 
@@ -797,6 +803,30 @@ namespace FUI::Grid
     // later, by which time a captured position can be stale.
     [[nodiscard]] RE::ExtraDataList* ExtraForPool(RE::InventoryEntryData* a_entry,
                                                   std::uint16_t a_uid, std::uint16_t a_sig);
+
+    // The two above, in the order a DISPLAY wants them: the recorded position
+    // first but only while it still holds a unit of this pool, then the pool by
+    // name. This is ResolveExitUnit's rule (position as a verified refinement,
+    // never as the authority) for the read-only side -- tooltips, tints, glow
+    // bits, prices -- and it is what every such caller should use.
+    //
+    // A cell that remembers a position across frames (every ContCell does, and
+    // its position even survives the co-save) cannot use ExtraForInstance
+    // safely: the engine's AddExtraList prepends, so one item stored into a
+    // container renumbers every unit already in it.
+    //
+    // Unlike ExtraForPool this may return a WORN list, because a partner board
+    // deliberately shows a corpse's or a mark's equipped gear. Read-only.
+    //
+    // a_namePlainPool: may the PLAIN pool (uid 0, sig 0) be resolved by name?
+    // TRUE gives GI39's answer -- sig 0 never meant "no list", and a plain
+    // unit's ownership stamp lives in the one it shares. FALSE answers nullptr
+    // instead, which is what a caller wants when "this tile resolves to
+    // nothing" is itself a signal (the tooltip's merged-row rule).
+    [[nodiscard]] RE::ExtraDataList* ExtraForUnit(RE::InventoryEntryData* a_entry,
+                                                  std::uint16_t a_uid, int a_xlIdx,
+                                                  std::uint16_t a_sig,
+                                                  bool a_namePlainPool);
 
     // GI36: resolve the sub-stack that is really LEAVING the bag and strip its
     // favourite star in the same call. Outbound sinks (sell / store / plant /

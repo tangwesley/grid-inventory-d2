@@ -1376,6 +1376,33 @@ namespace FUI::Wheeler
         // engine holding whatever was pressed when the wheel opened -- walk,
         // open, and the character walks forever. Muted events still reach it,
         // and a held key reads as released, so it tidies itself up.
+        // ★★★THE GRID'S STANCE BLOCK RIDES THE SAME HOOK, and it is here rather
+        // than in main.cpp because there is only one PlayerControls vtable slot
+        // and InputLock already owns it.
+        //
+        // main.cpp masks the gameplay layer through ControlMap while the board
+        // is open under "!nopause", but it CANNOT take kFighting or kSneaking
+        // down: those are the bits Papyrus's DisablePlayerControls uses, and
+        // dropping them makes the engine sheathe the player's weapons and stand
+        // them out of a crouch -- the "opening the inventory puts my sword away"
+        // and "...and blows my sneak" reports. So the bits stay up and the user
+        // events behind them are silenced instead, one layer earlier, with the
+        // same blank-call-restore the wheel uses for movement.
+        //
+        // ★Matching on the user event rather than the scancode is what the
+        // engine's own handlers do, so a rebound attack or sneak key is covered
+        // for free -- and it is the reason this list is written out by name
+        // instead of being derived from the flags it stands in for.
+        [[nodiscard]] bool IsStanceEvent(const RE::BSFixedString& a_ue)
+        {
+            auto* ue = RE::UserEvents::GetSingleton();
+            if (!ue) return false;
+            return a_ue == ue->leftAttack || a_ue == ue->rightAttack ||
+                   a_ue == ue->dualAttack || a_ue == ue->forceRelease ||
+                   a_ue == ue->readyWeapon || a_ue == ue->shout ||
+                   a_ue == ue->sneak;
+        }
+
         struct InputLock
         {
             // ★★Blank, call, put back -- the same discipline as MenuLock and for
@@ -1425,6 +1452,18 @@ namespace FUI::Wheeler
                         // after us, and if it is the hotkey the wheel can never
                         // open again.
                         if (n >= 16) continue;
+                        saved[n++] = { b, b->Value() };
+                        b->GetRuntimeData().value = 0.0f;
+                    }
+                } else if (a_event && UIRoot::IsGameplayMasked()) {
+                    // ★The grid's half (see IsStanceEvent above). An `else`,
+                    // not a second pass: with the wheel up every button is
+                    // already blanked, and blanking one twice would restore the
+                    // zero rather than the value.
+                    for (auto* e = *a_event; e; e = e->next) {
+                        auto* b = e->AsButtonEvent();
+                        if (!b || !IsStanceEvent(b->QUserEvent())) continue;
+                        if (n >= 16) continue;   // no blank without a restore
                         saved[n++] = { b, b->Value() };
                         b->GetRuntimeData().value = 0.0f;
                     }

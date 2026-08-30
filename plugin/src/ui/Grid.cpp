@@ -991,6 +991,75 @@ namespace FUI::Grid
             return nullptr;   // genuinely listless (or every candidate is worn)
         }
 
+        // ★★THE RESOLVER A DISPLAY SHOULD ASK: position, VERIFIED, then pool.
+        //
+        // ExtraForTile walks to the n-th list and hands it back unexamined, and
+        // its own note says so -- the index is a hint. Every caller that trusted
+        // it and only fell back to the pool ON NULLPTR was therefore protected
+        // against a position that had run off the END of the list and against
+        // nothing else. A position that is still IN RANGE but now holds a
+        // different unit returns a perfectly good pointer to the wrong item, and
+        // the pool fallback never runs.
+        //
+        // Which is a bug the partner board could not avoid, because a ContCell
+        // records its position ONCE, when the cell is born, and keeps it (it is
+        // even written to the co-save). InventoryEntryData::AddExtraList does
+        // extraLists->push_front, so storing one affixed Long Bow into a chest
+        // that already held another shifted every index by one: the cell that
+        // was there first still said 0, index 0 was now the bow just dropped in,
+        // and BOTH tiles drew the stored bow's name, enchantment, rarity tint
+        // and price. Taking either one out "fixed" it, because the surviving
+        // cell was alone again.
+        //
+        // ResolveExitUnit has had the right shape since GI44 -- pool first,
+        // position only as a VERIFIED refinement -- which is why the TAKE landed
+        // on the bow the player pointed at while the picture of it lied. This is
+        // that rule, said once, for the read-only side.
+        //
+        // ★A stale position now costs ACCURACY WITHIN A POOL and never
+        // correctness, and units of one pool are interchangeable by definition:
+        // same temper, same enchantment, same name, same price. There is no
+        // observable difference left to get wrong.
+        //
+        // a_namePlainPool: may the PLAIN pool (uid 0, sig 0) be resolved by
+        // name? The two callers genuinely differ and always have, so it is a
+        // parameter rather than a decision taken here:
+        //
+        //  - the partner board says YES. GI39: sig 0 never meant "no list" --
+        //    the engine groups identical units into one list carrying a count
+        //    -- and that list is where a plain unit's ownership stamp lives,
+        //    which the stolen mark reads.
+        //  - the tooltip says NO, and its `aggregate` rule is built on that: a
+        //    stackable tile that resolves to NOTHING is how it recognises a
+        //    merged row and takes its name from the entry, which is what makes
+        //    a book's alias tokens expand. Handing it the plain pool's list
+        //    would quietly turn that off.
+        RE::ExtraDataList* ExtraForUnitImpl(RE::InventoryEntryData* a_entry,
+                                            std::uint16_t a_uid, int a_xlIdx,
+                                            std::uint16_t a_sig,
+                                            bool a_namePlainPool)
+        {
+            if (auto* xl = ExtraForTile(a_entry, a_uid, a_xlIdx)) {
+                // A uid was matched BY uid, not by position -- ExtraForTile
+                // never consults a_xlIdx in that branch, so there is nothing
+                // here left to verify.
+                if (a_uid != 0 || InstanceSig(xl) == a_sig) return xl;
+                // else: the position drifted onto another pool's unit. Fall
+                // through and ask by name instead.
+            }
+            if (a_uid == 0 && a_sig == 0 && !a_namePlainPool) return nullptr;
+            if (auto* xl = ExtraForPoolImpl(a_entry, a_uid, a_sig)) return xl;
+            // ★AND THE WORN ONE, AS A LAST RESORT -- for display only, which is
+            // all this resolver is for. A partner board shows what a corpse or a
+            // pickpocket mark is WEARING on purpose, and those tiles reach here
+            // with the worn list as their answer; the strict pass above excludes
+            // it (rightly: handing a worn list to RemoveItem sells the sword out
+            // of someone's hand). Refusing it here would trade "another item's
+            // data" for "no data" on exactly those tiles, which is a different
+            // wrong picture, not a right one.
+            return ExtraForPoolImpl(a_entry, a_uid, a_sig, /*allowWorn*/ true);
+        }
+
         // Same, starting from the player's live InventoryChanges (the engine's
         // OWN entry -- GetInventory hands out copies, so mutations there are
         // silently discarded).
@@ -10621,6 +10690,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return ExtraForPoolImpl(a_entry, a_uid, a_sig);
     }
 
+    RE::ExtraDataList* ExtraForUnit(RE::InventoryEntryData* a_entry,
+                                    std::uint16_t a_uid, int a_xlIdx,
+                                    std::uint16_t a_sig, bool a_namePlainPool)
+    {
+        return ExtraForUnitImpl(a_entry, a_uid, a_xlIdx, a_sig, a_namePlainPool);
+    }
+
     UnitChoice PoolChoice(RE::InventoryEntryData* a_entry, std::uint16_t a_uid,
                           std::uint16_t a_sig, bool a_nameWorn, bool a_wornLegal)
     {
@@ -11530,8 +11606,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!a_obj) return "";
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* entry = LiveEntryOf(player, a_obj);
-        auto* xl = ExtraForInstance(entry, a_uid, a_xlIdx);
-        if (!xl && a_sig != 0) xl = ExtraForPool(entry, a_uid, a_sig);
+        // ★The position is VERIFIED against the pool before it is believed --
+        // same resolver, same reason as the tooltip. A player tile's xlIdx is
+        // re-derived by the live unit walk every collection, so it drifts far
+        // less than a partner cell's; "less" is not "never", and there is no
+        // reason for the two boards to name an item by different rules.
+        // a_namePlainPool false: the entry fallback on the next line is this
+        // function's own version of the tooltip's merged-row rule, and it needs
+        // a plain-pool tile to keep resolving to nothing.
+        auto* xl = ExtraForUnitImpl(entry, a_uid, a_xlIdx, a_sig, false);
         return DisplayNameOf(a_obj, xl,
                              (!xl && StackCap(a_obj) > 1) ? entry : nullptr);
     }
@@ -11884,20 +11967,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         RE::ExtraDataList* scoped = nullptr;
         switch (a_scope) {
         case ExtraScope::kUnit:
-            scoped = ExtraForTile(entry, a_uid, a_xlIdx);
-            // ★★★...AND BY POOL WHEN THE TILE CANNOT BE NAMED. A unit sitting
-            // in a container on our side of a transfer has no uid (the engine
-            // assigns none) and no recorded position (xlIdx is -1), so the
-            // lookup above misses and a tempered dagger reads as plain --
-            // measured, two of them in one barrel both lost their name while
+            // ★★★POSITION, VERIFIED, THEN BY POOL. A unit sitting in a
+            // container on our side of a transfer has no uid (the engine
+            // assigns none) and no recorded position (xlIdx is -1), so a
+            // position-only lookup misses and a tempered dagger reads as plain
+            // -- measured, two of them in one barrel both lost their name while
             // their signature matched the held list exactly.
+            //
+            // ★And a position that is stale but IN RANGE is worse than one that
+            // misses: it answers with another unit's list, so the old "fall back
+            // only on nullptr" never got its turn. A partner cell holds its
+            // position for the life of the cell, and AddExtraList prepends --
+            // so storing one enchanted bow into a chest that already held one
+            // printed the stored bow's affix on BOTH tooltips. ExtraForUnit
+            // checks the position against the pool before trusting it.
             //
             // ★This is NOT the entry fallback the note below forbids, and the
             // difference is the whole point: the entry's name is its FIRST
             // sub-stack's, borrowed by units that are nothing like it, whereas
             // a signature match means the same contents -- same temper, same
             // enchantment, same name. Reading either is reading this unit's.
-            if (!scoped && a_sig != 0) scoped = ExtraForPool(entry, a_uid, a_sig);
+            //
+            // ★a_namePlainPool FALSE, which is what keeps the `aggregate` rule
+            // below working: a plain-pool tile must still resolve to NOTHING,
+            // because that is how a merged stackable row is recognised.
+            scoped = ExtraForUnitImpl(entry, a_uid, a_xlIdx, a_sig, false);
             break;
         case ExtraScope::kWorn:
             scoped = WornExtraMatching(entry, a_uid, a_sig, a_hand);

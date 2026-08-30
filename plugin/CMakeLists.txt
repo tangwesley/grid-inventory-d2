@@ -150,7 +150,7 @@ endif()
 # Point MOD_ROOT at your own mod folder (-DMOD_ROOT=...). The copy step is
 # skipped entirely when the folder does not exist, so a plain clone builds
 # without any local setup.
-set(MOD_ROOT "H:/Game/Fablerim/mods/Grid Inventory" CACHE PATH
+set(MOD_ROOT "C:/Modding/MO2/mods/Diablo In Skyrim" CACHE PATH
     "MO2 mod folder the built DLL is copied into (skipped if absent)")
 if(EXISTS "${MOD_ROOT}")
     set(DLL_DEPLOY "${MOD_ROOT}/SKSE/Plugins")

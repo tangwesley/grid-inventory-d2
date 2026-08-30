@@ -1269,8 +1269,14 @@ namespace FUI::Equip
                     FUI::Sfx::Notify(spell->GetName(), "UISpellLearned");
                     // GI36: name the copy being consumed instead of letting the
                     // engine pick, and let rule 58 take its star with it.
-                    auto* bxl = Grid::ExtraForInstance(
-                        Grid::LiveEntryOf(player, book), act.uid, act.xlIdx);
+                    // ★Resolved the way the RemoveItem below resolves, so the
+                    // star we test for and the copy that actually leaves are
+                    // the same unit: ResolveExitUnit treats the position as a
+                    // refinement to be VERIFIED, and an unverified one here
+                    // could read a sibling's star (or miss this copy's).
+                    auto* bxl = Grid::ExtraForUnit(
+                        Grid::LiveEntryOf(player, book), act.uid, act.xlIdx,
+                        act.sig, /*namePlainPool*/ true);
                     const int starred =
                         (bxl && bxl->HasType<RE::ExtraHotkey>()) ? 1 : 0;
                     player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,

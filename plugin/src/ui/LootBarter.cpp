@@ -4659,28 +4659,46 @@ namespace
                 }
                 const auto def = Grid::ResolveDef(obj);
                 const bool perUnit = Grid::StackCap(obj) <= 1;
-                auto* xl = Grid::ExtraForInstance(entry, c.uid, c.xlIdx);
-                // ★★★FALL BACK TO THE POOL WHEN THE INSTANCE CANNOT BE NAMED.
+                // ★★★POSITION, VERIFIED, THEN THE POOL. See ExtraForUnit.
                 //
-                // ExtraForInstance finds a list by uid, or failing that by its
-                // recorded position. A unit stored on OUR side of a container
-                // has neither: the engine assigns no uid, and the cell carries
-                // xlIdx = -1 because the position was never recorded. Measured:
-                // `want uid=0000 sig=B825 idx=-1 -> xl=N` against a container
-                // holding exactly `[0 uid=0000 sig=B825 own=00000007]`. The
-                // signature matched perfectly and was simply never consulted.
+                // A list is found by uid, or failing that by its recorded
+                // position, or failing THAT by signature. Both of the later two
+                // matter here and the middle one has to be checked:
                 //
-                // Everything the list carries goes with that miss -- temper,
+                //  - A unit stored on OUR side of a container has no uid (the
+                //    engine assigns none) and arrives with xlIdx = -1, because
+                //    the position was never recorded. Measured: `want uid=0000
+                //    sig=B825 idx=-1 -> xl=N` against a container holding
+                //    exactly `[0 uid=0000 sig=B825 own=00000007]`. The signature
+                //    matched perfectly and was simply never consulted, so a
+                //    second tempered dagger in a barrel made BOTH read as plain
+                //    and eventually marked all of them stolen.
+                //
+                //  - ★And a cell's position GOES STALE IN PLACE. c.xlIdx is
+                //    written once, when the cell is born, and never again --
+                //    it even rides the co-save. AddExtraList prepends, so
+                //    storing an affixed Long Bow into a chest that already held
+                //    one renumbered the resident bow's list from 0 to 1 while
+                //    its cell still said 0. Index 0 was now the bow just
+                //    dropped in, and both tiles drew that bow's name,
+                //    enchantment, tint and price. An index that is stale but
+                //    IN RANGE returns a good pointer to the wrong unit, so the
+                //    old `if (!xl)` fallback never fired.
+                //
+                // Everything the list carries rides on this -- temper,
                 // enchantment, price, and the ownership the stolen mark reads
-                // -- which is why a second tempered dagger in a barrel made
-                // BOTH read as plain and eventually marked all of them stolen.
+                // just below.
                 //
                 // ★The pool is the right granularity for a display: units that
                 // share a signature carry the same temper and the same price,
                 // so reading either answers the cell's question. It is NOT
                 // precise enough to move an item by, which is exactly why
                 // transfers keep using their own resolution.
-                if (!xl) xl = Grid::ExtraForPool(entry, c.uid, c.sig);
+                //
+                // ★a_namePlainPool TRUE: GI39 again -- sig 0 never meant "no
+                // list", and for a plain unit that list is where the ownership
+                // stamp the stolen mark reads actually lives.
+                auto* xl = Grid::ExtraForUnit(entry, c.uid, c.xlIdx, c.sig, true);
                 // GI43: a per-unit cell is priced from ITS list -- a tempered
                 // unit buys/sells at the vanilla tempered value.
                 int value = perUnit ? Grid::UnitValueWith(obj, xl) : unitValue;
