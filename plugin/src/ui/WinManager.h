@@ -72,6 +72,27 @@ namespace FUI
         // what makes a paused/unpaused A/B possible inside one session.
         // See GridInventoryMenu::NoPause.
         [[nodiscard]] static bool ReadNoPause(bool a_default);
+        // ★The wheel's OWN key, and the reason it can be one again.
+        //
+        // The wheel follows the game's Favourites binding, and for a long time
+        // that was the whole story -- one source, no setting to own. Then a
+        // player rebound Inventory onto that key, and the wheel's pre-menu
+        // blanking (Wheeler MenuLock) erased it before the engine could open
+        // anything: the vanilla InventoryMenu never opened, so our intercept
+        // never fired, so the inventory could not be opened AT ALL. Reported.
+        //
+        // ★This is an OVERRIDE, not a copy of the live value -- which is what
+        // the old ini key was, and why it had to go: Save() wrote whatever the
+        // wheel was currently on, and the next open read that stale number
+        // back over the player's rebind. 0 means "follow the game", and
+        // re-reading 0 a hundred times cannot fight anything.
+        // a_pad: false = keyboard scan code, true = gamepad button.
+        [[nodiscard]] static std::uint32_t ReadWheelKey(bool a_pad);
+        // ★How long a press has to be to count as a HOLD rather than a tap,
+        // in milliseconds. Same early-read reason as the two above: the wheel
+        // answers a key during ordinary play, long before any window exists.
+        // 0 or nonsense returns the default the caller passes.
+        [[nodiscard]] static int ReadWheelTapMs(int a_default);
         // GI46-48: NAMED share files. "Default" -> GridInventory_Default.ini,
         // "P1" -> GridInventory_P1.ini ... each beside its icon bundle
         // (GridInventory_<name>_icons.pak). One ini carries the style subset

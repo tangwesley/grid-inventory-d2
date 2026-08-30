@@ -356,31 +356,117 @@ namespace FUI::UIRoot
             static unsigned s_lastChars = 0;
             static int      s_contradictions = 0;
 
+            // A press waiting one frame to see whether the window road answers
+            // it -- see the doubt block below. Modifiers travel WITH the press,
+            // because by the time it is judged the player may have let shift go.
+            struct Pending { int vk; bool shift; bool caps; };
+            static Pending  s_pend[8] = {};
+            static int      s_pendN = 0;
+            static unsigned s_pendBase = 0;
+
             // Only ever while a text field is waiting. Outside one there is
             // nothing to type into, and ToUnicodeEx is stateful (dead keys) --
             // calling it for every key at all times would leave half-composed
             // accents lying around for the next field that opens.
-            if (!a_io.WantTextInput) {
+            //
+            // ★And only while the board actually owns the keyboard. This is the
+            // SECOND road for characters, so the guard the thunk carries has to
+            // sit on it too -- "blocking one road and calling it done is the
+            // whole bug" is written thirty lines up, about this very pair. With
+            // the console up, or somebody else's overlay holding us suppressed,
+            // WantTextInput can still read true from the frame before, and an
+            // unguarded road would put the player's console command into our
+            // search box.
+            auto* ui = RE::UI::GetSingleton();
+            if (!a_io.WantTextInput || !IsBoardLive() ||
+                !ui || ui->IsMenuOpen(RE::Console::MENU_NAME)) {
                 for (auto& d : s_down) d = false;
+                s_pendN = 0;   // nothing left to type into; drop the doubt too
                 return;
             }
 
             const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            const bool caps  = (GetKeyState(VK_CAPITAL) & 1) != 0;
 
+            // The count as of the PREVIOUS sweep. A press detected now happened
+            // somewhere between that sweep and this one, so this is the mark a
+            // later WM_CHAR has to beat to prove it belongs to that press.
+            const unsigned prevChars = s_lastChars;
             const unsigned chars = g_wmCharSeen.load(std::memory_order_relaxed);
             const bool     wmAlive = chars != s_lastChars;
             s_lastChars = chars;
 
-            BYTE ks[256] = {};
-            if (g_kbFallback) {
+            // ★★A WM_CHAR JUST ARRIVED, AND THAT HAS TO BE ACTED ON.
+            // The build that only ever counted upward is why a reporter saw
+            // every letter typed twice. Two things follow from one arrival:
+            //
+            //   1. The tally goes back to zero. The latch below reasons "one
+            //      frame could be a race; three cannot" -- true of three IN A
+            //      ROW, and this counter never reset, so it was three IN A
+            //      LIFETIME. Races an hour apart added up on a machine whose
+            //      WM_CHAR was never broken for a moment.
+            //   2. The fallback lets go. It is the second road; it exists only
+            //      while the first is dead, and the first just spoke. Both alive
+            //      means both deliver, and ImGui cannot tell that the two
+            //      characters were one keystroke.
+            //
+            // Order matters: this runs BEFORE the sweep, so on the frame the
+            // window road comes back it is already the only road.
+            if (wmAlive) {
+                s_contradictions = 0;
+                if (g_kbFallback) {
+                    g_kbFallback = false;
+                    SKSE::log::info(
+                        "[UI] input: WM_CHAR is arriving again (chars {}). Polled "
+                        "characters off -- the window road has the keyboard.",
+                        chars);
+                }
+            }
+
+            auto synth = [&a_io](int a_vk, bool a_shift, bool a_caps) {
                 // ToUnicodeEx reads the WHOLE table, so the modifiers have to be
-                // in it or every letter comes out lower case.
-                if (shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
-                if (ctrl)  { ks[VK_CONTROL] = 0x80; }
-                if (alt)   { ks[VK_MENU] = 0x80; }
-                if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] = 0x01;
+                // in it or every letter comes out lower case. Ctrl and Alt are
+                // never here: a shortcut is filtered out before it can queue.
+                BYTE ks[256] = {};
+                if (a_shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
+                if (a_caps)  { ks[VK_CAPITAL] = 0x01; }
+                const UINT sc = MapVirtualKeyW(static_cast<UINT>(a_vk), MAPVK_VK_TO_VSC);
+                WCHAR     buf[8] = {};
+                const int n = ToUnicodeEx(static_cast<UINT>(a_vk), sc, ks, buf,
+                                          static_cast<int>(std::size(buf)), 0,
+                                          GetKeyboardLayout(0));
+                for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
+                    if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                }
+            };
+
+            // ★★★ONE FRAME OF DOUBT, AND THE DOUBLING BECOMES IMPOSSIBLE.
+            //
+            // The latch above is evidence, and evidence can be stale: it was
+            // gathered at some earlier moment and the road may have been fine
+            // ever since. Acting on it the instant a key goes down is what let a
+            // wrongly-latched session put the FIRST letter in twice -- the spare
+            // road spoke in the same frame as the press, and the real WM_CHAR
+            // for it only arrived on the next.
+            //
+            // So a press is not answered where it is seen. It waits one sweep,
+            // and is spoken for only if no WM_CHAR turned up in the meantime.
+            // On a healthy machine one always does, so nothing is ever
+            // synthesised and the un-latch above happens off the same evidence:
+            // not one doubled character, not even the first.
+            //
+            // On a machine whose road really is dead, nothing turns up, every
+            // press is spoken for, and the whole cost is one frame -- sixteen
+            // milliseconds of a keystroke nobody was going to receive at all.
+            if (s_pendN > 0) {
+                if (chars == s_pendBase) {
+                    for (int i = 0; i < s_pendN; ++i) {
+                        synth(s_pend[i].vk, s_pend[i].shift, s_pend[i].caps);
+                    }
+                }
+                s_pendN = 0;
             }
 
             for (int vk = 0; vk < 256; ++vk) {
@@ -390,13 +476,26 @@ namespace FUI::UIRoot
                 s_down[vk] = now;
                 if (!now) continue;
 
+                // ★A SHORTCUT IS NOT A CHARACTER, and it must not be judged as
+                // one. This sat below, inside the fallback branch only, so the
+                // latch above it saw every shortcut as evidence: Ctrl+A and
+                // Ctrl+V in the search box arrive as control codes, and ANY Alt
+                // combination arrives as WM_SYSCHAR -- which the thunk does not
+                // count at all, making each one a guaranteed "contradiction".
+                // Selecting-all and pasting a search term could latch the
+                // doubling road by itself. It belongs above BOTH branches.
+                if (ctrl || alt) continue;
+
                 if (!g_kbFallback) {
                     // ★THE LATCH, and it is a CONTRADICTION rather than a
                     // timeout: a printable key went down while a text field was
                     // focused, and no WM_CHAR arrived for it. One such frame
-                    // could be a race; three cannot. On a healthy setup this can
-                    // never fire, so the road stays inert -- one sweep a frame
-                    // while typing, and no events at all.
+                    // could be a race -- GetAsyncKeyState is true the instant the
+                    // key is physically down, while the count above only rises
+                    // when the game's message pump dispatches, so a key pressed
+                    // after this frame's pump reads as a contradiction and is
+                    // answered next frame. Three CONSECUTIVE cannot be that; the
+                    // reset above is what makes the word consecutive true.
                     if (!wmAlive && ++s_contradictions >= 3) {
                         g_kbFallback = true;
                         SKSE::log::warn(
@@ -411,14 +510,16 @@ namespace FUI::UIRoot
                     continue;
                 }
 
-                if (ctrl || alt) continue;   // a shortcut, not a character
-                const UINT sc = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
-                WCHAR     buf[8] = {};
-                const int n = ToUnicodeEx(static_cast<UINT>(vk), sc, ks, buf,
-                                          static_cast<int>(std::size(buf)), 0,
-                                          GetKeyboardLayout(0));
-                for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
-                    if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                // Queued, not spoken. Judged on the next sweep against the mark
+                // taken before the press. The overflow arm can only be reached
+                // by eight printable keys going down inside one frame, and a
+                // keystroke that cannot be queued is spoken immediately rather
+                // than lost.
+                if (s_pendN < static_cast<int>(std::size(s_pend))) {
+                    s_pendBase = prevChars;
+                    s_pend[s_pendN++] = { vk, shift, caps };
+                } else {
+                    synth(vk, shift, caps);
                 }
             }
         }
@@ -745,6 +846,19 @@ namespace FUI::UIRoot
         // Render reads it on the render thread.
         std::atomic<bool> g_suppressed{ false };
         int               g_suppressTicks = 0;   // safety-net age, in Ticks
+        // ★A named client holds this one (UIRoot.h SuppressBy). ATOMIC because
+        // a client dispatches its message on whatever thread it likes, and
+        // SKSE hands the dispatch straight to us on that thread -- a plain
+        // bool written there and read by the net is a data race.
+        std::atomic<bool> g_suppressByClient{ false };
+        // ...and the request itself is parked rather than acted on, for the
+        // same reason. Guarded because the sender's name is a string: two
+        // clients arriving at once must not tear it. Not a per-frame path --
+        // this is touched once per suppress message (rule 4-3 #3 is safe).
+        std::mutex        g_clientReqLock;
+        bool              g_clientReqPending = false;
+        bool              g_clientReqOn      = false;
+        std::string       g_clientReqWho;
 
         // Called from the input sink (game thread, but not the render pass) —
         // only flags are touched here; the cursor is seeded during the frame.
@@ -4128,8 +4242,55 @@ namespace FUI::UIRoot
         }
     }
 
-    void Suppress(bool a_on, const char* a_why)
+    void Suppress(bool a_on, const char* a_why, SuppressBy a_by)
     {
+        // ★★OWNERSHIP, and both halves of it run BEFORE the early-out.
+        //
+        // Both halves run BEFORE the early-out, so that a message arriving
+        // while the state is already what it asks for still settles OWNERSHIP:
+        // a client whose suppress lands while the engine already had us hidden
+        // would otherwise never own the thing it asked for.
+        if (a_on) {
+            if (a_by == SuppressBy::kClient) {
+                // ★★★A HOLD OVER NOTHING IS A TRAP, and with no timer behind
+                // it, a permanent one. Taken while the inventory is CLOSED,
+                // the hold survives to the next open -- where kShow is refused
+                // (it is kEngine), the board never draws, and every key that
+                // could close it is gated behind IsBoardLive. The player would
+                // have an open, invisible, unreachable menu for the rest of
+                // the session, and nothing in the design would ever end it.
+                //
+                // There is nothing to step aside from when we are not on
+                // screen, so the request is refused rather than banked.
+                if (!IsSessionOpen()) {
+                    SKSE::log::warn("[SUPPRESS] refused ({}): the inventory is "
+                                    "not open -- send it while the menu is up",
+                                    a_why);
+                    return;
+                }
+                g_suppressByClient.store(true);
+            }
+        } else {
+            // ★★GIVING BACK IS THE HOLDER'S TO DO, and it cuts BOTH ways.
+            //
+            // kEngine while a client holds: refused. The engine hands us a
+            // kShow whenever the stack thinks we are topmost again, and
+            // honouring it would put the board back on screen over a client
+            // window that is still up, silently, with no event the client
+            // could answer.
+            //
+            // kClient while the ENGINE holds: also refused, and this one is
+            // less obvious. A client that closes its window while a vanilla
+            // confirmation box happens to be up would otherwise lift the box's
+            // suppression too -- and the net never re-suppresses, it only
+            // releases, so the board would sit over that box until the player
+            // dismissed it. That is exactly the bug 1.5.1 was released to fix,
+            // reachable again through a release nobody meant to be about it.
+            const bool held = g_suppressByClient.load();
+            if (a_by == SuppressBy::kEngine && held)  return;
+            if (a_by == SuppressBy::kClient && !held) return;
+            g_suppressByClient.store(false);
+        }
         if (g_suppressed.exchange(a_on) == a_on) return;
         if (a_on) {
             g_suppressTicks = 0;
@@ -4149,20 +4310,68 @@ namespace FUI::UIRoot
                     open += name.c_str();
                 }
             }
-            SKSE::log::info("[SUPPRESS] on ({}) -- open menus:{}", a_why,
+            SKSE::log::info("[SUPPRESS] on ({}, {}) -- open menus:{}", a_why,
+                            g_suppressByClient.load() ? "client-held" : "engine",
                             open.empty() ? " (none)" : open.c_str());
         } else {
             SKSE::log::info("[SUPPRESS] off ({})", a_why);
         }
     }
 
+    void RequestClientSuppress(bool a_on, const char* a_who)
+    {
+        // Nothing here may touch the engine: see the header. Park and return.
+        std::scoped_lock lock(g_clientReqLock);
+        g_clientReqPending = true;
+        g_clientReqOn      = a_on;
+        g_clientReqWho     = a_who ? a_who : "api";
+    }
+
+    // Game thread, from Tick. Applies whatever the last message asked for --
+    // a suppress and a release in the same frame collapse to the release,
+    // which is the right answer for a boolean.
+    void ApplyPendingClientSuppress()
+    {
+        bool        on{};
+        std::string who;
+        {
+            std::scoped_lock lock(g_clientReqLock);
+            if (!g_clientReqPending) return;
+            g_clientReqPending = false;
+            on                 = g_clientReqOn;
+            who                = std::move(g_clientReqWho);
+            g_clientReqWho.clear();
+        }
+        Suppress(on, who.c_str(), SuppressBy::kClient);
+    }
+
     bool IsSuppressed() { return g_suppressed.load(std::memory_order_relaxed); }
+
+    bool IsSuppressedByClient() { return g_suppressByClient.load(); }
+
+    std::uint32_t MappedScanCode(std::string_view a_event)
+    {
+        if (auto* cm = RE::ControlMap::GetSingleton()) {
+            using Ctx = RE::ControlMap::InputContextID;
+            for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(Ctx::kTotal); ++c) {
+                const auto k = cm->GetMappedKey(a_event, RE::INPUT_DEVICE::kKeyboard,
+                                                static_cast<Ctx>(c));
+                if (k != 0xFF && k != 0xFFFFFFFF && k != 0) return k;
+            }
+        }
+        return 0;
+    }
+
+    bool IsSessionOpen()
+    {
+        auto* ui = RE::UI::GetSingleton();
+        return ui && ui->IsMenuOpen(GridInventoryMenu::MENU_NAME);
+    }
 
     bool IsBoardLive()
     {
         if (IsSuppressed()) return false;
-        auto* ui = RE::UI::GetSingleton();
-        return ui && ui->IsMenuOpen(GridInventoryMenu::MENU_NAME);
+        return IsSessionOpen();
     }
 
     void OpenInspect(RE::TESBoundObject* a_obj, const std::string& a_key)
@@ -4531,12 +4740,53 @@ namespace FUI::UIRoot
         // the visible sprites for the open transition.
         g_prefetchOwed = true;
 
+        // ★The wheel's magic side cannot photograph its own icons -- no 3D
+        // scene there -- and a spell is never in the bag, so nothing else
+        // would ever ask. Every open, because favourites change between them.
+        IconCache::GetSingleton()->QueueFavouriteSpells();
+
         SKSE::log::info("[UI] menu shown ({} icons cached)",
             IconCache::GetSingleton()->CachedCount());
+
+        // ★AUTHOR TOOLING, on the same watch-file idiom as the vanilla
+        // passthrough: drop the file, open the bag once, and the shipping pak
+        // is beside it. Nothing here runs for a player, and the file is removed
+        // afterwards so a forgotten one cannot rewrite the pak every session.
+        //
+        // ★★THE TWO SURVEYS MOVED IN HERE, and that is the whole change. They
+        // asked how many armours have a picture that depends on who wears them,
+        // and how many spells the engine already draws an object for. Both
+        // questions are ANSWERED -- 268 of 4386, and 813 of 947 -- and both
+        // answers were acted on: the sex-dependent ones are left out of the pak
+        // and the spells got their icons. What was left was a form-array walk
+        // and thirteen lines of internal arithmetic in the log of every player
+        // who ever opened a bag, reporting a decision that had already been
+        // taken. They belong with the tool that consumes them, behind its file.
+        static bool s_authorRan = false;
+        if (!s_authorRan) {
+            s_authorRan = true;
+            std::error_code ec;
+            constexpr const char* kFlag =
+                "Data/SKSE/Plugins/GridInventory_makeshippingpak.txt";
+            if (std::filesystem::exists(kFlag, ec)) {
+                IconCache::GetSingleton()->ReportSexSpecificArmour();
+                IconCache::GetSingleton()->ReportSpellDisplayObjects();
+                IconCache::GetSingleton()->ExportShippingPak(
+                    "Data/SKSE/Plugins/GridInventory_icons.shipping.pak");
+                std::filesystem::remove(kFlag, ec);
+            }
+        }
     }
 
     void OnClose()
     {
+        // ★★A HOLD MUST NOT OUTLIVE THE THING IT WAS HELD OVER. A client hold
+        // refuses the engine's kShow and never expires, so if it is not
+        // answered here NOTHING answers it: the next open would come up
+        // suppressed and invisible and stay that way for the rest of the
+        // session. The window it was covering is gone, so the hold ends here
+        // -- with kOverride, because the client is not the one saying so.
+        Suppress(false, "menu closed", SuppressBy::kOverride);
         CloseInspect();           // release the pinned inspect model + engine scale
         Editor::OnMenuClosed();   // flush pending edits, drop selection
         // F2: closing the whole menu confirms every parked deletion; flush
@@ -5081,7 +5331,50 @@ namespace FUI::UIRoot
         // window but the permanent furniture remains, nobody is there any
         // more and we come back. The grace lets a mod close one window and
         // open the next without us flashing in between.
-        if (IsSuppressed()) {
+        // ★Before the net looks at anything: a client's request parked on
+        // another thread becomes real HERE, where the engine is safe to read.
+        ApplyPendingClientSuppress();
+        if (IsSuppressed() && IsSuppressedByClient()) {
+            // ★★★A CLIENT THAT ASKED BY NAME IS NOT A CLIENT THAT FORGOT.
+            //
+            // The stack test below is structurally blind to it, and that was
+            // measured rather than argued: the author of Fitting Room / Menu
+            // Studio timed six suppressions and the net revoked every one of
+            // them 166-341ms in, always with "nothing left above us". Their
+            // editor is a Flick overlay, not a registered menu, so it never
+            // appears in the menu map at all -- "nothing above us" was true
+            // from the first frame, and no test over that map can ever say
+            // otherwise. The net was right about the stack and wrong about
+            // the screen.
+            //
+            // ★★AND NO TIMER EITHER, which took one more round to see. The
+            // first version kept a ten-minute backstop here on the grounds
+            // that a client dying while holding this would strand the player.
+            // It would -- but nobody sits in front of a frozen game for ten
+            // minutes. Two is where people reach for the task manager. So the
+            // timer could not reach the case it was written for, and the only
+            // thing it could still reach was a LEGITIMATE session that ran
+            // long, which it would end for no reason. A safety net that
+            // cannot arrive in time is not a safety net; it is a bug with an
+            // alibi.
+            //
+            // So the hold is absolute, and the client owns every exit path of
+            // its own window (checklist 6-1: the same pairing rule as an
+            // injected key's IsUp). Ours are still ours: our close, a save
+            // load and a new game all take it back.
+            //
+            // ★And ONE test remains, which is not a timer: a hold cannot
+            // outlive the session it was taken over. OnClose answers the
+            // ordinary close, but a menu torn down without a kForceHide would
+            // leave the hold standing, and the next open would come up
+            // invisible and unreachable for good. This is a structural
+            // question, not a clock, so it costs the client nothing and
+            // answers within one tick.
+            if (!IsSessionOpen()) {
+                Suppress(false, "the session it was held over is gone",
+                         SuppressBy::kOverride);
+            }
+        } else if (IsSuppressed()) {
             // ★★A NAME LIST WOULD HAVE BEEN WRONG, and the first measurement
             // said so: a real session had BTPS, TrueHUD and SegmentedHUD open
             // the whole time. Any list I could write would go stale the next
@@ -5120,7 +5413,8 @@ namespace FUI::UIRoot
             ++g_suppressTicks;
             if ((!blocker && g_suppressTicks > kGrace) ||
                 g_suppressTicks > kBackstop) {
-                Suppress(false, !blocker ? "nothing left above us" : "backstop");
+                Suppress(false, !blocker ? "nothing left above us" : "backstop",
+                         SuppressBy::kOverride);
             }
         }
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass

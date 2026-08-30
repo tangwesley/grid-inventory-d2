@@ -6890,7 +6890,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (it.inBag == a_bagKey) continue;      // already home
                 if (it.inBag == kTrashKey) continue;     // queued for deletion
                 if (it.def.bag) continue;                // E4: no bag inside a bag
-                if (it.coinValue >= 0) continue;         // coins answer to the ledger
+                // ★Coins are collectable like anything else now (see the
+                // spill pass). In practice a TYPED bag only takes them if some
+                // filter actually claims the coin form, so this mostly changes
+                // nothing -- but the three doors have to say the same thing or
+                // one of them becomes the next stale rule.
+
                 if (g_held && g_held->key == it.key) continue;   // riding the cursor
                 // ONLY from main and general-purpose bags. Pulling out of
                 // another TYPED bag would let two bags fight over the same item
@@ -7280,8 +7285,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 PlaceItems(probe, BaseCols(), BaseRows(), BaseRows(),
                            g_cwBonusCells);   // hard board + CW bonus (W3)
                 for (auto* cand : probe) {
-                    // real items only (dummies have no obj); coins keep the ledger
-                    if (!(cand->obj && cand->overflow && cand->coinValue < 0)) continue;
+                    // ★★★COINS SPILL TOO, and the rule that said otherwise was
+                    // simply older than the mod. "Coins keep the ledger" was
+                    // written when money lived only on the main board; gold has
+                    // been allowed into bags and into containers since
+                    // (StoreToContainer, and a coin tile has carried its own
+                    // inBag through Rebuild for as long), so the exclusion was
+                    // the last place still holding the old shape.
+                    //
+                    // What it cost is exactly what was reported: a player over
+                    // the limit adds a bag, watches every ITEM move into it,
+                    // and stays overloaded because the overflow was money. The
+                    // one thing they did to fix it could not touch the one
+                    // thing that was wrong.
+                    //
+                    // Dummies still have no obj, and a bag still never nests.
+                    if (!(cand->obj && cand->overflow)) continue;
                     // E4: a bag never auto-nests. The sims already refuse this
                     // (ComputeOverloaded checks def.bag, MaxAcceptUnits gates on
                     // it) — this pass silently allowed it, which was the one
@@ -9308,7 +9327,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // invisible to it and the item returned to the slot it had been
                 // dragged to -- while the same two clicks either side of opening
                 // the wheel put it at the front. The act reports itself now.
+                // ★★...and the moment it goes ON, for the same reason and the
+                // other half of it. The engine never records WHEN a thing was
+                // starred, so this is the only moment the order of starring
+                // can be known -- ask later and the inventory answers by form
+                // ADDRESS, which is how a freshly filled wheel came out
+                // shuffled however carefully it had been starred one at a
+                // time. (Reported.)
                 if (on) Wheeler::ForgetFavorite(f.obj->GetFormID());
+                else    Wheeler::NoteStarred(f.obj->GetFormID());
                 if (on && !xl) {
                     // ★Turning a pool off that has NO list of its own. Naming it
                     // would match nothing and the toggle would jam in the "on"
@@ -9938,7 +9965,69 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         const long long units = static_cast<long long>(room) +
                                 static_cast<long long>(fitTiles) * aCap;
-        return static_cast<int>((std::min)(static_cast<long long>(a_want), units));
+        const int answer = static_cast<int>(
+            (std::min)(static_cast<long long>(a_want), units));
+
+        // ★★★A REFUSAL THAT CANNOT EXPLAIN ITSELF COSTS A ROUND TRIP.
+        //
+        // Reported: with two cells free, a dagger is refused while two 1x1
+        // items go in. Every mechanism that report implicates is present and
+        // correct here -- both orientations are tried (see the probe seeding
+        // and PlaceItems' mirror fallback), partial stacks merge before any
+        // cell is asked for, and typed bags take the spill. So a refusal is
+        // either right and merely surprising (the free cells are not adjacent;
+        // the item that "fitted" merged into a stack or fell into a bag), or
+        // it is a bug none of this reading can see. From the outside those
+        // look identical, which is exactly the shape of problem that turns one
+        // report into four.
+        //
+        // So it says its arithmetic. Once per FORM per game session, which is
+        // both the cheap thing and the readable one: this runs inside
+        // per-frame gates (rule 4-3 #3), and a line repeated every frame is
+        // one nobody can find in a log anyway.
+        if (answer < a_want) {
+            static std::set<std::string> s_said;
+            if (s_said.insert(aKey).second) {
+                // Occupancy straight off the sim that just ran: every placed
+                // tile stamps its own mask, so this counts what the probe was
+                // actually offered rather than a second opinion about it.
+                // ★The board is a SETTING now, not a constant -- BaseRows()/BaseCols()
+                // rather than the kMinRows/kCols this was written against. Read once:
+                // the counting below is a nested loop and these do not move inside it.
+                const int rowsN = BaseRows();
+                const int colsN = BaseCols();
+                std::vector<std::vector<bool>> occ(
+                    rowsN, std::vector<bool>(colsN, false));
+                for (const auto* p : list) {
+                    if (!p || p->overflow || p->col < 0 || p->row < 0) continue;
+                    if (p->key.rfind("##probe", 0) == 0) continue;   // not a tenant
+                    for (int y = 0; y < p->mask.h; ++y) {
+                        for (int x = 0; x < p->mask.w; ++x) {
+                            if (!p->mask.rows[y][x]) continue;
+                            const int c = p->col + x, r = p->row + y;
+                            if (r >= 0 && r < rowsN && c >= 0 && c < colsN) {
+                                occ[r][c] = true;
+                            }
+                        }
+                    }
+                }
+                int freeCells = 0;
+                for (int r = 0; r < rowsN; ++r) {
+                    for (int c = 0; c < colsN; ++c) {
+                        if (!occ[r][c]) ++freeCells;
+                    }
+                }
+                SKSE::log::info(
+                    "[FIT] '{}' {}x{} rot={} -- want {} got {} "
+                    "(stack room {}, tiles needed {} fitted {}, "
+                    "free cells on the hard board {} + cw bonus {})",
+                    a_obj->GetName() ? a_obj->GetName() : "?",
+                    aDef.w, aDef.h, CanRotate(aDef) ? "both" : "fixed",
+                    a_want, answer, room, tilesNeeded, fitTiles,
+                    freeCells, g_cwBonusCells);
+            }
+        }
+        return answer;
     }
 
     bool CanFitNewItem(RE::TESBoundObject* a_obj)
@@ -10024,16 +10113,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
             // B: hard-board overflow drains into bag space, open or closed
             // (mirrors Rebuild's spill) — an item a bag can hold is NOT
-            // overloaded. Coins and bag items can't spill: their overflow is a
-            // genuine overload. This MUST agree with MaxAcceptUnits, or an item
-            // it just accepted is judged overloaded the same frame (crimson
-            // space + the forced-walk debuff).
+            // overloaded. A bag still cannot nest inside a bag automatically,
+            // so that overflow is genuine. This MUST agree with the spill pass
+            // and with MaxAcceptUnits, or an item one of them just accepted is
+            // judged overloaded the same frame (crimson space + the
+            // forced-walk debuff).
+            //
+            // ★★COINS USED TO BE ON THAT LIST and no longer are. Money lives
+            // in bags and in containers now; the exclusion here was the third
+            // of three doors still holding a shape the mod had already left,
+            // and between them they produced the report: adding a bag while
+            // over the limit moved every item and left the gold, so the board
+            // stayed crimson and the player stayed slowed.
             std::vector<Item*> spill;
             bool hardOverflow = false;
             for (auto& it : tmp) {
                 if (!it.overflow) continue;
-                if (it.inBag.empty() && it.def.bag == 0 && it.obj &&
-                    !it.obj->IsGold() && !GoldCoins::IsCoinForm(it.obj->GetFormID())) {
+                if (it.inBag.empty() && it.def.bag == 0 && it.obj) {
                     spill.push_back(&it);
                 } else {
                     hardOverflow = true;
@@ -10042,7 +10138,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             !it.obj                    ? "unknown" :
                             it.def.bag != 0            ? "a bag cannot be put inside a bag automatically" :
                             !it.inBag.empty()          ? "already inside a bag" :
-                                                         "coins never spill into bags";
+                                                         "no bag would take it";
                         a_why->lines.push_back(std::format("'{}' -- {}",
                             it.obj ? it.obj->GetName() : "?", kind));
                     }
@@ -11576,6 +11672,42 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return a_form ? FormKey(a_form) : std::string{};
     }
 
+    // ★★★"PLAIN" IS OUR WORD, NOT THE ENGINE'S.
+    //
+    // InstanceSig deliberately does not hash ExtraTextDisplayData -- it has to
+    // not, because the engine drops the display name when it splits a unit off
+    // to equip it, and hashing something the engine can take away made the same
+    // dagger answer one signature in the pack and another on the body.
+    //
+    // The cost surfaced with quest letters. A letter's ONLY extra data is its
+    // name, so it hashes to 0, which is our word for "this unit carries nothing
+    // distinguishing" -- and ExtraForTile answers nullptr to that, because for
+    // every other purpose it is true. DisplayNameOf then has no list to read
+    // and falls back to the record text, which for these is not a name at all:
+    //
+    //     来自<Alias=HoldCity>领主<Alias=Jarl>的信
+    //
+    // Vanilla shows the resolved sentence, so the answer exists at runtime; we
+    // were simply not asking for it. (Reported with both screens.)
+    //
+    // ★The narrowest possible way to ask. The regression this must not
+    // reintroduce is three plain daggers all reading "Fine Dagger" because the
+    // entry's FIRST sub-stack happened to be tempered -- so the entry is
+    // consulted ONLY when it holds exactly one unit and exactly one list.
+    // Then the list IS the unit, and there is no other copy for it to be
+    // confused with. A player carrying three identical letters keeps the raw
+    // text, which is the right way round: a wrong name is worse than an ugly
+    // one.
+    [[nodiscard]] bool SoleUnitEntry(RE::InventoryEntryData* a_entry)
+    {
+        if (!a_entry || !a_entry->extraLists || a_entry->countDelta != 1) return false;
+        int n = 0;
+        for (auto* xl : *a_entry->extraLists) {
+            if (xl && ++n > 1) return false;
+        }
+        return n == 1;
+    }
+
     const char* DisplayNameOf(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl,
                               RE::InventoryEntryData* a_entry)
     {
@@ -12312,9 +12444,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //
         // Only the NAME takes this door. `scoped` stays null, so the temper,
         // enchantment and poison lines keep the strict per-unit rule.
+        //
+        // ★...OR A SOLE UNIT, which is the same door reached from the other
+        // side. The rule above needs a cap > 1 before it will call a tile a
+        // pool; a named cap-1 item -- a renamed weapon, a one-off quest object
+        // -- is not one, and its entry still holds exactly one unit and exactly
+        // one list, so the list IS the unit and there is no other copy for it
+        // to borrow from. See SoleUnitEntry, deliberately the narrowest form of
+        // the ask: three identical letters keep the raw text, because a wrong
+        // name is worse than an ugly one.
         const bool aggregate = a_scope == ExtraScope::kAny ||
                                (a_scope == ExtraScope::kUnit && !scoped &&
-                                StackCap(a_obj) > 1);
+                                StackCap(a_obj) > 1) ||
+                               SoleUnitEntry(entry);
         const char* nm = DisplayNameOf(a_obj, scoped, aggregate ? entry : nullptr);
         // ★THE NAME TAKES THE TINT, and it is asked for here rather than read
         // off a glow byte because this is a tooltip: `scoped` is the unit's own
@@ -13833,6 +13975,39 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 g_held.reset();
             }
         }
+
+        // ★★A FULL PURSE EXCHANGES, it does not silently absorb nothing.
+        //
+        // The same rule the stack tiles just got, and gold needed saying
+        // separately because it never reaches that decision -- coins have their
+        // own drop route. Dropped on a purse already at the cap, MergeGoldInto
+        // sums, clamps back to exactly what was there, and hands the whole
+        // carried value back to the cursor: the tile keeps its number, the
+        // cursor keeps its number, and the click did nothing a player can see.
+        //
+        // ★Same primitives as the merge above, values exchanged instead of
+        // summed -- a coin tile's FORM follows its value band, so "swap" here
+        // means re-minting both sides, which is exactly what the leftover path
+        // already does.
+        void SwapGoldWith(Held& a_held, const std::string& a_tgtKey, int a_tgtValue,
+                          const LayoutEntry& a_fallbackPos)
+        {
+            LayoutEntry pos = a_fallbackPos;
+            if (auto li = g_layout.find(a_tgtKey); li != g_layout.end()) pos = li->second;
+            const int mine = a_held.coinValue;
+            g_layout.erase(a_tgtKey);
+            g_layout.erase(a_held.key);
+            PlacePin(mine, pos.col, pos.row, pos.bag);
+            if (g_sound) g_sound(a_held.obj, false);
+            auto* tf = GoldCoins::CoinForTier(GoldCoins::BandTier(a_tgtValue));
+            const std::string tk = NextTileKey(FormKey(tf));
+            SetCoinRecord(tk, a_tgtValue);
+            a_held.key = tk;
+            a_held.obj = tf;
+            a_held.coinValue = a_tgtValue;
+            a_held.preSplit = true;   // fragment rules from here on
+            a_held.mask = MaskOf(g_resolver ? g_resolver(tf) : GridDef{});
+        }
     }
 
     // ================= Phase 3: drop-target dispatch table =================
@@ -14407,8 +14582,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             } else if (tgtGold) {
                 // (2) merge onto ANY gold tile (pin or auto) — the value
                 // lands as a pinned purse at the target's cell
-                MergeGoldInto(a_held, tgt.key, tgt.coinValue,
-                    { g_target.col, g_target.row, v.bagKey, 1 });
+                // ★A full target exchanges instead: see SwapGoldWith. The pin
+                // route needs this as much as the whole-tile one -- it is the
+                // same purse and the same cap.
+                if (tgt.coinValue >= GoldCoins::kCoinCap) {
+                    SwapGoldWith(a_held, tgt.key, tgt.coinValue,
+                        { g_target.col, g_target.row, v.bagKey, 1 });
+                } else {
+                    MergeGoldInto(a_held, tgt.key, tgt.coinValue,
+                        { g_target.col, g_target.row, v.bagKey, 1 });
+                }
             } else {
                 // (2d) non-gold item -> SWAP (same rule as a whole tile):
                 // the pin anchors at the drop cell, the displaced item
@@ -14695,9 +14878,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // test said "same unit" (uid 0, sig 0, same form, same hand), the
             // displaced one was never handed to the cursor, and it fell back into
             // the pack -- taking the parked star's slot on the way.
-            const bool swapping = worn && !(worn == a_held.obj && wsig == a_held.sig &&
-                                            a_held.fromDoll && !a_held.swappedOut &&
-                                            a_held.hand == wornHand);
+            // ★★★A MERGE DISPLACES NOTHING, so nothing may ride back out.
+            // Dropping arrows on a quiver of the same kind ADDS to it -- the
+            // slot had an occupant, so every test below said "swap", and the
+            // swap handed the cursor an occupant that had not gone anywhere.
+            // A phantom stack followed the mouse for the rest of the session
+            // (user report, straight after the merge landed).
+            // ★The room is asked of Equip::AmmoMergeRoom, which is also what
+            // the equip itself asks. Two copies of this rule could disagree
+            // about whether a given drop merges or replaces, and either answer
+            // is a bug on one side of the pair -- a full quiver DOES replace,
+            // and that swap is correct and stays.
+            const bool ammoMerge = worn && worn == a_held.obj &&
+                                   Equip::AmmoMergeRoom(a_held.obj) > 0;
+            const bool swapping = !ammoMerge && worn &&
+                                  !(worn == a_held.obj && wsig == a_held.sig &&
+                                    a_held.fromDoll && !a_held.swappedOut &&
+                                    a_held.hand == wornHand);
 
             // C6: dropped on an equip slot — the gate decides; a reject
             // snaps the item back (its layout entry is intact).
@@ -14879,8 +15076,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // C4-G: a WHOLE gold tile dropped on another gold tile
                     // merges — shared MergeGoldInto (pouch mechanism,
                     // remainder rides the cursor as a pin)
-                    MergeGoldInto(a_held, disp.key, disp.coinValue,
-                        { g_target.col, g_target.row, v.bagKey, 1 });
+                    // ★...unless the target is already full, where a merge
+                    // absorbs nothing and the drop reads as ignored. See
+                    // SwapGoldWith.
+                    if (disp.coinValue >= GoldCoins::kCoinCap) {
+                        SwapGoldWith(a_held, disp.key, disp.coinValue,
+                            { g_target.col, g_target.row, v.bagKey, 1 });
+                    } else {
+                        MergeGoldInto(a_held, disp.key, disp.coinValue,
+                            { g_target.col, g_target.row, v.bagKey, 1 });
+                    }
                     RequestRebuild();
                 } else if (!heldCoin && !dispCoin && disp.key != a_held.key &&
                            !a_held.isBag && disp.def.bag == 0 &&
@@ -14919,9 +15124,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                         "(cap {}), carrying {}",
                             a_held.key, disp.key, absorbed, cap, a_held.count);
                     }
-                    // target full: swapping two same-form tiles only
-                    // exchanged their positions (pointless churn) — keep
-                    // carrying instead
+                    // ★★A FULL TARGET SWAPS, like every other occupied cell.
+                    //
+                    // This used to keep carrying, reasoning that two same-form
+                    // tiles trading places is churn. That is true when the two
+                    // are IDENTICAL, which is the case it was written against
+                    // -- and it is the only case where it is true. Carry fifty
+                    // onto a full hundred and refusing means the drop does
+                    // nothing at all, which does not read as "there is no room
+                    // here"; it reads as the board ignoring the click.
+                    //
+                    // Every other occupied cell answers a drop by swapping, and
+                    // a stack that happens to be full is not a reason to be the
+                    // one exception to that. (Reported 2026-08-30, against all
+                    // stack items -- this is not an ammo rule.)
+                    if (absorbed <= 0) doSwap = true;
                 } else {
                     doSwap = true;
                 }
@@ -15914,6 +16131,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             { DropWhere::kVoid, GoldFragToVoid },
         };
         constexpr DropRoute kStackFragRoutes[] = {
+            // ★★A FRAGMENT CAN BE WORN. This row was simply absent, so a split
+            // handful of arrows or a torch taken off a stack matched no route
+            // at the doll and stayed stuck to the cursor -- the drop did
+            // nothing, with no reason given. (Reported 2026-08-30.)
+            //
+            // ★The whole-tile handler serves it unchanged. A fragment carries
+            // no key, and nothing in that path needs one: the tile it came
+            // from was already shortened when the split was taken, the
+            // bookkeeping calls no-op on an empty key, and every fragment drop
+            // rebuilds anyway (alwaysRebuild below), which is also what
+            // restores the units if the slot refuses them.
+            { DropWhere::kEquipSlot, WholeOnEquipSlot },
             { DropWhere::kTrashArea, StackFragIntoTrash },   // F2 (before kEmptyCell)
             { DropWhere::kEmptyCell, StackFragOnEmptyCell },
             { DropWhere::kBlockerSingle, StackFragOnBlocker },

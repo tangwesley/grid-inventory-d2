@@ -9,6 +9,7 @@
 #include "game/GoldCoins.h"
 #include "game/Lotd.h"
 #include "ui/Editor.h"
+#include "ui/Equip.h"
 #include "ui/Fallback.h"
 #include "ui/GridMenu.h"   // NoPause -- the gameplay-input mask is that mode's
 #include "ui/Lang.h"
@@ -741,6 +742,16 @@ namespace
                 {
                     const RE::FormID deltaForm = a_event->baseObj;
                     SKSE::GetTaskInterface()->AddTask([deltaForm]() {
+                        // ★★BEFORE the board is told, not after. Arrows arriving
+                        // while their kind is worn are merged onto the back by
+                        // the engine past whatever stack size we keep, and the
+                        // surplus is then on the body and off the board -- take
+                        // a hundred and fifty out of a chest with fifty on, and
+                        // two hundred are equipped with nothing in the pack.
+                        // Putting the surplus back first means the delta below
+                        // sees the inventory the player is about to be shown,
+                        // instead of one that needs correcting a frame later.
+                        FUI::Equip::NormaliseWornAmmo(deltaForm);
                         if (!FUI::Grid::OnFormDelta(deltaForm)) {
                             FUI::Grid::RequestRebuild();
                         }
@@ -822,6 +833,52 @@ namespace
         spdlog::set_pattern("[%H:%M:%S] [%l] %v");
     }
 
+    // ★Moved to UIRoot when the wheel needed the same question asked (its
+    // cancel key). Two copies of a control-map scan is two chances for the two
+    // to disagree about what a binding is; the reasoning lives with the one
+    // that survived.
+    using FUI::UIRoot::MappedScanCode;
+
+    // ★★★AND THE EVENT WAS THE WRONG ONE ALL ALONG. "Inventory" is the TWEEN
+    // MENU's entry -- the gamepad path -- and it carries NO keyboard binding,
+    // which is precisely the 0xFF the old note recorded and then worked around.
+    // The key a PC player actually presses is "Quick Inventory".
+    //
+    // The giveaway was sitting in the workaround: 0x17 is Quick Inventory's own
+    // default, and 0x19 is Quick Magic's. The fallbacks were right for the
+    // default binding and wrong for every other one, so nothing looked broken
+    // until somebody rebound the key -- and then the key that opened the grid
+    // could not close it. (Reported.)
+    //
+    // Both events are asked, quick first, because a pad player's binding really
+    // does live on the other one. The hardcoded default stays as a last resort:
+    // a wrong guess here is better than no way out of the menu at all.
+    [[nodiscard]] std::uint32_t InventoryScanCode()
+    {
+        auto* ue = RE::UserEvents::GetSingleton();
+        if (!ue) return 0x17;
+        std::uint32_t k = MappedScanCode(ue->quickInventory);
+        if (!k) k = MappedScanCode(ue->inventory);
+        if (!k) k = 0x17;   // I -- Quick Inventory's own default
+        static std::uint32_t s_said = 0;
+        if (s_said != k) {
+            s_said = k;
+            logger::info("[INV] close key resolves to scan 0x{:02X} "
+                         "(quick='{}' tween='{}')", k,
+                         ue->quickInventory.c_str(), ue->inventory.c_str());
+        }
+        return k;
+    }
+
+    [[nodiscard]] std::uint32_t MagicScanCode()
+    {
+        auto* ue = RE::UserEvents::GetSingleton();
+        if (!ue) return 0x19;
+        std::uint32_t k = MappedScanCode(ue->quickMagic);
+        if (!k) k = MappedScanCode("Magic");
+        return k ? k : 0x19;   // P -- Quick Magic's own default
+    }
+
     // ---- Input sink ----
     class InputSink : public RE::BSTEventSink<RE::InputEvent*>
     {
@@ -892,6 +949,8 @@ namespace
                     }
                 }
 
+                // (InventoryScanCode is defined above the sink -- see there for
+                // why one context is not enough.)
                 // A real mouse event hands the pointer back from the pad.
                 // This is the ONLY reliable signal — see UIRoot::NoteMouseInput.
                 if (e->GetDevice() == RE::INPUT_DEVICE::kMouse) {
@@ -964,13 +1023,17 @@ namespace
                 // raw key while kMenuMode swallows the user event.
                 // hidden behind someone's window: the key is not ours to read
                 if (FUI::UIRoot::IsBoardLive()) {
-                    auto* cm = RE::ControlMap::GetSingleton();
-                    // NOTE: GetMappedKey returns 0xFF here (confirmed in
-                    // the log) - fall back to the default I scancode.
-                    auto scan = cm ? cm->GetMappedKey(
-                        RE::UserEvents::GetSingleton()->inventory,
-                        RE::INPUT_DEVICE::kKeyboard) : 0xFF;
-                    if (scan == 0xFF || scan == 0xFFFFFFFF) scan = 0x17;   // default I
+                    // ★★ASK EVERY CONTEXT, not just the default one.
+                    //
+                    // The old call took GetMappedKey's default context and got
+                    // 0xFF back, so it fell through to the hardcoded I -- and
+                    // a player who rebinds Inventory then cannot close the
+                    // grid with the key that opened it. GetMappedKey searches
+                    // controlMap[context] and nothing else, so "not in THIS
+                    // context" reads exactly like "not bound anywhere".
+                    // Reported alongside the wheel-key collision; the two
+                    // together are why rebinding Inventory looked broken.
+                    const auto scan = InventoryScanCode();
                     if (btn->GetIDCode() == scan) {
                         // input thread: defer state changes to the UI task
                         SKSE::GetTaskInterface()->AddUITask([]() {
@@ -990,10 +1053,7 @@ namespace
                     // kItemMenu context never translates this key into a user
                     // event, so it is read raw here exactly like the
                     // Inventory key above (same 0xFF fallback story).
-                    static const RE::BSFixedString s_magicEvent("Magic");
-                    auto mscan = cm ? cm->GetMappedKey(s_magicEvent,
-                        RE::INPUT_DEVICE::kKeyboard) : 0xFF;
-                    if (mscan == 0xFF || mscan == 0xFFFFFFFF) mscan = 0x19;   // default P
+                    const auto mscan = MagicScanCode();
                     if (btn->GetIDCode() == mscan) {
                         SKSE::GetTaskInterface()->AddUITask([]() {
                             if (FUI::UIRoot::IsTextInputActive()) {
@@ -1045,6 +1105,54 @@ namespace
             file ? a_form->GetLocalFormID() : a_form->GetFormID());
         return key + buf;
     }
+
+    // ★★★ONE RECORD, TWO GROUND MODELS, AND ONLY EVER ONE ANGLE.
+    //
+    // An armour record carries a world model per sex, and 268 of 4386 in this
+    // load order carry two DIFFERENT ones. The tuning key is the FORM, so both
+    // sexes were handed the same rx/ry/rz -- and where the two nifs are laid
+    // out differently, an angle chosen while looking at one of them is simply
+    // wrong on the other. The shipped file was tuned on a female character, so
+    // it is male players who would see those items come out askew.
+    //
+    // The icon PIXELS were already dealt with: these records are left out of
+    // the shipped pak, so every install photographs its own character's model.
+    // That fixed the picture and left the angle behind, which is this.
+    //
+    // ★Both models must exist. Thousands of records fill only one side, and
+    // the game shows that one to everybody -- one model cannot disagree with
+    // itself, so those are not split and must not pay for this.
+    [[nodiscard]] bool SexSplitArmour(RE::TESBoundObject* a_obj)
+    {
+        auto* armo = a_obj ? a_obj->As<RE::TESObjectARMO>() : nullptr;
+        if (!armo) return false;
+        // ★Cached: this is a property of the RECORD and cannot change, while
+        // the ask sits under DefFor, which runs per tile.
+        static std::unordered_map<RE::FormID, bool> s_split;
+        const auto id = a_obj->GetFormID();
+        if (const auto it = s_split.find(id); it != s_split.end()) return it->second;
+        const char* m = armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
+        const char* f = armo->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
+        const bool split = m && *m && f && *f && _stricmp(m, f) != 0;
+        s_split.emplace(id, split);
+        return split;
+    }
+
+    // "|F" / "|M" for a split record, nullptr for everything else. ★Read live
+    // rather than cached: showracemenu can change the answer mid-session, and
+    // two pointer hops are cheaper than being wrong until a reload.
+    [[nodiscard]] const char* SexSuffix(RE::TESBoundObject* a_obj)
+    {
+        if (!SexSplitArmour(a_obj)) return nullptr;
+        auto* pc = RE::PlayerCharacter::GetSingleton();
+        auto* base = pc ? pc->GetActorBase() : nullptr;
+        if (!base) return nullptr;
+        return base->GetSex() == RE::SEX::kFemale ? "|F" : "|M";
+    }
+
+    // ★Set at load if the file carries even one sex-suffixed line. On a fresh
+    // install nothing does, and DefFor's whole branch costs one bool test.
+    bool g_haveSexDefs = false;
 
     RE::TESBoundObject* FormFromKey(const std::string& a_key)
     {
@@ -1192,6 +1300,11 @@ namespace
         std::sort(keys.begin(), keys.end(),
             [](const std::string* a, const std::string* b) { return *a < *b; });
         for (const auto* k : keys) {
+            // ★Sex-suffixed lines do not donate. ModelPathOf reads the MALE
+            // model, so a female-only angle entering this map would be handed
+            // to every sibling sharing that male nif -- the same leak this
+            // whole mechanism exists to close, coming back by the side door.
+            if (k->find('|', k->find('|') + 1) != std::string::npos) continue;
             auto* obj = FormFromKey(*k);
             if (!obj) continue;
             auto mp = ModelPathOf(obj);
@@ -1386,6 +1499,10 @@ namespace
         if (lines.empty()) {
             lines.push_back("; GridInventory item overrides (edited in-game via the EDIT mode)");
             lines.push_back("; key = w:, h:, rx:, ry:, rz:, scale:   or   shape:11|10|10 (rows of 1/0)");
+            lines.push_back(";");
+            lines.push_back("; An armour whose male and female ground models are DIFFERENT nifs can take a");
+            lines.push_back("; second line ending in |F or |M, which applies only to that sex; the plain key");
+            lines.push_back("; stays the default for both.");
         }
         bool done = false;
         for (auto it = lines.begin(); it != lines.end(); ++it) {
@@ -1427,6 +1544,20 @@ namespace
 
     ItemDef DefFor(RE::TESBoundObject* a_obj)
     {
+        // ★★A SEX-SPECIFIC LINE WINS, AND THE PLAIN ONE IS STILL THE DEFAULT.
+        // Purely additive: until somebody tunes a split record while playing
+        // one sex, nothing here matches and every item resolves exactly as it
+        // did. That is the point -- the file already shipped with a value for
+        // all 268 of these, and starting them over at the factory angle would
+        // trade a sometimes-wrong picture for a reliably-wrong one.
+        if (g_haveSexDefs) {
+            if (const char* sfx = SexSuffix(a_obj)) {
+                if (auto it = g_itemDefs.find(FormKey(a_obj) + sfx);
+                    it != g_itemDefs.end()) {
+                    return it->second;
+                }
+            }
+        }
         if (auto it = g_itemDefs.find(FormKey(a_obj)); it != g_itemDefs.end()) {
             return it->second;
         }
@@ -1509,6 +1640,12 @@ namespace
                 std::string key = line.substr(0, eq);
                 key.erase(0, key.find_first_not_of(" \t"));
                 key.erase(key.find_last_not_of(" \t") + 1);
+                // ★A second '|' is the sex marker ("Skyrim.esm|0x0136D5|F").
+                // Noting it here is what lets DefFor skip the whole lookup on
+                // every install that has never written one.
+                if (key.find('|', key.find('|') + 1) != std::string::npos) {
+                    g_haveSexDefs = true;
+                }
                 // shared metatable parser (ui/ItemDef.h) over factory defaults
                 g_itemDefs[key] = ParseItemDef(line.substr(eq + 1), ItemDef{});
             }
@@ -2318,25 +2455,44 @@ namespace
             FUI::Editor::Hooks hooks;
             hooks.getEffective = [](RE::TESBoundObject* o) { return DefFor(o); };
             hooks.getDefault = [](RE::TESBoundObject* o) { return DefaultDef(o); };
-            hooks.hasOverride = [](RE::TESBoundObject* o) {
-                return g_itemDefs.contains(FormKey(o));
+            // ★★EDITING A SPLIT RECORD WRITES FOR THE BODY IN FRONT OF YOU.
+            // The angle was chosen against the model this character wears, so
+            // that is the only body it can be claimed for. Everything else --
+            // the 3357 records with one model, and every non-armour -- keeps
+            // the plain key it has always had.
+            const auto editKey = [](RE::TESBoundObject* o) {
+                std::string k = FormKey(o);
+                if (const char* sfx = SexSuffix(o)) k += sfx;
+                return k;
             };
-            hooks.setOverride = [](RE::TESBoundObject* o, const FUI::Editor::FullDef& f,
-                                   bool a_persist) {
-                const std::string key = FormKey(o);
+            hooks.hasOverride = [editKey](RE::TESBoundObject* o) {
+                return g_itemDefs.contains(editKey(o)) || g_itemDefs.contains(FormKey(o));
+            };
+            hooks.setOverride = [editKey](RE::TESBoundObject* o,
+                                          const FUI::Editor::FullDef& f, bool a_persist) {
+                const std::string key = editKey(o);
                 ItemDef d = f;
                 DeriveShapeBounds(d);   // the editor may have repainted the mask
                 g_itemDefs[key] = d;   // live: the resolvers see it immediately
+                if (key.size() != FormKey(o).size()) g_haveSexDefs = true;
                 g_modelDefsDirty = true;
                 if (a_persist) {
                     UpsertDefLine(key, &d, o->GetName() ? o->GetName() : "");
                 }
             };
-            hooks.resetOverride = [](RE::TESBoundObject* o) {
-                const std::string key = FormKey(o);
-                g_itemDefs.erase(key);
+            hooks.resetOverride = [editKey](RE::TESBoundObject* o) {
+                // ★Both, and in that order. Reset means "stop overriding this
+                // item", and leaving the plain line behind after clearing the
+                // sex-specific one would look like the reset did nothing.
+                const std::string key = editKey(o);
+                const std::string base = FormKey(o);
+                if (key != base) {
+                    g_itemDefs.erase(key);
+                    UpsertDefLine(key, nullptr, "");
+                }
+                g_itemDefs.erase(base);
                 g_modelDefsDirty = true;
-                UpsertDefLine(key, nullptr, "");
+                UpsertDefLine(base, nullptr, "");
             };
             hooks.saveAsCategory = [](RE::TESBoundObject* o, const FUI::Editor::FullDef& f) {
                 ItemDef d = f;
@@ -2599,8 +2755,11 @@ namespace
         SetGameplayInput(true);
         g_planBPendingOpen = false;
         // ★suppression does not survive a load either: the window that
-        //  asked for it belongs to the session being left
-        FUI::UIRoot::Suppress(false, "session reset");
+        //  asked for it belongs to the session being left -- kOverride,
+        //  because a client hold refuses everything softer and its owner
+        //  is not there to release it.
+        FUI::UIRoot::Suppress(false, "session reset",
+                              FUI::UIRoot::SuppressBy::kOverride);
         // ★★★A DEBT OWED TO A SAVE THAT IS GONE. g_echoMenu names a vanilla
         // menu whose close we still have to announce; left set across a load,
         // MenuCloseEchoTick fires it on the FIRST unpaused frame of the new
@@ -2768,7 +2927,7 @@ namespace
 
 
 SKSEPluginInfo(
-    .Version              = { 1, 5, 1, 0 },
+    .Version              = { 1, 6, 0, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

@@ -282,7 +282,9 @@ namespace FUI::Lang
         X(WheelKeyPress, "press keys...")   /* ...and hold as many as you want */                   \
         X(WheelGroup, "group")   /* quick menu: mouse up/down moves between the two fans */          \
         X(WheelPick, "pick")                                                                        \
-        X(WheelApply, "release to apply")
+        X(WheelApply, "release to apply") \
+        X(WheelPage, "page")   /* quick menu: W/S, only shown when there IS another page */ \
+        X(WheelClose, "press again to close")   /* ...when a TAP left it standing */
 
     enum class Str : int
     {
