@@ -10,6 +10,13 @@
 //
 // Internal name "Loadout" avoids clashing with the pre-existing editor "preset"
 // (icon/category config sharing).
+//
+// ★A SET IS EVERY SLOT ON THE DOLL, including the ones the engine does not
+// wear itself. The second ring is worn by DualRing's carrier with the ring in
+// the pack, so the worn scan cannot see it and an ordinary unequip cannot take
+// it off -- it has to be snapshotted, stood down and re-worn through DualRing,
+// or the doll's bottom-right slot keeps its ring through every switch while
+// every other slot changes.
 
 namespace FUI::Loadout
 {

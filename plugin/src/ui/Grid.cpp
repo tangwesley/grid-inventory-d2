@@ -11758,6 +11758,103 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (b == std::string::npos) { a_s.clear(); return; }
             a_s = a_s.substr(b, a_s.find_last_not_of(" \t\r\n") - b + 1);
         }
+
+        // ★ONE effect line, produced as TEXT rather than drawn. The tooltip
+        // prints these with a widget; the SHIFT-compare card paints on a
+        // foreground draw list and needs the string. The RULE for which
+        // effects show and what each says belongs to neither of them -- it is
+        // vanilla's, so it lives here once and both ask for it.
+        //
+        // Matching vanilla means matching BOTH halves of what its item card
+        // does: WHICH effects are shown, and WHAT each line says. This used to
+        // key off the effect NAME, which is the opposite set from vanilla's:
+        // enchantment effects mostly have no name and only a description, so
+        // an enchanted robe printed a hidden helper effect ("Fortify Health
+        // 25") and none of the two lines the game itself shows.
+        //
+        // False means vanilla prints NOTHING for this effect: a helper the
+        // engine hides, an unnamed record, or a description that resolves to
+        // nothing once a Survival block is dropped.
+        [[nodiscard]] bool EffectText(RE::Effect* a_e, bool a_survivalOn, std::string& a_out)
+        {
+            auto* base = a_e ? a_e->baseEffect : nullptr;
+            if (!base) return false;
+            // The engine hides these from every item card and the magic menu:
+            // enchantments carry helper effects not meant to be read.
+            using EFlag = RE::EffectSetting::EffectSettingData::Flag;
+            if (base->data.flags.all(EFlag::kHideInUI)) return false;
+
+            // GetMagnitude()/GetDuration()/GetArea() honour the kNoMagnitude /
+            // kNoDuration / kNoArea flags, so a magnitude-less effect can't
+            // print a stray 0.
+            const float         mag  = a_e->GetMagnitude();
+            const std::uint32_t dur  = a_e->GetDuration();
+            const std::uint32_t area = a_e->GetArea();
+
+            // ★★HAD a description is a different question from what is LEFT of
+            // one, and the two branches keep them apart. A Survival-only
+            // description resolves to nothing once its block is dropped, and
+            // vanilla then prints no line at all -- so this branch reports
+            // "nothing" rather than falling through and inventing "Restore
+            // Hunger 2". The name form below is for effects that never had a
+            // description.
+            // ★if/else, not a flag: a `hadDesc` bool mirrored which branch had
+            // been taken, and a mirror is a second thing to keep true.
+            const char* const desc = base->magicItemDescription.c_str();
+            if (desc && *desc) {
+                a_out = desc;
+                char v[32];
+                std::snprintf(v, sizeof(v), "%.0f", mag);
+                FillTag(a_out, "<mag>", v);
+                std::snprintf(v, sizeof(v), "%u", dur);
+                FillTag(a_out, "<dur>", v);
+                std::snprintf(v, sizeof(v), "%u", area);
+                FillTag(a_out, "<area>", v);
+                // ★After the tags, so a <mag> INSIDE a kept block is already a
+                // number by the time the block is unwrapped.
+                StripSurvivalBlocks(a_out, a_survivalOn);
+                UnwrapNumericTags(a_out);
+                TrimInPlace(a_out);
+                return !a_out.empty();   // resolved to nothing: vanilla shows none
+            }
+            // No description (common on crafted and mod-added effects):
+            // fall back to the old "Name 50 (10s)" form.
+            const char* n = base->GetName();
+            if (!n || !*n) return false;
+            char b[160];
+            if (mag > 0.0f && dur > 0) {
+                std::snprintf(b, sizeof(b), "%s %.0f (%us)", n, mag, dur);
+            } else if (mag > 0.0f) {
+                std::snprintf(b, sizeof(b), "%s %.0f", n, mag);
+            } else if (dur > 0) {
+                std::snprintf(b, sizeof(b), "%s (%us)", n, dur);
+            } else {
+                std::snprintf(b, sizeof(b), "%s", n);
+            }
+            a_out = b;
+            return true;
+        }
+
+        // ★★THE SENTENCE TIDYING A DESCRIPTION NEEDS, which is the same pass
+        // an effect line gets: GetDescription resolves the magnitude but leaves
+        // it WRAPPED -- the Gauldur Amulet came out reading "by <30> points",
+        // brackets and all, in a screenshot -- and a description written for a
+        // mode that is switched off must not be half-printed.
+        [[nodiscard]] bool DescriptionText(RE::TESBoundObject* a_obj, bool a_survivalOn,
+                                           std::string& a_out)
+        {
+            // books excluded by the caller: their DESC is the whole book text
+            auto* desc = a_obj ? a_obj->As<RE::TESDescription>() : nullptr;
+            if (!desc) return false;
+            RE::BSString out;
+            desc->GetDescription(out, a_obj->As<RE::TESForm>());
+            if (out.size() == 0 || !out.c_str() || !*out.c_str()) return false;
+            a_out = out.c_str();
+            StripSurvivalBlocks(a_out, a_survivalOn);
+            UnwrapNumericTags(a_out);
+            TrimInPlace(a_out);
+            return !a_out.empty();
+        }
     }
 
     // ★ONE board for the whole screen. The partner window used to draw its
@@ -11933,6 +12030,186 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // needs it to decide whether T is worth offering on this unit.
         bool UnitCharge(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl,
                         bool a_worn, int a_hand, float& a_cur, float& a_max);
+
+        // ── the SHIFT-compare card ──────────────────────────────────────────
+        // It paints on the FOREGROUND draw list (see the note at the call
+        // site), so it cannot use ImGui widgets: every line arrives as a
+        // measured string with the colour role the tooltip would have given it.
+        struct CardLine
+        {
+            std::string text;
+            ImVec4      col{};
+            bool        wrap = false;   // sentences (effects, flavour) wrap
+        };
+
+        // ★★THE WORN ITEM GETS THE WHOLE CARD, not a name and one number.
+        //
+        // Comparing a find against what is in your hands is a question about
+        // ENCHANTMENTS and TEMPER at least as much as about damage, and the
+        // card printed neither -- so a plain steel sword read as the better
+        // item beside an enchanted, tempered one, which is the opposite of what
+        // the compare exists to tell you (reported).
+        //
+        // Every line the tooltip would print for a weapon or a piece of armour
+        // is printed here, in the tooltip's own ORDER and COLOUR ROLES, so the
+        // two cards read as one comparison. The per-instance facts come off the
+        // WORN unit's own extra list -- a_xl -- never off the entry: an entry's
+        // extras belong to its first sub-stack, so a spare in the pack would
+        // otherwise lend its affix to the sword being worn (the GI61 rule).
+        //
+        // What is deliberately NOT here: the key/action block (it belongs to
+        // the hovered tile, and this item is already on), the barter price
+        // (the equipped item is not for sale), and the coin/bag lines (neither
+        // can be worn).
+        void BuildCompareCard(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl,
+                              bool a_isWeap, int a_stat, bool a_survivalOn,
+                              std::vector<CardLine>& a_out)
+        {
+            if (!a_obj) return;
+            auto add = [&](std::string a_t, const ImVec4& a_col, bool a_wrap = false) {
+                if (!a_t.empty()) a_out.push_back({ std::move(a_t), a_col, a_wrap });
+            };
+            // One list, so a helper that is only ever asked about this unit.
+            auto extraOf = [&]<class T>() -> T* {
+                return a_xl ? a_xl->GetByType<T>() : nullptr;
+            };
+
+            add(Lang::T(Lang::Str::EquippedLabel), Theme::TipSub());
+
+            // ★THE NAME TAKES THE TINT HERE TOO. The hovered item's tooltip
+            // colours its name by the tinter's tier, and a card that did not
+            // was the one place a rarity could be read off one item and not
+            // off the item it is being weighed against -- which is the single
+            // comparison this card exists to make. Asked exactly as the
+            // tooltip asks: the WORN unit's own list (a_xl, never the entry --
+            // the GI61 rule this whole card is built on), one call while the
+            // card is built, and TipVal the moment nothing claims the item.
+            const char* nm = DisplayNameOf(a_obj, a_xl);
+            ImVec4 nameCol = Theme::TipVal();
+            if (HostApi::HasTinter()) {
+                if (const auto t = HostApi::TintTier(a_obj->GetFormID(), a_xl)) {
+                    if (const auto rgba = HostApi::TintColour(t)) {
+                        nameCol = ImGui::ColorConvertU32ToFloat4(rgba);
+                    }
+                }
+            }
+            add((nm && *nm) ? nm : "?", nameCol);
+
+            // subtitle: the slot, then the armour class -- what the thing IS,
+            // before anything that measures it
+            add(Equip::SlotLabel(a_obj), Theme::TipHead());
+            if (const auto* armo = a_obj->As<RE::TESObjectARMO>()) {
+                switch (armo->GetArmorType()) {
+                case RE::BIPED_MODEL::ArmorType::kLightArmor:
+                    add(Lang::T(Lang::Str::ArmorLight), Theme::TipHead());
+                    break;
+                case RE::BIPED_MODEL::ArmorType::kHeavyArmor:
+                    add(Lang::T(Lang::Str::ArmorHeavy), Theme::TipHead());
+                    break;
+                default:
+                    add(Lang::T(Lang::Str::ArmorClothing), Theme::TipHead());
+                    break;
+                }
+            }
+            switch (Lotd::Of(a_obj->GetFormID())) {
+            case Lotd::Status::kUndonated:
+                add(Lang::T(Lang::Str::MuseumOwed), Theme::TipState());
+                break;
+            case Lotd::Status::kDonated:
+                add(Lang::T(Lang::Str::MuseumDone), Theme::TipState());
+                break;
+            default: break;
+            }
+            // What an extension has to say -- a loot mod's rarity is exactly
+            // the kind of fact a comparison turns on. Same bounded read as the
+            // tooltip's: `text` is a fixed buffer across a DLL boundary and
+            // nothing here can make the other side terminate it. The card has
+            // no separators and no indent, so those two hints are spent on
+            // leading spaces instead of dropped.
+            if (HostApi::HasAnnotator()) {
+                GridInvAPI::TooltipLine ext[GridInvAPI::kMaxTooltipLines]{};
+                const std::uint32_t     extN = HostApi::AnnotationLines(
+                    a_obj->GetFormID(), a_xl, ext, GridInvAPI::kMaxTooltipLines);
+                for (std::uint32_t i = 0; i < extN; ++i) {
+                    const auto& ln = ext[i];
+                    int len = 0;
+                    while (len < static_cast<int>(GridInvAPI::kTooltipTextLen) &&
+                           ln.text[len] != '\0') {
+                        ++len;
+                    }
+                    if (len == 0) continue;
+                    std::string t(static_cast<std::size_t>(ln.indent > 3 ? 3 : ln.indent) * 2,
+                                  ' ');
+                    t.append(ln.text, static_cast<std::size_t>(len));
+                    add(std::move(t), ln.rgba ? ImGui::ColorConvertU32ToFloat4(ln.rgba)
+                                              : Theme::TipBody());
+                }
+            }
+
+            // the measurement the compare is FOR
+            add(std::format("{} {}", Lang::T(a_isWeap ? Lang::Str::Damage : Lang::Str::Armor),
+                            a_stat),
+                Theme::TipBody());
+
+            // temper (grindstone / workbench): a MULTIPLIER, 1.25 = +25%
+            if (const auto* xh = extraOf.operator()<RE::ExtraHealth>();
+                xh && xh->health > 1.0f) {
+                add(std::format("{} +{}%", Lang::T(Lang::Str::TemperLabel),
+                                static_cast<int>(std::lroundf((xh->health - 1.0f) * 100.0f))),
+                    Theme::TipGood());
+            }
+
+            // enchantment — base record (EITM) or player-crafted, record first
+            // for the reason the tooltip states: the record is what the thing
+            // IS, and a marker enchantment must not blank out its description.
+            {
+                RE::EnchantmentItem* ench = nullptr;
+                std::uint16_t maxCharge = 0;
+                if (const auto* ef = a_obj->As<RE::TESEnchantableForm>()) {
+                    ench = ef->formEnchanting;
+                    maxCharge = ef->amountofEnchantment;
+                }
+                if (!ench) {
+                    if (auto* xe = extraOf.operator()<RE::ExtraEnchantment>();
+                        xe && xe->enchantment) {
+                        ench = xe->enchantment;
+                        maxCharge = xe->charge;
+                    }
+                }
+                if (ench) {
+                    for (auto* e : ench->effects) {
+                        std::string line;
+                        if (EffectText(e, a_survivalOn, line)) {
+                            add(std::move(line), Theme::TipGood(), true);
+                        }
+                    }
+                    // charge (weapons drain per hit; armour enchants don't)
+                    if (a_obj->Is(RE::FormType::Weapon) && maxCharge > 0) {
+                        float cur = static_cast<float>(maxCharge);
+                        if (auto* xc = extraOf.operator()<RE::ExtraCharge>()) cur = xc->charge;
+                        add(std::format("{} {} / {}", Lang::T(Lang::Str::ChargeLabel),
+                                        static_cast<int>(cur), static_cast<int>(maxCharge)),
+                            Theme::TipVal());
+                    }
+                }
+            }
+
+            // applied poison (weapons)
+            if (auto* xp = extraOf.operator()<RE::ExtraPoison>(); xp && xp->poison) {
+                add(std::format("{}: {} (x{})", Lang::T(Lang::Str::PoisonLabel),
+                                xp->poison->GetName(), xp->count),
+                    Theme::TipGood());
+            }
+
+            // flavour/effect description (artifacts, uniques)
+            if (std::string line; DescriptionText(a_obj, a_survivalOn, line)) {
+                add(std::move(line), Theme::TipBody(), true);
+            }
+
+            // THIS unit's value, temper folded in like vanilla
+            add(std::format("{} {}", Lang::T(Lang::Str::Value), UnitValueWith(a_obj, a_xl)),
+                Theme::TipHead());
+        }
     }
 
     void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue,
@@ -12226,73 +12503,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
         }
 
-        // One effect per line — shared by potions/ingredients and enchantments.
-        // Matching vanilla means matching BOTH halves of what its item card
-        // does: WHICH effects are shown, and WHAT each line says. This used to
-        // key off the effect NAME, which is the opposite set from vanilla's:
-        // enchantment effects mostly have no name and only a description, so
-        // an enchanted robe printed a hidden helper effect ("Fortify Health
-        // 25") and none of the two lines the game itself shows.
+        // One effect per line — shared by potions/ingredients and enchantments,
+        // and with the SHIFT-compare card, which asks EffectText for the same
+        // string it cannot ask a widget for.
         // Once per tooltip, not once per effect line — the answer cannot change
         // between two lines of the same card.
         const bool survivalOn = SurvivalModeOn();
         auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col) {
-            auto* base = a_e ? a_e->baseEffect : nullptr;
-            if (!base) return;
-            // The engine hides these from every item card and the magic menu:
-            // enchantments carry helper effects not meant to be read.
-            using EFlag = RE::EffectSetting::EffectSettingData::Flag;
-            if (base->data.flags.all(EFlag::kHideInUI)) return;
-
-            // GetMagnitude()/GetDuration()/GetArea() honour the kNoMagnitude /
-            // kNoDuration / kNoArea flags, so a magnitude-less effect can't
-            // print a stray 0.
-            const float         mag  = a_e->GetMagnitude();
-            const std::uint32_t dur  = a_e->GetDuration();
-            const std::uint32_t area = a_e->GetArea();
-
             std::string line;
-            // ★★HAD a description is a different question from what is LEFT of
-            // one, and the two branches keep them apart. A Survival-only
-            // description resolves to nothing once its block is dropped, and
-            // vanilla then prints no line at all -- so this branch returns
-            // rather than falling through and inventing "Restore Hunger 2".
-            // The name form below is for effects that never had a description.
-            // ★if/else, not a flag: a `hadDesc` bool mirrored which branch had
-            // been taken, and a mirror is a second thing to keep true.
-            const char* const desc = base->magicItemDescription.c_str();
-            if (desc && *desc) {
-                line = desc;
-                char v[32];
-                std::snprintf(v, sizeof(v), "%.0f", mag);
-                FillTag(line, "<mag>", v);
-                std::snprintf(v, sizeof(v), "%u", dur);
-                FillTag(line, "<dur>", v);
-                std::snprintf(v, sizeof(v), "%u", area);
-                FillTag(line, "<area>", v);
-                // ★After the tags, so a <mag> INSIDE a kept block is already a
-                // number by the time the block is unwrapped.
-                StripSurvivalBlocks(line, survivalOn);
-                UnwrapNumericTags(line);
-                TrimInPlace(line);
-                if (line.empty()) return;   // resolved to nothing: vanilla shows none
-            } else {
-                // No description (common on crafted and mod-added effects):
-                // fall back to the old "Name 50 (10s)" form.
-                const char* n = base->GetName();
-                if (!n || !*n) return;
-                char b[160];
-                if (mag > 0.0f && dur > 0) {
-                    std::snprintf(b, sizeof(b), "%s %.0f (%us)", n, mag, dur);
-                } else if (mag > 0.0f) {
-                    std::snprintf(b, sizeof(b), "%s %.0f", n, mag);
-                } else if (dur > 0) {
-                    std::snprintf(b, sizeof(b), "%s (%us)", n, dur);
-                } else {
-                    std::snprintf(b, sizeof(b), "%s", n);
-                }
-                line = b;
-            }
+            if (!EffectText(a_e, survivalOn, line)) return;
             // Descriptions are sentences — wrap them at the same width as the
             // flavour text below rather than stretching the tooltip.
             ImGui::PushTextWrapPos(300.0f * Theme::Scale());
@@ -12321,9 +12540,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // find the equipped counterpart (same hand / overlapping biped slot),
         // append a signed diff to the stat line and show an "Equipped" card
         // beside this tooltip (rendered after EndTooltip below).
+        // ★The card's LINES are built here, not down at the paint, and that is
+        // deliberate: this is where the worn unit's extra list is in hand, so
+        // its enchantment, temper, poison and charge are read from the unit
+        // itself rather than guessed from the base record at draw time.
         RE::TESBoundObject* cmpObj = nullptr;
         int  cmpVal = 0;
         bool cmpIsWeap = false;
+        std::vector<CardLine> cmpLines;
         const bool wantCmp = ImGui::GetIO().KeyShift;
         auto diffText = [&](int a_mine) {
             if (!cmpObj) return;
@@ -12343,13 +12567,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 dmg = static_cast<int>(std::lroundf(pc->GetDamage(&e)));
             }
             if (wantCmp && pc) {
+                // ★WHICH HAND, kept: the worn extra list is per hand
+                // (ExtraWorn / ExtraWornLeft), and asking for "the first worn
+                // list of this form" answers the right hand's data for a
+                // left-hand sword -- the same mix-up the doll had.
+                int hand = 1;   // 1 = right, 2 = left
                 RE::TESForm* eq = pc->GetEquippedObject(false);
-                if (!eq || !eq->As<RE::TESObjectWEAP>()) eq = pc->GetEquippedObject(true);
+                if (!eq || !eq->As<RE::TESObjectWEAP>()) {
+                    eq = pc->GetEquippedObject(true);
+                    hand = 2;
+                }
                 if (auto* ew = eq ? eq->As<RE::TESObjectWEAP>() : nullptr) {
                     RE::InventoryEntryData ee(ew, 1);
                     cmpObj = ew;
                     cmpVal = static_cast<int>(std::lroundf(pc->GetDamage(&ee)));
                     cmpIsWeap = true;
+                    // The engine's OWN entry (LiveEntry), so no copy has to
+                    // outlive the card being built.
+                    BuildCompareCard(ew, WornExtraOf(LiveEntry(pc, ew), hand),
+                                     true, cmpVal, survivalOn, cmpLines);
                 }
             }
             // ★DIAG: "all weapon tooltips show damage as 0" (reported, not
@@ -12402,6 +12638,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     RE::InventoryEntryData ee(wa, 1);
                     cmpObj = wa;
                     cmpVal = static_cast<int>(std::lroundf(pc->GetArmorValue(&ee)));
+                    // ★The worn unit's own list, off the engine's entry rather
+                    // than this copy -- armour has no hand, so "the worn one"
+                    // is unambiguous here.
+                    BuildCompareCard(wa, WornExtraOf(LiveEntry(pc, wa), 0),
+                                     false, cmpVal, survivalOn, cmpLines);
                     break;
                 }
             }
@@ -12561,29 +12802,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // flavour/effect description (artifacts, uniques) — books excluded,
         // their DESC is the whole book text
         if (!a_obj->Is(RE::FormType::Book)) {
-            if (auto* desc = a_obj->As<RE::TESDescription>()) {
-                RE::BSString out;
-                desc->GetDescription(out, a_obj->As<RE::TESForm>());
-                if (out.size() > 0 && out.c_str() && *out.c_str()) {
-                    // ★★THE SAME TIDYING THE EFFECT LINES GET, and it was
-                    // missing here. GetDescription resolves the magnitude but
-                    // leaves it WRAPPED -- the Gauldur Amulet came out reading
-                    // "by <30> points", brackets and all, in a screenshot.
-                    // A description and an effect line are the same kind of
-                    // sentence from the same records; only one of them was
-                    // being finished.
-                    // ★Survival blocks too: a description written for a mode
-                    // that is switched off must not be half-printed.
-                    std::string line = out.c_str();
-                    StripSurvivalBlocks(line, SurvivalModeOn());
-                    UnwrapNumericTags(line);
-                    TrimInPlace(line);
-                    if (!line.empty()) {
-                        ImGui::PushTextWrapPos(300.0f * Theme::Scale());
-                        ImGui::TextColored(Theme::TipBody(), "%s", line.c_str());
-                        ImGui::PopTextWrapPos();
-                    }
-                }
+            if (std::string line; DescriptionText(a_obj, survivalOn, line)) {
+                ImGui::PushTextWrapPos(300.0f * Theme::Scale());
+                ImGui::TextColored(Theme::TipBody(), "%s", line.c_str());
+                ImGui::PopTextWrapPos();
             }
         }
 
@@ -12771,16 +12993,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // BeginTooltip APPENDS to the same tooltip in this ImGui version,
         // which stretched the main box instead of making a card). Flips to
         // the LEFT of the tooltip when the right side would leave the screen.
-        if (cmpObj) {
-            const char* en = cmpObj->GetName();
-            if (!en || !*en) en = "?";
-            char statBuf[64];
-            std::snprintf(statBuf, sizeof(statBuf), "%s %d",
-                Lang::T(cmpIsWeap ? Lang::Str::Damage : Lang::Str::Armor), cmpVal);
-            char valBuf[64];
-            std::snprintf(valBuf, sizeof(valBuf), "%s %d",
-                Lang::T(Lang::Str::Value), cmpObj->GetGoldValue());
-
+        if (cmpObj && !cmpLines.empty()) {
             // ★★THE CARD IS A SECOND TOOLTIP, so it wears the tooltip's chrome
             // and the tooltip's palette — not the skin's. It used to paint
             // sk.winBg / sk.acc / sk.ink, which put a parchment panel with
@@ -12789,12 +13002,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // same reason, so even the text inset disagreed.
             const ImVec2 pad = Theme::TipPadding();
             const float lh = ImGui::GetTextLineHeightWithSpacing();
-            const float cardW = (std::max)({
-                ImGui::CalcTextSize(Lang::T(Lang::Str::EquippedLabel)).x,
-                ImGui::CalcTextSize(en).x,
-                ImGui::CalcTextSize(statBuf).x,
-                ImGui::CalcTextSize(valBuf).x }) + pad.x * 2.0f;
-            const float cardH = 4.0f * lh + pad.y * 2.0f;
+            // The tooltip's own wrap width, so a sentence breaks at the same
+            // place on both cards and the pair reads as one comparison.
+            const float wrapW = 300.0f * Theme::Scale();
+            const float lead = lh - ImGui::GetTextLineHeight();   // spacing only
+
+            // ★MEASURED, not counted. The card is as tall as the item is
+            // interesting -- a plain iron dagger is four lines, an enchanted
+            // and tempered artifact a dozen, and a wrapped sentence is worth
+            // however many rows CalcTextSize says it is. (The old card was a
+            // hardcoded 4.0f * lh, which is exactly as much room as its four
+            // hardcoded lines needed.)
+            std::vector<float> lineH(cmpLines.size(), 0.0f);
+            float textW = 0.0f, textH = 0.0f;
+            for (std::size_t i = 0; i < cmpLines.size(); ++i) {
+                const auto& cl = cmpLines[i];
+                const ImVec2 s = cl.wrap
+                    ? ImGui::CalcTextSize(cl.text.c_str(), nullptr, false, wrapW)
+                    : ImGui::CalcTextSize(cl.text.c_str());
+                textW = (std::max)(textW, s.x);
+                lineH[i] = s.y + lead;
+                textH += lineH[i];
+            }
+            const float cardW = textW + pad.x * 2.0f;
+            const float cardH = textH + pad.y * 2.0f;
 
             const ImVec2 disp = ImGui::GetIO().DisplaySize;
             float cx = tipPos.x + tipSize.x + 6.0f;
@@ -12809,18 +13040,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const float rnd = Theme::TipRounding();
             fdl->AddRectFilled(c0, c1, Theme::TipBg(), rnd);
             fdl->AddRect(c0, c1, Theme::TipBorder(), rnd, 0, 1.0f);
+            // ★The font is handed over explicitly rather than left to the draw
+            // list's default: this is the wrapping overload, and it has no
+            // "current font" of its own to fall back on the way the widget path
+            // does. Same font and size the tooltip just drew with.
             float ty = cy + pad.y;
-            auto line = [&](const char* a_txt, const ImVec4& a_col) {
-                fdl->AddText(ImVec2(cx + pad.x, ty), ImGui::GetColorU32(a_col), a_txt);
-                ty += lh;
-            };
-            // ★Same roles the tooltip uses for the same kinds of fact: a muted
-            // caption, the name in the value colour, the stat as running text,
-            // the price as a sub-line.
-            line(Lang::T(Lang::Str::EquippedLabel), Theme::TipSub());
-            line(en, Theme::TipVal());
-            line(statBuf, Theme::TipBody());
-            line(valBuf, Theme::TipSub());
+            for (std::size_t i = 0; i < cmpLines.size(); ++i) {
+                const auto& cl = cmpLines[i];
+                fdl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    ImVec2(cx + pad.x, ty), ImGui::GetColorU32(cl.col),
+                    cl.text.c_str(), nullptr, cl.wrap ? wrapW : 0.0f);
+                ty += lineH[i];
+            }
         }
     }
 
