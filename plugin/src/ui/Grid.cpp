@@ -1250,6 +1250,14 @@ namespace FUI::Grid
             return nullptr;
         }
         std::vector<View>                              g_views;    // [0] = main
+
+        // ★The main board's first cell, in SCREEN pixels, stamped by that
+        // board's own draw pass and read back by the menu open (Grid.h:
+        // FirstSlotCenter). Nothing else may write it -- a board that has not
+        // drawn has no position at all, and a guessed one parks the pointer
+        // over empty screen.
+        ImVec2 g_slotHome{ 0.0f, 0.0f };
+        bool   g_slotHomeOk = false;
         std::map<std::string, LayoutEntry>             g_layout;
         std::map<std::string, LayoutEntry>& Layout() { return g_layout; }
 
@@ -4116,6 +4124,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const float gridH = a_view.rows * CellPx();
             const ImVec2 base = ImGui::GetCursorScreenPos();
             ImGui::Dummy(ImVec2(gridW, gridH));
+
+            // View 0 is the player's board and only ever the player's board --
+            // the bag loop starts at 1 -- so this is the one cell the pointer
+            // is sent to when the menu opens.
+            if (a_viewIdx == 0) {
+                g_slotHome = ImVec2(base.x + CellPx() * 0.5f, base.y + CellPx() * 0.5f);
+                g_slotHomeOk = true;
+            }
 
             DrawGridChrome(a_view, a_viewIdx, base);      // pass 1
             DrawOccupancyPass(a_view, base);              // pass 2
@@ -12695,6 +12711,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             line(valBuf, Theme::TipSub());
         }
     }
+
+    bool FirstSlotCenter(ImVec2& a_out)
+    {
+        if (!g_slotHomeOk) return false;
+        a_out = g_slotHome;
+        return true;
+    }
+
+    void ForgetSlotCenter() { g_slotHomeOk = false; }
 
     void Draw()
     {

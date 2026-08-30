@@ -1,6 +1,7 @@
 ﻿#include "ui/IconCache.h"
 #include "ui/Grid.h"
 #include "ui/Equip.h"
+#include "ui/GridMenu.h"   // NoPause/SetNoPause -- the "!nopause" test switch
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
 #include "ui/Theme.h"
@@ -8,6 +9,7 @@
 #include "ui/Wheeler.h"
 #include "ui/WinManager.h"
 #include "game/Census.h"
+#include "game/BagFilter.h"
 #include "game/DeltaWatch.h"
 #include "game/DualRing.h"
 #include "game/Ledger.h"
@@ -220,8 +222,47 @@ namespace FUI
         return a_default;
     }
 
+    bool WinManager::ReadNoPause(bool a_default)
+    {
+        std::ifstream in(kUiIniPath);
+        if (!in) return a_default;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            auto key = line.substr(0, eq);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key != "!nopause") continue;
+            try {
+                return std::stoi(line.substr(eq + 1)) != 0;
+            } catch (...) {
+                return a_default;
+            }
+        }
+        return a_default;
+    }
+
     void WinManager::Load()
     {
+        // ★★★RE-READ ONLY WHAT HAS CHANGED. UIRoot::OnShow calls this on EVERY
+        // open, deliberately -- it is the hot-reload that lets a player edit
+        // the ini and see it without restarting. What it does not need to be is
+        // a full read-and-parse of a file that is byte-for-byte what we parsed
+        // last time, which is what every open after the first one actually is.
+        //
+        // One stat call replaces the read, the getline loop and every setter it
+        // drives. An edit still lands on the next open, because an edit is
+        // exactly what moves the timestamp.
+        // ★Paired with Save(), which stamps m_iniStamp after its own write --
+        // otherwise our own close would invalidate the cache every time and
+        // this would never skip anything.
+        {
+            std::error_code ec;
+            const auto stamp = std::filesystem::last_write_time(kUiIniPath, ec);
+            if (!ec && m_loaded && stamp == m_iniStamp) return;
+            m_iniStamp = ec ? std::filesystem::file_time_type{} : stamp;
+        }
+
         m_loaded = true;
         std::ifstream in(kUiIniPath);
         if (!in) return;
@@ -336,6 +377,21 @@ namespace FUI
             // nothing -- see DeltaWatch.h.
             if (key == "!delta") {
                 DeltaWatch::SetEnabled(rest == "1" || rest == "true");
+                continue;
+            }
+            // Typed-bags phase 0. OFF by default because the sweep it runs is
+            // the first open's biggest single cost -- see BagFilter.h.
+            if (key == "!bagdump") {
+                BagFilter::SetDumpsEnabled(rest == "1" || rest == "true");
+                continue;
+            }
+            // ★Parsed here ONLY so Save() can write the line back -- Save
+            // truncates the file and rebuilds it from known keys, so a
+            // hand-added line that nothing here recognises is deleted the
+            // first time the player moves a window. Creator reads the file
+            // directly for the value it acts on (ReadNoPause).
+            if (key == "!nopause") {
+                GridInventoryMenu::SetNoPause(rest == "1" || rest == "true");
                 continue;
             }
             // 1.4 / B1: kind-level audit -- ON BY DEFAULT since its promotion
@@ -843,19 +899,23 @@ namespace FUI
 
     void WinManager::Save() const
     {
-        std::ofstream out(kUiIniPath, std::ios::trunc);
-        // ★★A SILENT RETURN HERE LOSES EVERY SETTING THE PLAYER TOUCHED. It was
-        // silent, and the failure looked exactly like a feature not working:
-        // the quick wheel switch reported success in its own log, changed the
-        // game immediately, and was gone on the next launch -- because nothing
-        // between the button and the disk ever said the write had failed.
-        // A write that can fail must say so.
-        if (!out) {
-            SKSE::log::error("[UI] SETTINGS NOT SAVED -- cannot open {} for writing. "
-                             "Nothing changed in the settings panel will survive a restart.",
-                             kUiIniPath);
-            return;
-        }
+        // ★★★BUILD IT IN MEMORY, THEN DECIDE WHETHER THE DISK NEEDS TO HEAR.
+        //
+        // This runs from UIRoot::OnClose on EVERY close, and it used to open,
+        // truncate and rewrite the file every single time -- ~3.7 KB plus the
+        // filesystem metadata, synchronously, on the frame the menu is coming
+        // down. Paused that was free; unpaused it is a visible hitch, and it is
+        // the one the close-side report named.
+        //
+        // ★Almost every close changes NOTHING. The layout only moves when the
+        // player drags a window, and the settings only move when they touch a
+        // control -- and those paths call Save() for themselves already. So the
+        // cheap test is not a dirty flag threaded through thirty mutation
+        // sites, which is a bug farm: it is to serialise (cheap, in memory) and
+        // compare against what we last wrote. Same bytes, no write, no
+        // filesystem call at all -- and correct by construction, because
+        // nothing has to remember to set anything.
+        std::ostringstream out;
         out << "; GridInventory window layout (auto-generated)\n";
         out << "; key = x,y,w,h[,parent:<key>]\n";
         // ★★The scale THESE POSITIONS ARE IN. Sizes below are not
@@ -877,6 +937,12 @@ namespace FUI
         if (Grid::FitTrace())  out << "!fittrace = 1\n";
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
+        if (BagFilter::DumpsEnabled()) out << "!bagdump = 1\n";
+        // ★A measurement mode, not a setting -- written only while ON so an
+        // ordinary install never carries the line, and preserved across a save
+        // so a tester who rearranges a window mid-experiment does not silently
+        // fall back to a paused board halfway through the A/B.
+        if (GridInventoryMenu::NoPause()) out << "!nopause = 1\n";
         // ★Inverted since their promotions: ON is the default, so the line is
         // written only while OFF -- the escape hatch survives a restart, and
         // an ordinary install still carries no line.
@@ -951,16 +1017,53 @@ namespace FUI
         // redirect the write somewhere neither the player nor this code can
         // guess. "It reported success and the file did not change" is not a
         // state anyone can debug without this line.
+        // ---- the disk, at last, and only if it has something to learn ----
+        std::string text = out.str();
+        if (text == m_lastWritten) return;   // the common close: nothing moved
+
+        std::ofstream f(kUiIniPath, std::ios::trunc);
+        // ★★A SILENT RETURN HERE LOSES EVERY SETTING THE PLAYER TOUCHED. It was
+        // silent, and the failure looked exactly like a feature not working:
+        // the quick wheel switch reported success in its own log, changed the
+        // game immediately, and was gone on the next launch -- because nothing
+        // between the button and the disk ever said the write had failed.
+        // A write that can fail must say so.
+        // ★And m_lastWritten is NOT updated on failure -- a file we could not
+        // write is a file that does not hold these bytes, so the next Save must
+        // try again rather than believe the disk already agrees with us.
+        if (!f) {
+            SKSE::log::error("[UI] SETTINGS NOT SAVED -- cannot open {} for writing. "
+                             "Nothing changed in the settings panel will survive a restart.",
+                             kUiIniPath);
+            return;
+        }
+        f << text;
+        f.close();
+        m_lastWritten = std::move(text);
+        // ★★Say WHERE, not just "saved". The path is RELATIVE, so where it
+        // lands depends on the working directory and on whatever virtual file
+        // system the launcher put in front of it -- and a mod manager may
+        // redirect the write somewhere neither the player nor this code can
+        // guess. "It reported success and the file did not change" is not a
+        // state anyone can debug without this line.
         // ★Logged once per session: this fires on every window move, and a
         // path that never changes does not need saying sixty times.
+        // ★AFTER the write, and after the unchanged-skip above it: a line
+        // saying "settings saved" on a close that wrote nothing is a lie the
+        // next person debugging this file does not need.
         static bool s_saidWhere = false;
         if (!s_saidWhere) {
             s_saidWhere = true;
-            std::error_code ec;
-            const auto abs = std::filesystem::absolute(kUiIniPath, ec);
+            std::error_code abserr;
+            const auto abs = std::filesystem::absolute(kUiIniPath, abserr);
             SKSE::log::info("[UI] settings saved -> {}",
-                            ec ? kUiIniPath : abs.string());
+                            abserr ? kUiIniPath : abs.string());
         }
+        // ★The stamp Load() compares against, taken AFTER our own write so the
+        // next open does not re-read a file it already agrees with. See Load.
+        std::error_code ec;
+        m_iniStamp = std::filesystem::last_write_time(kUiIniPath, ec);
+        if (ec) m_iniStamp = {};
     }
 
     // ---- per-window draw helpers ----

@@ -406,6 +406,21 @@ namespace FUI::Grid
     // Draw the main tetris grid inside the current ImGui window.
     void Draw();
 
+    // ★★WHERE THE FIRST CELL IS, so the pointer can start on it.
+    //
+    // The board's screen position is not knowable before it draws -- it rides
+    // the main window, which the player has moved and WinManager restores --
+    // so this is the LAST FRAME's answer, stamped by the main view's own draw
+    // pass. It is the only piece of board geometry anything outside the grid
+    // asks for, and it exists because opening the inventory on a pad used to
+    // leave the pointer wherever the stick had last parked it.
+    //
+    // False until the main board has drawn once since ForgetSlotCenter(),
+    // which the menu open calls -- so a stale centre from the previous
+    // session (another window layout, another resolution) is never used.
+    [[nodiscard]] bool FirstSlotCenter(ImVec2& a_out);
+    void ForgetSlotCenter();
+
     [[nodiscard]] int GoldAmount();   // v9: UIRoot draws the GOLD bar
 
     // ★S-G: gold's only mechanisms, called from GoldCoins::Tick (main

@@ -448,6 +448,10 @@ namespace FUI::UIRoot
         // ICON CACHE reset request (settings, two-click armed). Consumed in
         // Tick — SRVs must never be released inside the ImGui frame.
         std::atomic<bool> g_iconsReset = false;
+        // ★Set by OnShow, consumed by the next Tick: the carry-wide icon
+        // prefetch, moved off the open frame. Plain bool -- both ends are the
+        // main thread, which is the whole reason it is safe to walk forms in.
+        bool              g_prefetchOwed = false;
         // GI47: a preset icon bundle waits to be merged (frame-outside).
         // The pak path rides in g_presetMergePak (same-thread handoff).
         std::atomic<bool> g_iconsMergePreset = false;
@@ -680,9 +684,20 @@ namespace FUI::UIRoot
 
         constexpr float kPadCursorSpeed = 1400.0f;   // px/s at full deflection
         constexpr float kPadScrollRate  = 26.0f;
+        // ★A held d-pad walks on its own after this, one step per rate — the
+        // same shape as every key repeat the player already knows. Slower than
+        // a text cursor's on purpose: a step here is a whole CELL.
+        constexpr float kPadRepeatDelay = 0.34f;   // s held before it repeats
+        constexpr float kPadRepeatRate  = 0.09f;   // s between repeated steps
 
         std::atomic<bool> g_padSeed{ false };   // park the cursor mid-screen once
         std::atomic<bool> g_padSuppressed{ false };   // the mouse took over
+        // ★★★"PUT THE POINTER ON THE FIRST SLOT" -- set by OnShow (game
+        // thread), paid by the first frame that HAS a board to point at
+        // (render thread). It cannot be paid at OnShow itself: the board's
+        // screen position is whatever the main window's restored layout makes
+        // it, and no window has drawn yet when the menu is told to open.
+        std::atomic<bool> g_homeOwed{ false };
 
         // Who owns the pointer on a pad — decided ONCE by observation, never
         // per frame (a per-frame verdict is what made it blink).
@@ -720,7 +735,11 @@ namespace FUI::UIRoot
             auto& io = ImGui::GetIO();
             const std::uint32_t now = g_padHeld.load();
             const std::uint32_t changed = now ^ g_padPrev;
-            if (changed == 0) return;
+            // ★No early-out on "nothing changed" any more: the d-pad repeat at
+            // the foot of this function is a question about what is still HELD,
+            // and the frames where nothing changes are the only frames it has
+            // to answer on. Every block above is edge-guarded, so a quiet frame
+            // still emits nothing.
 
             const auto edge = [&](std::uint32_t a_bit) { return (changed & a_bit) != 0; };
             const auto down = [&](std::uint32_t a_bit) { return (now & a_bit) != 0; };
@@ -789,6 +808,47 @@ namespace FUI::UIRoot
             }
             if (edge(kActNudgeU) && down(kActNudgeU)) g_padNudgeY -= step;
             if (edge(kActNudgeD) && down(kActNudgeD)) g_padNudgeY += step;
+
+            // ★★★HOLD A DIRECTION AND IT KEEPS WALKING.
+            //
+            // One step per press is exactly right when the target is a cell
+            // away and absurd when it is a boardful away -- crossing the grid
+            // meant lifting and re-pressing the same button twenty times (user
+            // report). The press itself is untouched: it still steps once,
+            // immediately, above. What is new is that a direction still held
+            // kPadRepeatDelay later starts stepping on its own.
+            //
+            // ★TIMED, not per frame. A step per frame is a different speed on
+            // every machine and a blur on a fast one.
+            // ★The MODAL half is deliberately excluded: there left/right ARE
+            // the arrow keys, and ImGui already runs its own repeat on a held
+            // key -- repeating here as well would count one hold twice.
+            {
+                const struct { std::uint32_t bit; float* accum; float step; bool asKey; }
+                dirs[] = {
+                    { kActNudgeL, &g_padNudgeX, -step, s_nudgeLKey },
+                    { kActNudgeR, &g_padNudgeX,  step, s_nudgeRKey },
+                    { kActNudgeU, &g_padNudgeY, -step, false },
+                    { kActNudgeD, &g_padNudgeY,  step, false },
+                };
+                static float s_repeatT[std::size(dirs)]{};
+                const float dt = std::clamp(io.DeltaTime, 1.0f / 240.0f, 1.0f / 20.0f);
+                for (std::size_t i = 0; i < std::size(dirs); ++i) {
+                    const auto& d = dirs[i];
+                    // released (or speaking keyboard to a popup): disarmed
+                    if (!down(d.bit) || d.asKey) { s_repeatT[i] = 0.0f; continue; }
+                    // the press frame: its own step already went out above,
+                    // so the timer starts at the full delay
+                    if (edge(d.bit)) { s_repeatT[i] = kPadRepeatDelay; continue; }
+                    s_repeatT[i] -= dt;
+                    // the guard is for a frame long enough to owe several
+                    // steps (a stall, an alt-tab): walk, do not teleport
+                    for (int n = 0; s_repeatT[i] <= 0.0f && n < 4; ++n) {
+                        *d.accum += d.step;
+                        s_repeatT[i] += kPadRepeatRate;
+                    }
+                }
+            }
 
             g_padPrev = now;
         }
@@ -1023,6 +1083,48 @@ namespace FUI::UIRoot
                     MarkPadActive(false);
                 } else if (!padMode) {
                     g_padActive.store(false);
+                }
+            }
+
+            // ★★★THE POINTER STARTS ON THE FIRST SLOT.
+            //
+            // Opening the inventory used to leave the pointer wherever it had
+            // last been left -- screen centre on a pad's first open, or some
+            // corner the mouse was parked in -- so the first thing every open
+            // asked for was a drive back to the board. It starts on the first
+            // cell now, which is where the eye goes anyway and, on a pad, the
+            // one place a d-pad can count cells FROM.
+            //
+            // Paid here rather than at OnShow because the board's position is
+            // not knowable until it has drawn once (Grid::FirstSlotCenter):
+            // the main window rides a layout the player saved, and on the open
+            // frame no window has drawn at all. So the debt waits -- one frame,
+            // normally -- and is paid before this frame's position is read,
+            // whichever source ends up reading it.
+            if (g_homeOwed.load()) {
+                if (ImVec2 home{}; Grid::FirstSlotCenter(home)) {
+                    g_homeOwed.store(false);
+                    g_padCursor = home;
+                    g_padNudgeX = 0.0f;   // nothing pressed before the open
+                    g_padNudgeY = 0.0f;   // gets to drag the pointer off it
+                    // The engine's own cursor is the position source in both
+                    // the mouse path and pad kEngine mode, so it has to be
+                    // told too -- and g_engineLast* with it, or our write
+                    // reads back next frame as "the engine moved by itself".
+                    if (auto* mc = RE::MenuCursor::GetSingleton()) {
+                        mc->cursorPosX = home.x;
+                        mc->cursorPosY = home.y;
+                        g_engineLastX  = home.x;
+                        g_engineLastY  = home.y;
+                    }
+                    // ...and the OS pointer, which is what the no-CursorMenu
+                    // fallback below reads. In CLIENT coordinates, like that
+                    // fallback (a windowed setup is offset from the desktop).
+                    if (g_gameWnd) {
+                        POINT p{ static_cast<LONG>(std::lround(home.x)),
+                                 static_cast<LONG>(std::lround(home.y)) };
+                        if (ClientToScreen(g_gameWnd, &p)) SetCursorPos(p.x, p.y);
+                    }
                 }
             }
 
@@ -4142,6 +4244,13 @@ namespace FUI::UIRoot
         // rebound the controls since the last time the menu was up. Done HERE,
         // on the game thread, so the render thread only ever reads the result.
         ResolvePadLabels();
+        // ★The pointer goes to the first slot on every open. Forget last
+        // session's board position first: the layout, the scale and even the
+        // resolution may have moved since, and a stale centre would park the
+        // pointer on screen that is no longer board. Render pays the debt on
+        // the first frame that has drawn one (see MouseHandler).
+        Grid::ForgetSlotCenter();
+        g_homeOwed.store(true);
         // Park anchor = the SAVED main-window centre — set BEFORE the first
         // capture request so no frame is ever exposed.
         {
@@ -4175,12 +4284,21 @@ namespace FUI::UIRoot
         // opens — one up-front caching burst instead of per-scroll/per-bag
         // trickle (bag contents live in the same inventory, so this covers
         // them too). Disk-cached items are skipped by pak index (no GPU).
-        if (auto* pl = RE::PlayerCharacter::GetSingleton()) {
-            auto* cache = IconCache::GetSingleton();
-            for (const auto& [obj, data] : pl->GetInventory()) {
-                if (obj && data.first > 0) cache->Prefetch(obj);
-            }
-        }
+        //
+        // ★★"THE MOMENT THE MENU OPENS" DID NOT HAVE TO MEAN "ON THE OPEN
+        // FRAME". GetInventory() builds a whole map of the player's carry --
+        // an allocation and a copy per stack -- and then this queues every one
+        // of them, all inside the frame the menu appears on. A hoarder's pack
+        // is thousands of stacks, and none of that work is needed before the
+        // first frame draws: the queue is consumed one item per frame anyway
+        // (IconCache::PreRender), so filling it on frame 0 versus frame 1 is
+        // invisible to everything except the stall it causes.
+        //
+        // Deferred by one tick, and the tick that runs it is UIRoot::Tick --
+        // main thread, so the form pointers this walks are still being read
+        // where they are legal to read (rule 4). The Burst above still covers
+        // the visible sprites for the open transition.
+        g_prefetchOwed = true;
 
         SKSE::log::info("[UI] menu shown ({} icons cached)",
             IconCache::GetSingleton()->CachedCount());
@@ -4704,6 +4822,18 @@ namespace FUI::UIRoot
         // -- refreshed HERE because this tick runs on the main thread in both
         // worlds (the update hook unpaused, AdvanceMovie paused).
         DeltaWatch::RefreshMenuSnapshot();
+        // ★The open frame's debt, paid on the frame after it (see OnShow).
+        // Cleared FIRST: Prefetch can log, and an early return anywhere below
+        // must not leave this owed forever.
+        if (g_prefetchOwed) {
+            g_prefetchOwed = false;
+            if (auto* pl = RE::PlayerCharacter::GetSingleton()) {
+                auto* cache = IconCache::GetSingleton();
+                for (const auto& [obj, data] : pl->GetInventory()) {
+                    if (obj && data.first > 0) cache->Prefetch(obj);
+                }
+            }
+        }
         // ★★★THE SAFETY NET, and suppression is not safe without it.
         //
         // Whoever suppressed us is expected to send kShow when their window

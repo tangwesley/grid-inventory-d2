@@ -294,8 +294,20 @@ namespace FUI
     static void ProbeRect(ID3D11DeviceContext* a_ctx, ID3D11Texture2D* a_src,
                           const D3D11_BOX& a_box, int a_w, int a_h, const char* a_when)
     {
-        static int s_probes = 0;
-        if (s_probes >= 8) return;   // a handful of icons, then silence
+        // ★★THE BUDGET IS PER PAUSE STATE, and it has to be: the whole point of
+        // the "!nopause" run is to compare the same measurement on both sides,
+        // and one shared counter spends its entire allowance on whichever side
+        // the player happens to open first -- leaving the question that the
+        // build exists to answer unlogged. Sixteen is eight PAIRS
+        // (after-clear + after-model) per side, which is enough items to tell a
+        // consistent result from one odd model.
+        const bool paused = [] {
+            auto* ui = RE::UI::GetSingleton();
+            return !ui || ui->GameIsPaused();
+        }();
+        static int s_probes[2] = { 0, 0 };
+        int&       probes = s_probes[paused ? 1 : 0];
+        if (probes >= 16) return;   // a handful of icons per side, then silence
         auto* data = RE::BSGraphics::Renderer::GetRendererDataSingleton();
         auto* dev = data ? reinterpret_cast<ID3D11Device*>(data->forwarder) : nullptr;
         if (!dev) return;
@@ -366,11 +378,15 @@ namespace FUI
                 if (shown) SKSE::log::info("[ICONDIAG]   blended:{}", s);
             }
             a_ctx->Unmap(staging, 0);
-            ++s_probes;
-            SKSE::log::info("[ICONDIAG] {} rect=({},{}) {}x{} pure={:.1f}% keyed={:.1f}% "
+            ++probes;
+            // ★"PAUSED"/"LIVE" first: these lines are read by grepping the log
+            // for after-model, and the pause state is the variable under test.
+            // A line that does not carry it is not evidence of anything.
+            SKSE::log::info("[ICONDIAG] {} {} rect=({},{}) {}x{} pure={:.1f}% keyed={:.1f}% "
                             "| alpha 0={:.1f}% mid={:.1f}% 255={:.1f}% "
                             "| corner {:02X}{:02X}{:02X}/{:02X}{:02X}{:02X} "
                             "mid {:02X}{:02X}{:02X}",
+                paused ? "PAUSED" : "LIVE  ",
                 a_when, a_box.left, a_box.top, a_w, a_h,
                 total ? 100.0 * pure / total : 0.0,
                 total ? 100.0 * keyed / total : 0.0,
