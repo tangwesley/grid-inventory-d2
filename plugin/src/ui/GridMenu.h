@@ -23,6 +23,20 @@ namespace FUI
         // this suppresses OnHide's fallback so the sound doesn't double up.
         static void MarkCloseSfxPlayed();
 
+        // ★★TEST SWITCH, NOT A SETTING ("!nopause" in GridInventory_ui.ini).
+        // Drops kPausesGame so the menu opens onto a LIVE world. It exists to
+        // measure one question and no other: does Inventory3DManager::Render()
+        // still draw when the game is not paused? The class comment above
+        // names the render STAGE as the requirement; GridMenu.cpp's Creator
+        // names the PAUSE as well, inherited from Modex's config note rather
+        // than measured here. The two are separate axes and this holds the
+        // stage fixed while moving the pause.
+        // ★An unpaused board is NOT a supported mode -- the equip path's
+        // hand-rolled slot-conflict resolution (Equip.cpp) assumes a frozen
+        // engine, so gear can be lost. Measure, then turn it off.
+        [[nodiscard]] static bool NoPause();
+        static void                SetNoPause(bool a_on);
+
         void PostDisplay() override;
         void AdvanceMovie(float a_interval, std::uint32_t a_currentTime) override;
         RE::UI_MESSAGE_RESULTS ProcessMessage(RE::UIMessage& a_message) override;
