@@ -403,7 +403,46 @@ namespace FUI::Grid
     // names a tile: the board can be rebuilt between the ask and the answer.
     void DropTileUnits(const std::string& a_key, int a_count);
 
-    // Draw the main tetris grid inside the current ImGui window.
+    // ★★(1.6) THE THREE BOARDS BEHIND ONE GRID AREA.
+    //
+    // Quest items and keys are the two things the player never chose to
+    // carry. They arrive on their own, they cannot be dropped (a quest item)
+    // or sold for anything (a key), and until now they sat on the main board
+    // taking squares away from the loot the player did choose -- a sack of
+    // fifty dungeon keys is a permanent tax on a 9x4 grid, and shedding it
+    // is not something the game allows.
+    //
+    // So they get boards of their own, reached by a tab strip over the grid.
+    // Each tab board is the SAME cols x rows as the main one, and each grows
+    // its own overflow rows -- but those rows never reach the encumbrance
+    // sum. Being unable to put something down must not be the thing that
+    // slows you to a walk. The main board is untouched: same size, same
+    // overflow rows, same crimson boundary, same forced walk past it.
+    //
+    // Routing is automatic and runs on EVERY rebuild, so a load, a script
+    // handover and a hand-picked key all land the same way -- and an item
+    // that stops being a quest object walks back out to the main board by
+    // the same rule that walked it in.
+    enum class Tab
+    {
+        kMain = 0,
+        kQuest,
+        kKeys,
+        kCount
+    };
+    [[nodiscard]] Tab  ActiveTab();
+    void               SetActiveTab(Tab a_tab);
+    // How many tiles a tab board is holding -- the strip shows it beside the
+    // name, because a tab whose whole point is that you did not put anything
+    // there needs to say when something arrived.
+    [[nodiscard]] int  TabTileCount(Tab a_tab);
+    // ★A tab board has something the player has not looked at yet (the same
+    // NEW mark the grid draws). The strip lights the tab, so an arrival on a
+    // board that is not on screen is still announced.
+    [[nodiscard]] bool TabHasNew(Tab a_tab);
+
+    // Draw the main tetris grid inside the current ImGui window. Draws
+    // whichever board ActiveTab() names -- all three share the area.
     void Draw();
 
     // ★★WHERE THE FIRST CELL IS, so the pointer can start on it.
@@ -1032,8 +1071,17 @@ namespace FUI::Grid
     // rows bounded by limRows), so a tile whose seat no longer exists falls
     // through to first-fit. Shrinking the board reflows it; it does not strand
     // anything, and the cosave record needs no version bump.
-    inline constexpr int kDefCols = 9;
-    inline constexpr int kDefRows = 4;
+    // ★★NOT A SETTINGS ROW ANY MORE. The GRID SIZE sliders are gone from the
+    // settings window (1.6): three boards answer to these numbers now -- the
+    // main board and the two tab boards -- so a mid-drag apply re-placed
+    // three grids and resized the window under the hand holding it, and the
+    // held-value dance that used to hide that was already the most delicate
+    // row in the panel. It remains a SETTING, just not a slider:
+    // "!basegrid = cols, rows" in GridInventory_ui.ini is still read, still
+    // clamped, and still written back, so a player who wants another board
+    // has one file to edit and nothing to hunt for in a menu.
+    inline constexpr int kDefCols = 10;
+    inline constexpr int kDefRows = 8;
     // ★THE COLUMN FLOOR IS NOT COSMETIC. MaskOf trims a footprint's width to
     // the column count, so a board narrower than an item silently CROPS it —
     // a greatsword that parses, saves and draws while being a different item

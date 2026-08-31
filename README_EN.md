@@ -64,19 +64,29 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
 ## Features
 
 ### The grid
-- **9×4 = 36 squares by default, and the size is yours to set** — GRID SIZE in
-  SETTINGS, or `!basegrid = cols, rows` in `GridInventory_ui.ini`. Columns
-  4–24, rows 1–40; the container and merchant boards follow your column count
-  so items drag straight across. Real footprints per item (1×1 rings to 2×4
-  greatbows), free shapes (L-pieces) supported. **Rotate 90° with `A`/`D` while
-  carrying.** No auto-sort and no search — organising it yourself is the point.
+- **10×8 = 80 squares by default, and the size is yours to set** —
+  `!basegrid = cols, rows` in `GridInventory_ui.ini`. Columns 4–24, rows 1–40;
+  the container and merchant boards follow your column count so items drag
+  straight across. Real footprints per item (1×1 rings to 2×4 greatbows), free
+  shapes (L-pieces) supported. **Rotate 90° with `A`/`D` while carrying.** No
+  auto-sort and no search — organising it yourself is the point.
+- **Three boards: ITEMS · QUEST · KEYS**, on a strip above the grid. Quest
+  objects and keys are routed to their own board automatically, on pickup and
+  on every load, and they leave it again by themselves when an item stops
+  being a quest object. Each board is the same size as ITEMS and each grows
+  its own overflow rows — but **the QUEST and KEYS boards never slow you
+  down**, and their squares are outside the Space figure entirely. Nothing you
+  cannot drop can put you over the limit. A key is never refused at pickup for
+  want of room, and neither is a quest item. A tab shows how many tiles it
+  holds and lights up when something new lands on it.
 - **Pick-up-and-place**: left-click to lift, left-click the target square to set
   down (swap supported). Shift+left-click = stack/gold split slider.
 - Rarity glow (**unique = red · enchanted = blue**), poison shown as a droplet in
   the top-right, markers (favourite ◆ / quest ▲ / stolen ●), **newly acquired
   squares lit a shade brighter**, Shift comparison tooltip with an
   *Equipped* card.
-- **Capacity**: exceeding the board shows an overflow row and slows movement.
+- **Capacity**: exceeding the ITEMS board shows an overflow row and slows
+  movement (the QUEST and KEYS boards are exempt — see above).
   A full grid blocks pickups (quest/script-granted items are deliberately never
   blocked — they come in and push you into overflow instead). Shrinking the
   board never strands anything: whatever no longer fits its old square is
@@ -103,7 +113,8 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
   - **Twelve general** — from a one-square pouch to a 3×3 pack holding a
     hundred squares. General goods vendors rotate three of them each restock.
   - **Six sorting bags** — ingredients, ore and ingots, hides, potions, soul
-    gems, keys (lockpicks included). Each takes only its own kind and
+    gems, keys (the lockpick — real keys go to the KEYS tab now). Each takes
+    only its own kind and
     **anything you pick up goes straight into it**; what you take back out
     stays where you put it. **COLLECT** on the title bar gathers that kind
     from wherever it is scattered. Always stocked by the trader who deals in
@@ -188,11 +199,15 @@ everything the game measures still comes from what you are really wearing.
   wearing the same thing twice).
 
 ### Settings (SETTINGS in the title bar)
-- Scale, text size, **grid size**, 19 skins (two of them brush-and-ink),
+- Scale, text size, 19 skins (two of them brush-and-ink),
   languages (live switch), icon
   brightness/style, item shadow (distance/blur/opacity), capture light, icon
   cache reset, precache all, **quick wheel on/off**, trade options (unlimited
   merchant gold / merchant buys anything).
+- **Board size is not in here** — it is `!basegrid = cols, rows` in
+  `GridInventory_ui.ini`. It sizes all three boards at once, so it is a thing
+  you set and then leave alone rather than something to drag while looking at
+  it.
 - Sliders take a drag, the ± buttons at either end (held for continuous), a
   double-click to type an exact value, and a right-click to restore the default.
 

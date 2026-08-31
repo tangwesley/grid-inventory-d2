@@ -433,6 +433,13 @@ namespace FUI
                 DeltaWatch::SetEnabled(rest == "1" || rest == "true");
                 continue;
             }
+            // Input-state trace: what is holding the player still. OFF by
+            // default -- see UIRoot::SetMovementWatch and the [MOVEWATCH] note
+            // in main.cpp.
+            if (key == "!movewatch") {
+                UIRoot::SetMovementWatch(rest == "1" || rest == "true");
+                continue;
+            }
             // Typed-bags phase 0. OFF by default because the sweep it runs is
             // the first open's biggest single cost -- see BagFilter.h.
             if (key == "!bagdump") {
@@ -1010,6 +1017,7 @@ namespace FUI
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
         if (BagFilter::DumpsEnabled()) out << "!bagdump = 1\n";
+        if (UIRoot::MovementWatch()) out << "!movewatch = 1\n";
         // ★A measurement mode, not a setting -- written only while ON so an
         // ordinary install never carries the line, and preserved across a save
         // so a tester who rearranges a window mid-experiment does not silently
@@ -1036,7 +1044,12 @@ namespace FUI
         // key that is only read and never written is a key the next settings
         // change silently deletes -- the player's board would quietly revert
         // the first time they touched the SCALE slider.
-        out << "; !basegrid = main board columns, rows (default "
+        // ★(1.6) ...and it is the ONLY way to set the board now: the GRID SIZE
+        // sliders are gone from the settings window, so this line is what a
+        // player is pointed at. It sizes all three boards -- ITEMS, QUEST and
+        // KEYS are one shape.
+        out << "; !basegrid = board columns, rows -- ITEMS / QUEST / KEYS "
+               "all take this shape (default "
             << Grid::kDefCols << ", " << Grid::kDefRows << "; cols "
             << Grid::kMinCols << "-" << Grid::kMaxCols << ", rows "
             << Grid::kMinBoardRows << "-" << Grid::kMaxBoardRows << ")\n";

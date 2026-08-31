@@ -5868,6 +5868,18 @@ namespace
                         RequestTake(c.obj, c.count);   // gold bypasses space
                         continue;
                     }
+                    // ★(1.6) a KEY bypasses the budget for the same reason
+                    // gold does: it does not land on the board being budgeted.
+                    // Keys go to the KEYS tab, whose cells are outside
+                    // SpaceTotal/SpaceUsed entirely -- so subtracting one from
+                    // `free` would spend a square nothing occupies, and
+                    // stopping at free == 0 would leave the dungeon's keys in
+                    // the chest with a whole empty board to put them on.
+                    if (c.obj->Is(RE::FormType::KeyMaster)) {
+                        g_actingSpot = c.spotKey;
+                        RequestTake(c.obj, c.count);
+                        continue;
+                    }
                     const int span = Grid::CellSpanOf(c.obj);
                     if (span <= free && Grid::CanFitNewItem(c.obj)) {
                         // ★(1.3.0) name the slot so the take retires IT --

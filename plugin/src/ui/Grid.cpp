@@ -1815,6 +1815,118 @@ namespace FUI::Grid
         constexpr const char* kTrashKey  = "__trash";
         constexpr int         kTrashCols = 6;
         constexpr int         kTrashRows = 4;
+
+        // ---- (1.6) the QUEST / KEYS tab boards -------------------------------
+        // Two more virtual bags, and virtual for the same reason the trash is:
+        // there is no ITEM behind them, so nothing has to be carried, placed or
+        // owned for the board to exist. Where the trash is a deletion queue,
+        // these are ordinary storage -- tiles sit in them, get dragged around
+        // in them, and are drawn by the same passes -- so almost none of the
+        // trash's special cases apply to them. What they DO share with a typed
+        // bag is an acceptance rule, and with nothing at all a capacity: their
+        // cells are outside the space figure and outside the overload verdict.
+        //
+        // ★They are NOT BagFilter ids. A key is a form type and a quest object
+        // is a per-instance flag the engine can set and clear at any time;
+        // neither is a footprint category, and routing them through `accept`
+        // would put them in front of CollectIntoBag, the vendor stock tables
+        // and the "this bag is full" signal, none of which mean anything here.
+        constexpr const char* kQuestKey = "__quest";
+        constexpr const char* kKeysKey  = "__keys";
+
+        [[nodiscard]] bool IsTabKey(std::string_view a_bag)
+        {
+            return a_bag == kQuestKey || a_bag == kKeysKey;
+        }
+
+        // ★★WHICH BOARD AN ITEM BELONGS ON -- the one rule, asked by the
+        // routing, by the drop ghost and by the pickup gate, so those three
+        // can never drift into disagreeing about where a key lives.
+        //
+        // KEYS WINS OVER QUEST, and that is a deliberate ordering rather than
+        // an accident of which test came first. Most of Skyrim's keys are
+        // flagged as quest objects; checking quest first would send nearly
+        // every key to the QUEST board and leave the KEYS board empty, which
+        // is the one outcome that makes both tabs useless at once. A key is a
+        // key first.
+        //
+        // ★Keys are matched by FORM TYPE, not by the "key" bag filter. That
+        // filter deliberately also claims the lockpick (a `frm:` line, added
+        // on request), and a lockpick is a consumable the player spends -- it
+        // belongs on the main board with the rest of the kit, and in the key
+        // sorting bag if they own one. The sorting bag keeps it.
+        [[nodiscard]] const char* TabBagFor(RE::TESBoundObject* a_obj, bool a_quest)
+        {
+            if (!a_obj) return nullptr;
+            if (a_obj->Is(RE::FormType::KeyMaster)) return kKeysKey;
+            if (a_quest) return kQuestKey;
+            return nullptr;
+        }
+
+        // ★★"May this carry land on that board?", in one place, because it is
+        // asked at two doors -- the drop ghost and the swap branch -- and a
+        // rule stated twice is a rule that will be fixed once.
+        //
+        // It only means anything when a TAB is involved: either the carried
+        // item has a board of its own, or the board under the cursor is one.
+        // Without that clause "the item's board is not this board" is true of
+        // a potion over a satchel as well, and the first cut of this refused
+        // every ordinary drop into every general bag.
+        //
+        // The trash is exempt on purpose. It is not storage -- it is a
+        // deletion queue -- and a key the player has dragged into it has said
+        // what they want done with it.
+        [[nodiscard]] bool WrongTabDrop(const Held& a_held, const std::string& a_bagKey)
+        {
+            if (!a_held.obj) return false;
+            if (a_bagKey == kTrashKey) return false;
+            const char* tab = TabBagFor(a_held.obj, a_held.quest);
+            if (!tab && !IsTabKey(a_bagKey)) return false;
+            return a_bagKey != (tab ? tab : "");
+        }
+
+        // ★A board that is drawn in the MAIN WINDOW's grid area, as opposed to
+        // one that opens a window of its own. The chrome asks this, not "is
+        // this view 0": the frame, the pointer's home cell and the scroll all
+        // belong to the area, not to any one of the three boards in it.
+        [[nodiscard]] bool IsMainAreaView(std::string_view a_bagKey)
+        {
+            return a_bagKey.empty() || IsTabKey(a_bagKey);
+        }
+
+        // The tab currently shown in the grid area. Not persisted: which tab
+        // you were last looking at is a property of the session, not of the
+        // save, and opening the bag on the board you actually carry is the
+        // right answer every time you open it.
+        //
+        // ★Atomic because it is written from BOTH sides: the strip sets it on
+        // the render thread, and the menu-open reset sets it on the thread
+        // that answers the menu event. One int, two writers, and no ordering
+        // between them that anything depends on -- which is exactly what an
+        // atomic is for and what a plain int would have quietly not been.
+        std::atomic<int> g_activeTab{ 0 };   // Tab::kMain
+
+        [[nodiscard]] const char* TabBagKey(int a_tab)
+        {
+            switch (a_tab) {
+            case 1:  return kQuestKey;
+            case 2:  return kKeysKey;
+            default: return "";
+            }
+        }
+
+        // Does this view count toward the space figure? FinalizeRebuild's rule,
+        // and the one the partial-update paths keep their running total with.
+        // ★Lives up here rather than beside FinalizeRebuild because the
+        // partial paths above it ask the same question, and two of them used
+        // to answer it with their own inline copy of the clauses -- which is
+        // how the tab boards would have been counted by three call sites and
+        // not by the fourth.
+        [[nodiscard]] bool ViewCountsSpace(const View& a_v)
+        {
+            return a_v.accept.empty() && a_v.bagKey != kTrashKey &&
+                   !IsTabKey(a_v.bagKey);
+        }
         bool                                     g_trashOpen = false;
         // ★Defined with the other trash intake paths, far below;
         // the right-click handler that calls it is far above.
@@ -2677,7 +2789,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // ---- Phase 3: DrawGridView passes (bodies moved verbatim) ----
 
         // pass 1: hairline cell grid + outer border + overflow-zone marking
-        void DrawGridChrome(View& a_view, int a_viewIdx, const ImVec2& base)
+        // ★(1.6) the view INDEX is gone from this pass's signature. Both of
+        // its questions -- "does this board draw its own frame" and "does it
+        // have an ownership boundary" -- are properties of WHICH board it is,
+        // and asking them of a position in g_views was only ever correct
+        // while there was exactly one board in the grid area.
+        void DrawGridChrome(View& a_view, const ImVec2& base)
         {
             auto* dl = ImGui::GetWindowDrawList();
             const auto& sk = Theme::S();
@@ -2700,7 +2817,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // its lines along the outer edge, and an accent ring on top would
             // be a third stroke there — plus it is the same near-invisible
             // rust the carve was brought in to replace.
-            if (a_viewIdx != 0 && !sk.engravedCells && !sk.translucent) {
+            // ★(1.6) "not view 0" became "not in the grid area": the QUEST and
+            // KEYS boards draw where the main one does, inside the same
+            // scrolling child, and Draw() paints that area's edge at a fixed
+            // position for all three. A per-view rect here would ride their
+            // scroll and thin out and thicken exactly as it used to.
+            if (!IsMainAreaView(a_view.bagKey) && !sk.engravedCells && !sk.translucent) {
                 // ★Half a pixel in, for the reason the doll's slot border
                 // carries: AddRect strokes ON the path, so the outer half of
                 // the line sits past base+gridW -- and a board whose right edge
@@ -2724,7 +2846,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const int  part = g_cwBonusCells % BaseCols();
                 const auto tintC = IM_COL32(204, 81, 72, 14);
                 const auto lineC = IM_COL32(204, 81, 72, 200);
-                if (a_viewIdx == 0 && a_view.rows > full) {
+                // ★★STAYS THE MAIN BOARD ALONE, and this is the line that
+                // makes "no penalty" visible rather than merely true. The
+                // crimson boundary means "past here you are over-encumbered";
+                // the tab boards have no such line to cross, so drawing one
+                // would promise a punishment that never comes.
+                if (a_view.bagKey.empty() && a_view.rows > full) {
                     const float cp = CellPx();
                     const float yF = base.y + full * cp;
                     if (part > 0) {
@@ -4132,8 +4259,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // still holds anything you drag in — and the code elsewhere
                 // ASSUMES a typed bag's contents match its filter (the "bag is
                 // full" signal is measured from its own kind overflowing).
-                const bool wrongKind = !a_view.accept.empty() && held.obj &&
-                                       BagFilter::FilterOf(held.obj) != a_view.accept;
+                // ★★(1.6) ...and the tab boards obey it too, in BOTH
+                // directions. A board that holds one kind has to refuse the
+                // others, or the automatic half looks finished while anything
+                // dragged in stays; and the item's own board has to refuse
+                // everywhere ELSE, or a key dropped on the main grid sits
+                // there looking placed until the next rebuild teleports it
+                // back to KEYS. Refusing at the ghost says so before the
+                // button is released, which is the only moment it helps.
+                // ★The carry knows its own quest flag (Held::quest, recorded
+                // at pickup) -- mid-flight there is no tile left to ask.
+                const bool wrongKind =
+                    (!a_view.accept.empty() && held.obj &&
+                     BagFilter::FilterOf(held.obj) != a_view.accept) ||
+                    WrongTabDrop(held, a_view.bagKey);
                 // ★W3: on the MAIN board the footprint must be OWNED -- the
                 // unowned tail of a partial carry-weight row (and the growth
                 // zone below it) draws, but a hand drop there is refused, the
@@ -4198,10 +4337,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const ImVec2 base = ImGui::GetCursorScreenPos();
             ImGui::Dummy(ImVec2(gridW, gridH));
 
-            // View 0 is the player's board and only ever the player's board --
-            // the bag loop starts at 1 -- so this is the one cell the pointer
-            // is sent to when the menu opens.
-            if (a_viewIdx == 0) {
+            // The board in the main window's grid area -- whichever tab is
+            // showing -- is where the pointer is sent when the menu opens, and
+            // whose rect the switch-sides key measures against.
+            if (IsMainAreaView(a_view.bagKey)) {
                 // ★CLAMPED INTO WHAT IS ON SCREEN. The board scrolls (the
                 // overflow rows), and `base` scrolls with it -- walked down,
                 // cell (0,0) sits above the window and a pointer sent to it
@@ -4220,7 +4359,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 g_slotHomeOk = true;
             }
 
-            DrawGridChrome(a_view, a_viewIdx, base);      // pass 1
+            DrawGridChrome(a_view, base);                 // pass 1
             DrawOccupancyPass(a_view, base);              // pass 2
             DrawInkLattice(ImGui::GetWindowDrawList(), base,
                            a_view.cols, a_view.rows);     // pass 2b (ink only)
@@ -4545,7 +4684,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         h.xlIdx = a_xlIdx;
         h.partnerOrd = a_ord;   // GI19: and which cell, for plain look-alikes
         if (auto* p = LootBarter::Partner()) {   // GI25: signature for the transfer
-            h.sig = InstanceSig(ExtraForTile(LiveEntry(p, a_obj), a_uid, a_xlIdx));
+            RE::InventoryEntryData* pe = LiveEntry(p, a_obj);
+            h.sig = InstanceSig(ExtraForTile(pe, a_uid, a_xlIdx));
+            // ★(1.6) ...and whether it is a quest object, asked HERE for the
+            // reason GI36 gives about the star and the stolen mark: once the
+            // unit is on the cursor there is no cell left on either side to
+            // ask. Without it the drop ghost cannot tell which of the three
+            // boards this item is allowed to land on, and a quest item
+            // carried out of a chest would be refused by the very board it
+            // belongs to.
+            h.quest = pe && pe->IsQuestObject();
         }
         g_held = std::move(h);
         if (g_sound) g_sound(a_obj, true);
@@ -5704,6 +5852,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             for (const auto& it : g_items) {
                 if (it.inBag == kTrashKey) continue;   // deletion buffer: no cells
+                // ★★(1.6) AND THE TAB BOARDS ARE NOT ON THIS BOARD. Every sim
+                // downstream of this collection -- MaxAcceptUnits, the
+                // WouldOverflow bounce, ComputeOverloaded and the forced walk
+                // it drives -- measures the hard board and the bags that can
+                // relieve it. A quest object cannot be dropped and a key
+                // cannot be sold for anything, so neither may ever be the
+                // reason the player is walking; and since their cells are out
+                // of the total as well (ViewCountsSpace), leaving them in
+                // `used` here would be the same double-count from the other
+                // side. They occupy their own boards and nothing else.
+                // ★It also has to be this collector rather than a filter
+                // further down: NormalizeBagRefs below clears an inBag that
+                // names no present bag TILE, and these two name none by
+                // design -- left in, every quest item and every key would be
+                // re-seated onto the main board by the sims alone.
+                if (IsTabKey(it.inBag)) continue;
                 Item t = it;
                 if (t.def.bag != 0) a_out.bagKeys.insert(t.key);
                 // overflow-zone spots are TEMPORARY and never honoured
@@ -5847,11 +6011,64 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // than of a cache keyed by the tile's name.
             it.stolen = PoolIsStolen(a_entry, it.uid, it.sig);
             it.quest  = PoolIsQuest(a_entry, it.uid, it.sig);
+            // ★★(1.6) WHICH BOARD THIS TILE BELONGS ON, decided here because
+            // this is where the sub-stack's quest flag was just resolved and
+            // where the layout's remembered `bag` is still in hand.
+            //
+            // The item's KIND outranks the layout, in both directions and on
+            // every rebuild. That is what makes a loaded save sort itself: the
+            // cosave hands back a board arranged before these tabs existed,
+            // every quest object and every key on it is claimed by this pass,
+            // and the boards come up already correct with nothing to migrate.
+            // It is also what walks an item back OUT -- an object stops being
+            // a quest object the moment its quest ends, and the same pass that
+            // put it on the QUEST board returns it to the main one.
+            //
+            // ★A CHANGE OF BOARD FORGETS THE SEAT. Column 4 row 2 means a
+            // different square on each of the three grids, and carrying the
+            // old coordinates across seats the tile on top of whatever lives
+            // there. -1 sends it through first-fit, which is what an arrival
+            // the player did not place should get anyway.
+            // ★The trash is left alone. A parked tile is mid-deletion and the
+            // trash's own bookkeeping (g_trashOrder / g_trashReturn) is keyed
+            // to it sitting there; pulling it out from under that would strand
+            // the queue. Nothing quest-flagged can be parked in the first
+            // place -- the drop routes refuse it -- and a key the player put
+            // there asked to be deleted.
+            if (it.inBag != kTrashKey) {
+                if (const char* tab = TabBagFor(it.obj, it.quest)) {
+                    if (it.inBag != tab) {
+                        it.inBag = tab;
+                        it.col = -1;
+                        it.row = -1;
+                        auto& tle = g_layout[it.key];
+                        tle.bag = tab;
+                        tle.col = -1;
+                        tle.row = -1;
+                    }
+                } else if (IsTabKey(it.inBag)) {
+                    it.inBag.clear();
+                    it.col = -1;
+                    it.row = -1;
+                    auto& tle = g_layout[it.key];
+                    tle.bag.clear();
+                    tle.col = -1;
+                    tle.row = -1;
+                }
+            }
             // overflow-zone spots (past the OWNED cells -- ★W3) are TEMPORARY
             // — never honour them, so the item first-fits back INTO the
             // board the moment space frees up and the extra rows collapse.
-            if (it.inBag.empty() && it.col >= 0 && it.row >= 0 &&
-                !OwnedFootprint(it.col, it.row, it.mask)) {
+            // ★A tab board's growth rows are temporary in the same way and for
+            // a different reason: nothing there was placed by hand, so a tile
+            // stranded on row 12 with row 2 empty is just an old first-fit
+            // answer nobody would defend. It has no ownership boundary to
+            // measure against (that is the encumbrance line, and these boards
+            // are outside it), so the hard board is the whole test.
+            if (it.col >= 0 && it.row >= 0 &&
+                (it.inBag.empty() ? !OwnedFootprint(it.col, it.row, it.mask)
+                                  : (IsTabKey(it.inBag) &&
+                                     it.row + it.mask.h > BaseRows()))) {
                 it.col = -1;
                 it.row = -1;
             }
@@ -6771,6 +6988,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             for (auto& it : g_items) {
                 if (it.inBag == kTrashKey) continue;   // F2: virtual bag, no tile
+                if (IsTabKey(it.inBag)) continue;      // (1.6) ditto: no bag tile
                 if (!it.inBag.empty() && !bags.contains(it.inBag)) {
                     // A CARRIED bag isn't "gone" — keep its contents hidden inside
                     // it (inBag stays set -> excluded from main + no bag window),
@@ -6889,6 +7107,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (!it.obj) continue;
                 if (it.inBag == a_bagKey) continue;      // already home
                 if (it.inBag == kTrashKey) continue;     // queued for deletion
+                // ★(1.6) COLLECT does not raid the tab boards. The key sorting
+                // bag and the KEYS board both answer to the word "key", and
+                // without this the button would haul every key out of the
+                // board that owns them -- to be put straight back by the next
+                // rebuild, which is a button that visibly does nothing twice.
+                // The bag keeps what is genuinely its own: the lockpick, which
+                // the filter claims and the KEYS board does not.
+                if (IsTabKey(it.inBag)) continue;
                 if (it.def.bag) continue;                // E4: no bag inside a bag
                 // ★Coins are collectable like anything else now (see the
                 // spill pass). In practice a TYPED bag only takes them if some
@@ -7083,9 +7309,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (it->def.bag) continue;             // E4: no bag inside a bag
                 if (it->coinValue >= 0) continue;      // coins answer to the ledger
 
-                // Quest items stay on the main board. Hiding one inside a bag
-                // makes it hard to find, and it cannot be dropped or sold, so
-                // the bag buys the player nothing (PLAN §4-4).
+                // Quest items are never bagged. Hiding one inside a bag makes
+                // it hard to find, and it cannot be dropped or sold, so the
+                // bag buys the player nothing (PLAN §4-4).
+                // ★(1.6) belt and braces now: a quest object has already been
+                // routed to the QUEST board by MakeDisplayTile, so the
+                // "already spoken for" test above turns it away first. Kept
+                // because this guard states the RULE and that one states an
+                // implementation of it -- if routing ever changes, the rule
+                // should not have to be rediscovered.
                 // ENTRY-level IsQuestObject on purpose (elsewhere quest state is
                 // per sub-stack): stackable units are interchangeable, so when
                 // ANY unit is quest-flagged the only safe call covers the form.
@@ -7276,8 +7508,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // re-placement (the old split pre-assigned inBag, then the view loop
             // re-placed and bounced it back to main). Fresh buys/loot drain into
             // bag space; coins (gold ledger) and bag items (no nesting) never spill.
+            // ★The tab boards are NOT spill space. They hold their own kind
+            // outright, so a board overflowing with swords must not be
+            // absolved by empty squares on the KEYS board -- that would turn
+            // off the forced walk while the overflow row is visibly full, the
+            // exact failure the typed-bag exclusion below exists to prevent.
+            // (No view for them exists yet at this point; they are built after
+            // the spill, so the predicate only has to stay honest if that
+            // order ever changes.)
             const bool anyBag = std::any_of(g_views.begin(), g_views.end(),
-                [](const View& v) { return !v.bagKey.empty() && v.bagKey != kTrashKey; });
+                [](const View& v) {
+                    return !v.bagKey.empty() && v.bagKey != kTrashKey &&
+                           !IsTabKey(v.bagKey);
+                });
             if (anyBag) {
                 std::vector<Item*> probe;
                 probe.reserve(mainList.size());
@@ -7318,6 +7561,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         for (auto& v : g_views) {   // g_views holds only bag views here
                             if (v.bagKey.empty()) continue;
                             if (v.bagKey == kTrashKey) continue;   // F2: never spill INTO the trash
+                            if (IsTabKey(v.bagKey)) continue;      // (1.6) nor into a tab board
                             if (v.carried) continue;   // it is on the cursor, not on the board
                             if ((pass == 0) != v.open) continue;   // pass 0 = open bags
                             // ★A typed bag is not overflow space. Without this a
@@ -7365,6 +7609,41 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 main.items.push_back(static_cast<int>(it - g_items.data()));
             }
             g_views.insert(g_views.begin(), std::move(main));
+
+            // ---- (1.6) the QUEST and KEYS boards ----------------------------
+            // Built LAST and inserted right behind main, so the three boards
+            // the grid area shows are views 0, 1 and 2 and everything after
+            // them is a window of its own. They always exist, empty or not:
+            // the strip has to be able to show an empty board (that is what
+            // "you are carrying no keys" looks like), and a view that comes
+            // and goes would take the player's tab with it.
+            //
+            // ★Same cols and the same minimum rows as the main board -- the
+            // player set one board size and got three boards. maxRows is the
+            // display limit, not the hard board: these grow their own overflow
+            // rows and nothing measures them for it, which is the whole point.
+            // ★★NO SPILL PASS AND NO FALLBACK. A bag that fills hands the tile
+            // back to main; a tab board simply grows, because there is nowhere
+            // else a quest item is allowed to be.
+            for (int t = 1; t <= 2; ++t) {
+                const char* tabKey = TabBagKey(t);
+                View v;
+                v.bagKey = tabKey;
+                v.bagName = Lang::T(t == 1 ? Lang::Str::QuestTab : Lang::Str::KeysTab);
+                v.cols = BaseCols();
+                v.minRows = BaseRows();
+                v.maxRows = 4096;
+                std::vector<Item*> list;
+                for (auto& it : g_items) {
+                    if (it.inBag == tabKey) list.push_back(&it);
+                }
+                v.rows = PlaceItems(list, v.cols, v.minRows, v.maxRows);
+                for (auto* it : list) {
+                    if (it->overflow || it->col < 0) continue;
+                    v.items.push_back(static_cast<int>(it - g_items.data()));
+                }
+                g_views.insert(g_views.begin() + t, std::move(v));
+            }
         }
 
         // GI1: an instance tile's key IS the engine's uniqueID, and the engine is
@@ -7507,6 +7786,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             g_spaceTotal = BaseCols() * BaseRows() + g_cwBonusCells;   // W3
             for (const auto& v : g_views) {
                 if (v.bagKey == kTrashKey) continue;
+                // ★(1.6) ...and the tab boards are out of BOTH halves, for the
+                // same reason typed bags are: their cells cannot hold general
+                // loot, so counting them as free space answers "can I pick
+                // this up" with a yes that is wrong. Their contents leave
+                // `used` alongside, or the panel drifts toward used > total
+                // with nothing on the board to explain it. A player who wants
+                // to know how full the KEYS board is looks at the KEYS board.
+                if (IsTabKey(v.bagKey)) continue;
                 // ★Typed bags are excluded from BOTH halves. Their cells cannot
                 // hold general loot, so counting them as free space answers the
                 // question "can I pick more up" with a yes that is wrong — and
@@ -7980,6 +8267,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
         if (count <= 0) return decline("count 0");
         if (!entry) return decline("no entry");
+        // ★★(1.6) A TAB BOARD'S ARRIVAL IS THE REBUILD'S TO SEAT. This path
+        // mints a tile and then joins it to the view named by the layout entry
+        // it planned -- but the board an item belongs on is decided inside
+        // MakeDisplayTile, from what the item IS, and it will happily overrule
+        // that plan. The tile would land in the QUEST board's item list with a
+        // seat measured against the main one. Declining costs one full rebuild
+        // on a key pickup and keeps the two halves from disagreeing.
+        // ★Entry-level IsQuestObject, like every other gate outside the tile
+        // walk: a stackable's units are interchangeable, so one flagged unit
+        // has to speak for the form.
+        if (obj->Is(RE::FormType::KeyMaster)) return decline("belongs to the KEYS board");
+        if (entry->IsQuestObject()) return decline("belongs to the QUEST board");
         const std::string baseKey = FormKey(obj);
         std::uint8_t glow = 0;
         if (const auto* ef = obj->As<RE::TESEnchantableForm>();
@@ -8096,7 +8395,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             v.items.end()) {
                             continue;
                         }
-                        if (v.accept.empty() && v.bagKey != kTrashKey) {
+                        if (ViewCountsSpace(v)) {
                             g_spaceUsed -= MaskCells(t.mask.rows);
                         }
                         break;
@@ -8387,6 +8686,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             -> std::vector<std::vector<bool>>* {
             if (a_bag.empty()) return &occ;
             if (a_bag == kTrashKey) return nullptr;
+            if (IsTabKey(a_bag)) return nullptr;   // (1.6) the rebuild's business
             const auto oi = occByBag.find(a_bag);
             if (oi != occByBag.end()) return &oi->second;
             const int vi = viewIdxOf(a_bag);
@@ -8457,7 +8757,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (tvi < 0) { RequestRebuild(); return true; }
             auto& tv = g_views[static_cast<std::size_t>(tvi)];
             tv.items.push_back(idx);
-            if (tv.accept.empty() && tv.bagKey != kTrashKey) {
+            if (ViewCountsSpace(tv)) {
                 g_spaceUsed += MaskCells(g_items.back().mask.rows);
             }
             g_liveObjs.insert(obj);
@@ -8542,7 +8842,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (std::find(v.items.begin(), v.items.end(), idx) == v.items.end()) {
                     continue;
                 }
-                if (v.accept.empty() && v.bagKey != kTrashKey) {
+                if (ViewCountsSpace(v)) {
                     g_spaceUsed -= MaskCells(it.mask.rows);
                 }
                 break;
@@ -8602,12 +8902,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             return occ;
-        }
-
-        // does this view count toward the space figure? FinalizeRebuild's rule
-        bool ViewCountsSpace(const View& a_v)
-        {
-            return a_v.accept.empty() && a_v.bagKey != kTrashKey;
         }
 
         bool StashTileForCarry(const std::string& a_key)
@@ -9863,8 +10157,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // still lands in the growth rows and trips the overload, which is the
         // same treatment every other bypass (scripted AddItem, shop, console)
         // already gets.
+        //
+        // ★★(1.6) AND A KEY IS NEVER REFUSED. Keys go to their own board,
+        // which has no ceiling to hit -- so a gate that measures the hard
+        // board is answering a question about the wrong grid. This is the
+        // door that mattered: without it a player with a full pack could not
+        // pick up the key to the door in front of them, and the mod's own
+        // sorting would have put it somewhere it costs nothing to keep.
+        //
+        // Quest objects are exempt for the same reason and are exempted at
+        // the pickup hook instead (main.cpp), because quest-ness lives on the
+        // instance and this is only ever handed a base form.
         if (!a_obj || a_obj->IsGold() ||
-            a_obj->Is(RE::FormType::LeveledItem)) {
+            a_obj->Is(RE::FormType::LeveledItem) ||
+            a_obj->Is(RE::FormType::KeyMaster)) {
             return a_want;
         }
         auto* player = RE::PlayerCharacter::GetSingleton();
@@ -10040,7 +10346,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     bool WouldOverflow(RE::TESBoundObject* a_obj)
     {
-        if (!a_obj || a_obj->IsGold()) return false;
+        // ★(1.6) a key never overflows the main board -- it is not ON the main
+        // board. The container-take bounce reads this, and bouncing a key back
+        // into the chest it was just taken from is the same refusal
+        // MaxAcceptUnits already declines to make.
+        if (!a_obj || a_obj->IsGold() || a_obj->Is(RE::FormType::KeyMaster)) {
+            return false;
+        }
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) return false;
 
@@ -10200,6 +10512,48 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     bool IsOverloaded() { return g_overloaded; }
+
+    // ---- (1.6) the tab strip's three questions ---------------------------
+    Tab ActiveTab() { return static_cast<Tab>(g_activeTab.load()); }
+
+    void SetActiveTab(Tab a_tab)
+    {
+        const int t = static_cast<int>(a_tab);
+        if (t < 0 || t >= static_cast<int>(Tab::kCount)) return;
+        g_activeTab = t;
+    }
+
+    namespace
+    {
+        // The view behind a tab, or null before the first rebuild has built
+        // one. Both readers below want the same lookup and both must survive
+        // being asked on a frame where the board does not exist yet.
+        const View* ViewOfTab(int a_tab)
+        {
+            const std::string want = TabBagKey(a_tab);
+            for (const auto& v : g_views) {
+                if (v.bagKey == want) return &v;
+            }
+            return nullptr;
+        }
+    }
+
+    int TabTileCount(Tab a_tab)
+    {
+        const View* v = ViewOfTab(static_cast<int>(a_tab));
+        return v ? static_cast<int>(v->items.size()) : 0;
+    }
+
+    bool TabHasNew(Tab a_tab)
+    {
+        const View* v = ViewOfTab(static_cast<int>(a_tab));
+        if (!v) return false;
+        for (int idx : v->items) {
+            const Item* it = ItemAt(idx);
+            if (it && g_newTiles.contains(it->key)) return true;
+        }
+        return false;
+    }
 
     int SpaceUsed() { return g_spaceUsed; }
 
@@ -11821,6 +12175,96 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             a_s.swap(out);
         }
 
+        // ★★★`<Global=EditorID>` IS A LOOK-UP, and it is the one tag in a
+        // description that names something outside the record.
+        //
+        // Reported verbatim: an enchantment card read "...granting the Soul
+        // Burst power at 1000 soul energy. (<Global=SUM_SoulHarvester_Global>)".
+        // The author wrote that parenthesis as a live readout of the counter --
+        // the engine substitutes the global's VALUE there, and the sentence is
+        // meant to end "(340)". Printing the markup instead is the worst of
+        // both: the number the line exists to show is missing, and what stands
+        // in its place is plainly a bug to anyone reading it.
+        //
+        // Why it reaches us at all: an effect line is built from the MGEF's raw
+        // DNAM (see EffectText), which is the string BEFORE the engine's own
+        // substitution pass -- so every tag in it is ours to resolve. <mag>,
+        // <dur> and <area> already were; this is the fourth.
+        //
+        // ★TESGlobal is one of the few forms that KEEPS its editor ID at
+        // runtime (formEditorID, EDID), which is what makes the tag resolvable
+        // outside the CK at all. The map is built once: globals are static game
+        // data, so nothing can invalidate it inside a session.
+        //
+        // ★★An unknown name is DROPPED, not printed. That is the opposite of
+        // UnwrapNumericTags' rule below and deliberately so -- an unknown
+        // numeric tag is still a number the reader can use, whereas a global
+        // nobody can find has no value to show and leaving the markup up is
+        // the exact fault being fixed. The author's own parentheses stay, so
+        // the line still reads as a sentence.
+        [[nodiscard]] RE::TESGlobal* GlobalByEditorID(std::string_view a_name)
+        {
+            static const auto s_byName = [] {
+                std::unordered_map<std::string, RE::TESGlobal*> m;
+                if (auto* dh = RE::TESDataHandler::GetSingleton()) {
+                    for (auto* g : dh->GetFormArray<RE::TESGlobal>()) {
+                        const char* id = g ? g->GetFormEditorID() : nullptr;
+                        if (!id || !*id) continue;
+                        std::string k(id);
+                        std::transform(k.begin(), k.end(), k.begin(), [](unsigned char c) {
+                            return static_cast<char>(std::tolower(c));
+                        });
+                        m.emplace(std::move(k), g);   // first wins: a later
+                                                      // duplicate EDID is a
+                                                      // broken load order, not
+                                                      // an override
+                    }
+                }
+                return m;
+            }();
+            std::string k(a_name);
+            std::transform(k.begin(), k.end(), k.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            const auto it = s_byName.find(k);
+            return it != s_byName.end() ? it->second : nullptr;
+        }
+
+        void FillGlobalTags(std::string& a_s)
+        {
+            static constexpr std::string_view kOpen = "<global=";
+            // Same cheap look StripSurvivalBlocks takes: this runs per effect
+            // line, every frame a tooltip is up, and almost no record has one.
+            if (a_s.find('<') == std::string::npos) return;
+            std::size_t i = 0;
+            while (i + kOpen.size() <= a_s.size()) {
+                if (!std::equal(kOpen.begin(), kOpen.end(), a_s.begin() + i, IEq)) {
+                    ++i;
+                    continue;
+                }
+                const std::size_t close = a_s.find('>', i + kOpen.size());
+                if (close == std::string::npos) break;   // malformed: leave it visible
+                const std::size_t nameAt = i + kOpen.size();
+                const std::string_view name(a_s.data() + nameAt, close - nameAt);
+                std::string val;
+                if (auto* g = GlobalByEditorID(name)) {
+                    char b[32];
+                    // ★A short/long global is an integer and must not print
+                    // ".00"; a float that happens to sit on a whole number is
+                    // still shown whole, which is what the engine does.
+                    if (g->type.get() != RE::TESGlobal::Type::kFloat ||
+                        g->value == std::floor(g->value)) {
+                        std::snprintf(b, sizeof(b), "%.0f", g->value);
+                    } else {
+                        std::snprintf(b, sizeof(b), "%.2f", g->value);
+                    }
+                    val = b;
+                }
+                a_s.replace(i, close + 1 - i, val);
+                i += val.size();
+            }
+        }
+
         // ★★An all-digit tag is a NUMBER, not a placeholder. Bethesda's own
         // Survival strings write the amount inside the brackets -- the archive
         // holds <2> / <18> / <220> / <380>, exactly the four hunger tiers, in
@@ -11945,6 +12389,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // ★After the tags, so a <mag> INSIDE a kept block is already a
                 // number by the time the block is unwrapped.
                 StripSurvivalBlocks(a_out, a_survivalOn);
+                // ★...and the globals AFTER the strip, so a tag inside a block
+                // that was just dropped is never looked up at all.
+                FillGlobalTags(a_out);
                 UnwrapNumericTags(a_out);
                 TrimInPlace(a_out);
                 return !a_out.empty();   // resolved to nothing: vanilla shows none
@@ -11983,6 +12430,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (out.size() == 0 || !out.c_str() || !*out.c_str()) return false;
             a_out = out.c_str();
             StripSurvivalBlocks(a_out, a_survivalOn);
+            // ★The item's own DESC gets the same pass: GetDescription resolves
+            // the magnitude and nothing else, so a <Global=> written on a WEAP
+            // or ARMO description arrives here as markup exactly as an MGEF's
+            // does.
+            FillGlobalTags(a_out);
             UnwrapNumericTags(a_out);
             TrimInPlace(a_out);
             return !a_out.empty();
@@ -13218,7 +13670,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     {
         RotateHeldItem();   // GI62: A / D, before any grid reads the footprint
         if (g_views.empty()) return;
-        const float gridW = g_views[0].cols * CellPx();
+        // ★(1.6) which of the three boards the strip has selected. Resolved by
+        // KEY rather than by index: the tab views are built at 1 and 2 today,
+        // and a lookup that says so out loud cannot be broken by a future
+        // insertion the way a bare g_views[1] silently would be.
+        int vi = 0;
+        if (g_activeTab != 0) {
+            const std::string want = TabBagKey(g_activeTab);
+            for (std::size_t i = 0; i < g_views.size(); ++i) {
+                if (g_views[i].bagKey == want) { vi = static_cast<int>(i); break; }
+            }
+            // No view yet (the first frame after a reset, before any rebuild):
+            // fall back to the main board rather than drawing nothing.
+            if (vi == 0) g_activeTab = 0;
+        }
+        View& view = g_views[static_cast<std::size_t>(vi)];
+        const float gridW = view.cols * CellPx();
         // exact width; overflow rows (scripted adds) still wheel-scroll, the
         // bar itself is hidden so it never eats into the right margin.
         // Height is PINNED to the hard board: a fill-height child let the
@@ -13235,7 +13702,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the frame is free to sit wherever it looks right — it draws on its
         // own clip now (GI79) and no longer needs room inside the child.
         const float boardH = BaseRows() * CellPx();
-        ImGui::BeginChild("fablerim_grid", ImVec2(gridW, boardH), ImGuiChildFlags_None,
+        // ★A child ID PER BOARD, so each tab keeps its own scroll position.
+        // One shared id would have carried the main board's scroll onto a
+        // KEYS board with four rows on it -- ImGui remembers scroll by id, and
+        // the id is what "this scrolling region" means to it.
+        const char* childId = g_activeTab == 1   ? "fablerim_grid_quest" :
+                              g_activeTab == 2   ? "fablerim_grid_keys"  :
+                                                   "fablerim_grid";
+        ImGui::BeginChild(childId, ImVec2(gridW, boardH), ImGuiChildFlags_None,
             ImGuiWindowFlags_NoScrollbar);
         // ROOT CAUSE of the "items spill past the frame" saga: the grid's
         // draw commands were NOT clipped to this child (overflow rows — and,
@@ -13248,7 +13722,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const float m = 10.0f * Theme::Scale();
             cdl->PushClipRect(ImVec2(clipTop.x - m, clipTop.y - m),
                 ImVec2(clipTop.x + gridW + m, clipTop.y + boardH + m), true);
-            DrawGridView(g_views[0], 0);
+            DrawGridView(view, vi);
             cdl->PopClipRect();
 
             // Border ON TOP of the item sprites (they z-cover the pass-1
@@ -13815,8 +14289,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         const auto& sk = Theme::S();
         const float S = Theme::Scale();
+        int drawn = 0;   // windows opened so far, for the spawn cascade
         for (int vi = 1; vi < static_cast<int>(g_views.size()); ++vi) {
             auto& v = g_views[vi];
+            // ★(1.6) the QUEST and KEYS boards sit at 1 and 2 and are NOT
+            // windows -- they are drawn by Draw(), in the main grid area, one
+            // at a time. Skipped by key rather than by index so the loop does
+            // not have to know where they were inserted.
+            if (IsTabKey(v.bagKey)) continue;
             if (!v.open) continue;   // closed bag: holds items, draws no window
             // symmetric 12px margins around the bag grid (scale-aware) +
             // 2x frame inset for tornFrame skins (breathing room)
@@ -13832,10 +14312,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // ★Wrapped cascade: one straight diagonal walked the 18th bag
             // clean off the bottom of the display — the ApplyNext clamp keeps
             // it reachable now, but a fresh spawn should not need rescuing.
-            ImVec2 defPos(200.0f + vi * 60.0f, 200.0f);
+            // ★Counted, not indexed. The cascade wants "the Nth window this
+            // loop opened"; vi is a position in g_views, and the two tab
+            // boards sitting in front of the bags would have pushed the first
+            // one two steps down the diagonal for no reason on screen.
+            ++drawn;
+            ImVec2 defPos(200.0f + drawn * 60.0f, 200.0f);
             if (auto* mw = wm->Find("main")) {
-                const int step = (vi - 1) % 8;
-                const int band = (vi - 1) / 8;
+                const int step = (drawn - 1) % 8;
+                const int band = (drawn - 1) / 8;
                 defPos = ImVec2(mw->pos.x + mw->size.x + 8.0f + band * 48.0f,
                                 mw->pos.y + step * 60.0f);
             }
@@ -15044,7 +15529,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                          (v.bagKey == kTrashKey || !v.accept.empty() ||
                           NestsWithin(a_held.key, v.bagKey))) &&
                        !(!v.accept.empty() && a_held.obj &&
-                         BagFilter::FilterOf(a_held.obj) != v.accept)) {
+                         BagFilter::FilterOf(a_held.obj) != v.accept) &&
+                       // ★(1.6) the tab boards' rule, stated at the second
+                       // door too -- the ghost refuses the empty cell, and
+                       // without this a swap would still walk a key onto the
+                       // main board by trading places with what is there.
+                       // Same "only when a tab is involved" shape as the
+                       // ghost's; see the note there.
+                       !(a_held.obj && WrongTabDrop(a_held, v.bagKey))) {
                 const Item disp = g_items[g_target.blockers.front()];
                 const RE::FormID hfid = a_held.obj->GetFormID();
                 const RE::FormID dfid = disp.obj->GetFormID();

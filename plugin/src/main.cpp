@@ -159,6 +159,7 @@ namespace
     //     those. A bit that was already off at open is somebody else's to
     //     restore, and one they turn off during our session stays off.
     std::uint32_t g_savedEnabled = 0;
+    std::uint32_t g_savedStored  = 0;   // the engine's stash AS FOUND at open
     std::uint32_t g_maskedBits   = 0;   // bits this mask actually took down
     bool          g_gameplayOff  = false;
     bool          g_maskHealing  = false;   // a heal is in flight (log it once)
@@ -242,8 +243,11 @@ namespace
 
         if (!a_enable) {
             if (g_gameplayOff) return;   // already ours; do not re-save over it
-            std::uint32_t stored = 0;   // the engine's own stash; not ours to hold
-            cm->GetControlsState(g_savedEnabled, stored);
+            // ★The stash is not ours to hold, but it IS ours to remember: the
+            // repair at the far end has to be able to tell a photograph taken
+            // DURING our session from one that was already there (or from no
+            // photograph at all). See the restore branch.
+            cm->GetControlsState(g_savedEnabled, g_savedStored);
             g_maskedBits  = 0;
             g_maskHealing = false;
             ApplyGameplayMask(cm);
@@ -265,6 +269,66 @@ namespace
             // because we never asked it to store one.
             if (g_maskedBits) {
                 cm->ToggleControls(static_cast<UEFlag>(g_maskedBits), true, false);
+                // ★★★AND THE ENGINE'S OWN STASH WITH IT.
+                //
+                // enabledControls is not the only copy of that word. The engine
+                // keeps a second one -- storedControls -- and anything that
+                // calls StoreControls() takes a photograph of the live word and
+                // LoadStoredControls() prints it back over the top. A
+                // photograph taken while WE were masking is a photograph of a
+                // world that never existed: our bits are down in it, and
+                // whoever develops it later hands the player a disable that
+                // nobody owns and nothing will ever lift.
+                //
+                // We know exactly which bits were ours, so we can repair the
+                // photograph instead of the player: put them back in the stash
+                // at the same moment we put them back in the live word. A bit
+                // we never touched is left exactly as found -- this is the same
+                // "give back only what we took" rule the line above follows,
+                // applied to the other copy.
+                //
+                // ★It is done HERE rather than per-frame on purpose: a snapshot
+                // can be taken at any point in a session, including the frame
+                // the session ends on (a conversation opens, we hop out, and
+                // both happen inside the same event). The restore is the one
+                // moment guaranteed to be after every snapshot the session
+                // could have poisoned.
+                //
+                // ★★★AND YOU CANNOT REPAIR A PHOTOGRAPH NOBODY TOOK. The first
+                // version of this asked only "are our bits down in the stash",
+                // which is true of a stash that does not exist -- and the
+                // engine spells "nothing stored" as kInvalid (1 << 31), a
+                // SENTINEL, not a control word. OR-ing our bits into it made
+                // 0x80000727: no longer the sentinel, so StoreControls() then
+                // believed a stash was already outstanding and declined to take
+                // the real one, and LoadStoredControls() finally printed that
+                // fabricated word over enabledControls. Measured end to end --
+                // a plain inventory close repaired 0x80000000 to 0x80000727,
+                // the conversation two minutes later stored nothing because of
+                // it, and its exit left the player on 0x80000727: menus,
+                // fighting, sneaking, wheel-zoom and VATS all off at once. A
+                // repair that invents its own subject is worse than no repair,
+                // and this one was.
+                //
+                // So the question is asked properly: did the stash CHANGE while
+                // we held the mask? Only then was a photograph taken through
+                // it, and only then is there anything of ours to put back. An
+                // untouched stash -- sentinel or a stranger's, taken before we
+                // ever opened -- is left exactly as found, which is the same
+                // rule the live word above already follows.
+                constexpr auto kNoStash = static_cast<std::uint32_t>(UEFlag::kInvalid);
+                std::uint32_t liveNow = 0, storedNow = 0;
+                cm->GetControlsState(liveNow, storedNow);
+                const bool photographed = storedNow != g_savedStored &&
+                                          storedNow != kNoStash;
+                if (photographed && (storedNow & g_maskedBits) != g_maskedBits) {
+                    logger::warn("[INPUT] the engine's stored word was "
+                                 "photographed through our mask ({:#010x}, was "
+                                 "{:#010x} at open) -- repairing it to {:#010x}",
+                                 storedNow, g_savedStored,
+                                 storedNow | g_maskedBits);
+                    cm->SetControlsState(liveNow, storedNow | g_maskedBits);
+                }
             }
             g_gameplayOff = false;
             FUI::UIRoot::NoteGameplayMask(false);   // the buttons come back too
@@ -282,6 +346,32 @@ namespace
     void ReassertGameplayInput()
     {
         if (!g_gameplayOff) return;
+        // ★★★A MASK CANNOT OUTLIVE THE MENU IT WAS LAID DOWN FOR.
+        //
+        // Every restore this file has is hung off ONE event: our own hide,
+        // which arrives as kForceHide and runs UIRoot::OnClose. That is fine
+        // for every close the player asks for, and it is nothing at all for a
+        // menu the ENGINE takes down on its own -- and the engine does exactly
+        // that when something else claims the screen mid-session (reported:
+        // an NPC starts a conversation while the grid is up, and after the
+        // dialogue the player cannot move).
+        //
+        // The mask does not simply linger in that case, it HEALS ITSELF: the
+        // loop below re-takes any bit the world hands back, every frame,
+        // forever. So a missed restore is not a glitch that wears off -- it is
+        // a permanent soft lock, and the player's only clue is that opening
+        // and closing the inventory again fixes it.
+        //
+        // The session is a structural question with a cheap answer, so it is
+        // asked here rather than trusted to an event: no menu, no mask. Same
+        // shape and same reasoning as the suppression net's "a hold cannot
+        // outlive the session it was taken over" (UIRoot::Tick).
+        if (!FUI::UIRoot::IsSessionOpen()) {
+            logger::warn("[INPUT] the grid is gone but its mask was still held "
+                         "-- restoring (no close ever reached us)");
+            SetGameplayInput(true);
+            return;
+        }
         auto* cm = RE::ControlMap::GetSingleton();
         if (!cm) return;
         const std::uint32_t back = ApplyGameplayMask(cm);
@@ -290,6 +380,138 @@ namespace
                          "grid was open -- re-masked", back);
         }
         g_maskHealing = back != 0;
+    }
+
+    // ★★★THE WATCHDOG THAT NAMES THE THIEF.
+    //
+    // "After a conversation the player cannot move" SURVIVED the conversation
+    // hop, and the log says the hop did its half correctly: the grid closes on
+    // the dialogue's open event and every masked bit goes back in the same
+    // millisecond ("gave back 0x00000727"). So the freeze is laid down AFTER
+    // our restore, by somebody else -- and "somebody else" has four different
+    // doors, which are four different bugs with four different fixes. Guessing
+    // which one has now cost two rounds; this prints the answer instead.
+    //
+    //   * enabledControls -- the shared bitfield our own mask writes. If it
+    //     goes back down after our restore, the mask is being re-applied by a
+    //     third party (or by us).
+    //   * storedControls -- the engine's OWN stash, written by StoreControls()
+    //     and pushed back over enabledControls by LoadStoredControls(). This is
+    //     the prime suspect: anything that stashes the word at the START of a
+    //     conversation stashes it with OUR bits already down, and hands that
+    //     stale word back when the conversation ends. This file has already
+    //     been on the other side of exactly that bug -- see the lockpicking
+    //     note in SetGameplayInput.
+    //   * the input context stack -- a context left on it outlives the menu
+    //     that pushed it, and the top of that stack decides whether a key is
+    //     movement at all.
+    //   * the movement/look handlers and blockPlayerInput -- the door that is
+    //     not ControlMap: SetMoveInput's, and Papyrus's.
+    //   * ...and WHICH MENUS ARE OPEN, added after the shop report. A player
+    //     who cannot move because a menu nobody can see is still on the stack
+    //     is not a control-state bug at all, and no amount of reading the four
+    //     words above would ever have said so. The set is compared as a hash
+    //     and spelled out only on the line that prints, so an open or a close
+    //     anywhere in the game shows up in the same timeline as the bits.
+    //
+    // One compare per unpaused frame, and a line only when something actually
+    // changed. Each line carries whether OUR menu and the dialogue were up, so
+    // the timeline reads on its own.
+    //
+    // ★★★IT ANSWERED ITS QUESTION AND IS KEPT ANYWAY, behind "!movewatch" like
+    // every other diagnostic in this project. What it caught, twice, in one
+    // session: `stored` sat at 0x80000000 -- nothing stashed -- until the
+    // moment a conversation began, and then became 0xfffff8d8, bit for bit the
+    // live word WITH OUR MASK IN IT. That is a StoreControls() at dialogue
+    // start photographing the world through the mask, and a LoadStoredControls()
+    // at dialogue end printing it back. 0xfffff8d8 is the freeze's fingerprint:
+    // movement, looking, activate, POV, main-four, wheel-zoom and jumping all
+    // down at once, owned by nobody.
+    //
+    // It also ruled things OUT, which is half of why it is worth keeping:
+    // move=1 look=1 block=0 the whole way through, and the context stack
+    // returning cleanly to [0], is what says the handlers and the context stack
+    // were never involved. The next report of this shape deserves the same
+    // timeline rather than another round of theory -- and off by default, it
+    // costs an atomic load on a frame nobody is measuring.
+    struct MoveWatch
+    {
+        std::uint32_t enabled = 0;
+        std::uint32_t stored  = 0;
+        std::uint32_t ctx     = 0;   // packed context stack (4 bits each)
+        std::uint32_t ctxN    = 0;
+        std::uint32_t menus   = 0;   // order-independent hash of the open set
+        bool          move    = true;
+        bool          look    = true;
+        bool          block   = false;
+        bool          valid   = false;
+
+        bool operator==(const MoveWatch&) const = default;
+    };
+    MoveWatch g_moveWatch;
+
+    void MovementWatchTick()
+    {
+        if (!FUI::UIRoot::MovementWatch()) {
+            // ★Dropping the baseline on the way out, so re-arming mid-session
+            // opens with a "(first)" line instead of silently comparing against
+            // whatever the world looked like the last time it was on.
+            g_moveWatch.valid = false;
+            return;
+        }
+        auto* cm = RE::ControlMap::GetSingleton();
+        auto* pc = RE::PlayerControls::GetSingleton();
+        auto* ui = RE::UI::GetSingleton();
+        if (!cm || !pc || !ui) return;
+
+        MoveWatch now;
+        now.valid = true;
+        cm->GetControlsState(now.enabled, now.stored);
+        const auto& stack = cm->GetRuntimeData().contextPriorityStack;
+        now.ctxN = static_cast<std::uint32_t>(stack.size());
+        // ★Packed rather than formatted: the compare has to be free, and only
+        // the line that actually prints pays for spelling it out. Eight deep is
+        // more than the engine ever stacks.
+        for (std::uint32_t i = 0; i < now.ctxN && i < 8; ++i) {
+            now.ctx |= (static_cast<std::uint32_t>(stack[i]) & 0xF) << (i * 4);
+        }
+        now.move  = !pc->movementHandler || pc->movementHandler->inputEventHandlingEnabled;
+        now.look  = !pc->lookHandler || pc->lookHandler->inputEventHandlingEnabled;
+        now.block = pc->blockPlayerInput;
+        // ★XOR of per-name hashes: order-independent, so the map's own
+        // iteration order (a hash map -- it has no stable one) cannot make an
+        // unchanged set look changed and fill the log with noise.
+        for (const auto& [name, entry] : ui->menuMap) {
+            if (!ui->IsMenuOpen(name)) continue;
+            std::uint32_t h = 2166136261u;
+            for (const char* c = name.c_str(); c && *c; ++c) {
+                h = (h ^ static_cast<unsigned char>(*c)) * 16777619u;
+            }
+            now.menus ^= h;
+        }
+
+        if (g_moveWatch.valid && now == g_moveWatch) return;
+        const bool first = !g_moveWatch.valid;
+        g_moveWatch = now;
+
+        std::string ctx;
+        for (std::uint32_t i = 0; i < now.ctxN && i < 8; ++i) {
+            if (!ctx.empty()) ctx += '>';
+            ctx += std::to_string((now.ctx >> (i * 4)) & 0xF);
+        }
+        if (now.ctxN > 8) ctx += ">...";
+        std::string menus;
+        for (const auto& [name, entry] : ui->menuMap) {
+            if (!ui->IsMenuOpen(name)) continue;
+            if (!menus.empty()) menus += ", ";
+            menus += name.c_str();
+        }
+        logger::info("[MOVEWATCH]{} enabled={:#010x} stored={:#010x} ctx=[{}] "
+                     "move={} look={} block={} paused={} | open: {}",
+                     first ? " (first)" : "", now.enabled, now.stored, ctx,
+                     now.move ? 1 : 0, now.look ? 1 : 0, now.block ? 1 : 0,
+                     ui->GameIsPaused() ? 1 : 0,
+                     menus.empty() ? "(none)" : menus.c_str());
     }
 
     void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
@@ -315,6 +537,7 @@ namespace
             // a mask that is only written once is only true once. Costs a
             // GetControlsState and a branch on a frame where it holds.
             ReassertGameplayInput();
+            MovementWatchTick();       // ⑬ — who is holding the player still
             // apply capture defs + park the preview model BEFORE this frame
             // renders. While the menu is open (game paused) GridInventoryMenu::
             // AdvanceMovie drives Tick - this path covers unpaused frames.
@@ -347,6 +570,29 @@ namespace
     // world-pickup path. Scripted/quest AddItem is deliberately NOT blocked
     // (bouncing those would break quests); such items overflow into extra
     // grid rows instead.
+    // ★★(1.6) A WORLD REFERENCE THE QUEST BOARD WOULD CLAIM.
+    //
+    // Quest objects land on their own board now, and that board has no
+    // ceiling to hit -- so a capacity gate measuring the main grid is
+    // answering a question about somewhere the item is not going. Left in,
+    // the gate produced the worst refusal this mod can produce: a full pack
+    // and a quest item on the floor that the player has no way to make room
+    // for, because half of what is filling the board cannot be dropped
+    // either.
+    //
+    // The flag lives on the REFERENCE -- HasQuestObjectAlias is exactly what
+    // InventoryEntryData::IsQuestObject walks, and what the grid's own quest
+    // marker reads -- so the three pickup gates can ask before the item has
+    // ever been an inventory entry.
+    //
+    // ★Keys need no equivalent: KeyMaster is a form type, so
+    // Grid::MaxAcceptUnits answers for them from the base object and every
+    // gate inherits it at once.
+    bool RefIsQuestObject(RE::TESObjectREFR* a_ref)
+    {
+        return a_ref && a_ref->extraList.HasQuestObjectAlias();
+    }
+
     struct PickUpHook
     {
         static void thunk(RE::Actor* a_this, RE::TESObjectREFR* a_object, std::int32_t a_count,
@@ -359,7 +605,8 @@ namespace
                     return;
                 }
                 if (auto* base = a_object->GetBaseObject();
-                    base && !FUI::Grid::CanFitNewItem(base)) {
+                    base && !RefIsQuestObject(a_object) &&
+                    !FUI::Grid::CanFitNewItem(base)) {
                     // ⓖ PROBE. A refusal used to leave no trace at all, so a
                     // report of "gold would not pick up" could not be told
                     // apart from "the torch next to it would not". Gold is
@@ -408,7 +655,8 @@ namespace
                 // capacity gate for plain MISC items, at the SAME pre-TrueHUD
                 // level as CapacityActivateHook (the sack conversion above
                 // must run first: gold ignores grid space)
-                if (!FUI::Grid::CanFitNewItem(a_this)) {
+                if (!RefIsQuestObject(a_targetRef) &&
+                    !FUI::Grid::CanFitNewItem(a_this)) {
                     // ⓖ probe: the same question at the MISC door, which is the
                     // one gold actually walks through (Gold001 is a MISC record)
                     logger::info("[PICKUP] refused '{}' ({:08X}) gold={} coin={} "
@@ -623,6 +871,7 @@ namespace
                           RE::TESBoundObject* a_object, std::int32_t a_targetCount)
         {
             if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
+                !RefIsQuestObject(a_targetRef) &&
                 !FUI::Grid::CanFitNewItem(a_this)) {
                 // ⓖ probe: the last of the four gates to get a voice
                 logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
@@ -1960,6 +2209,58 @@ namespace
         return false;   // let everything else see the event too
     }
 
+    // ★★★A CONVERSATION IS NOT A GUEST EITHER, and it is the one hop the
+    // player does not choose.
+    //
+    // Reported: the grid is open, an NPC walks up and starts talking, and when
+    // the conversation ends the player cannot move. Under "!nopause" the world
+    // is live while the board is up, so a forcegreet can land in the middle of
+    // a session -- which is a state nothing in this file was written for.
+    //
+    // Two separate faults meet in that window and the hop answers both:
+    //
+    //   * the grid stays on the stack under a screen it cannot be reached
+    //     from, still masking movement every frame (ReassertGameplayInput);
+    //     and
+    //   * the mask is a whole-word ToggleControls on state EVERYBODY shares,
+    //     so any mod that snapshots enabledControls at the start of a
+    //     conversation and writes it back at the end -- which is what a
+    //     conversation camera does -- snapshots it with OUR bits already
+    //     down and restores that word over the top of our restore. Then
+    //     nobody owns the disable and nothing ever lifts it. (This file has
+    //     already been on the other side of exactly that bug: see the
+    //     lockpicking note in SetGameplayInput.)
+    //
+    // ★THE RESTORE IS DONE HERE, NOT LEFT TO THE CLOSE. UIRoot::Close() gets
+    // there eventually -- it posts kForceHide, which is processed later -- and
+    // "later" is on the far side of whoever else is handling this same event.
+    // Giving the controls back synchronously, in the handler, is the earliest
+    // moment we can possibly reach; SetGameplayInput is idempotent, so the
+    // close's own call is then a no-op.
+    //
+    // ★★kNormal ONLY. A shop is REACHED through a conversation: the engine
+    // closes the dialogue a frame before BarterMenu opens (see the speaker
+    // lookup in HandleBarterMenuIntercept) and puts it back when the trade
+    // ends, so a merchant session would be torn down by the very screen that
+    // opened it. A plain inventory is what the report is about and what has no
+    // conversation of its own to protect.
+    bool HandleDialogueHop(const RE::MenuOpenCloseEvent& a_event)
+    {
+        if (!a_event.opening) return false;
+        if (a_event.menuName != RE::DialogueMenu::MENU_NAME) return false;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return false;
+        if (FUI::LootBarter::CurrentMode() != FUI::LootBarter::Mode::kNormal) {
+            logger::info("[INV] dialogue opened over a loot/trade session -- "
+                         "left alone (the shop was opened from it)");
+            return false;
+        }
+        logger::info("[INV] dialogue opened -> closing the grid (conversation hop)");
+        SetGameplayInput(true);   // before anyone else reads enabledControls
+        FUI::UIRoot::Close();
+        return false;   // let everything else see the event too
+    }
+
     bool HandleOverlayAside(const RE::MenuOpenCloseEvent& a_event)
     {
         // "Tutorial Menu" is the whole kHelp* family -- barter, lockpicking,
@@ -2375,6 +2676,7 @@ namespace
                 // one handler per menu concern; true = event fully handled
                 HandleLockpickAutoReopen(*a_event);   // observation only
                 HandleMenuHopClose(*a_event) ||
+                HandleDialogueHop(*a_event) ||
                 HandleOverlayAside(*a_event) ||
                     HandleTextInputHotkeyBlock(*a_event) ||
                     HandleFavoritesMenuIntercept(*a_event) ||

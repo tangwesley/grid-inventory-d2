@@ -205,6 +205,9 @@ namespace FUI::UIRoot
         // from the input thread (InputLock), hence atomic — same reason as the
         // line above. Nothing here calls the engine.
         std::atomic<bool> g_gameplayMasked = false;
+        // ★"!movewatch" -- the input-state trace's arming switch (UIRoot.h).
+        // Read from the Update hook, written from the ini parse.
+        std::atomic<bool> g_movementWatch = false;
 
         // ---- INSPECT overlay (C key) ----
         // The rotation is euler, exactly like a def, so the whole capture path
@@ -1772,85 +1775,19 @@ namespace FUI::UIRoot
             }
         }
 
-        // GRID SIZE — the main board, in cells. Every bag has always been an
-        // arbitrary bw x bh; this is the main view finally saying its own.
+        // ⛔GRID SIZE (RowBoardSize) is gone from the settings window (1.6).
+        // The board is still a setting -- "!basegrid = cols, rows" in
+        // GridInventory_ui.ini, read, clamped and written back exactly as
+        // before -- it simply has no slider any more.
         //
-        // ★A HELD VALUE, like TEXT SIZE and for a sharper reason. Applying
-        // mid-drag would re-place the whole board and resize the window on
-        // every frame of the drag -- and the window resizing under the cursor
-        // is what made the SCALE row ghost (see RowCellScale). Worse here: the
-        // settings window is anchored to the main window's right edge, so the
-        // slider itself would walk away from the hand holding it.
-        //
-        // ★The two numbers share one pair of flags. Testing
-        // IsItemDeactivatedAfterEdit after the row would only ever see the
-        // second slider, so releasing COLUMNS would never commit.
-        void RowBoardSize(const SettingsCtx& a_c)
-        {
-            SettingLabel(a_c, Lang::Str::BoardSizeLabel);
-            // The label carries the warning: both sliders spend their own
-            // hover on the right-click hint, and the cost of shrinking the
-            // board (items fall into overflow = over-encumbered) is the one
-            // thing the row's name cannot say.
-            if (ImGui::IsItemHovered()) NoteHoverHint(Lang::T(Lang::Str::BoardSizeHint));
-            RightAlign(a_c.trackW);
-
-            static float s_cols = 0.0f, s_rows = 0.0f;
-            static bool  s_held = false;
-            if (!s_held) {
-                // ★The REQUEST, not BaseRows(): a board trimmed to fit a short
-                // screen must still show what the player asked for, or the row
-                // would ratchet their setting down every time they touched it.
-                s_cols = static_cast<float>(Grid::BaseCols());
-                s_rows = static_cast<float>(Grid::BaseRowsSetting());
-            }
-
-            const float half = (a_c.trackW - 6.0f * a_c.S) * 0.5f;
-            const auto axis = [&](const char* a_id, float* a_v, int a_lo, int a_hi,
-                                  int a_def, const char* a_fmt) {
-                if (SettingSlider(a_id, a_v, static_cast<float>(a_lo),
-                                  static_cast<float>(a_hi), half,
-                                  static_cast<float>(a_def), a_fmt, 1.0f)) {
-                    s_held = true;
-                }
-            };
-            // Axis named inside the value ("W 9"), the way CAPTURE LIGHT does
-            // it — two labelled rows for two numbers always read together
-            // would push the section past the panel height for nothing.
-            axis("##boardcols", &s_cols, Grid::kMinCols, Grid::kMaxCols,
-                 Grid::kDefCols, "W %.0f");
-            ImGui::SameLine(0.0f, 6.0f * a_c.S);
-            axis("##boardrows", &s_rows, Grid::kMinBoardRows, Grid::kMaxBoardRows,
-                 Grid::kDefRows, "H %.0f");
-
-            // ★★ROUNDED, NOT TRUNCATED, and it has to happen HERE rather than
-            // at the commit. The track is continuous (a_step only sizes the
-            // arrows), so a drag leaves 8.6 in the float -- which "%.0f" shows
-            // as 9 and a static_cast<int> would commit as 8. The player would
-            // release on a 9 and get an 8, with nothing on screen to explain
-            // it. Rounding the held value instead makes the number shown and
-            // the number committed the same number, and snaps the track to
-            // whole cells on the way, which is all this setting has.
-            s_cols = std::round(s_cols);
-            s_rows = std::round(s_rows);
-
-            // ★"Nothing is held" asked of ImGui, not of the slider: the
-            // right-click default never activates a slider at all and the step
-            // arrows are their own items. One condition, all four ways in.
-            if (s_held && !ImGui::IsAnyItemActive()) {
-                s_held = false;
-                if (Grid::SetBaseSize(static_cast<int>(s_cols),
-                                      static_cast<int>(s_rows))) {
-                    // The board changed shape: everything seated on it has to
-                    // be re-placed, and the capacity figure the pickup gate
-                    // reads has to be recomputed before the next question.
-                    Grid::MarkCapacityDirty();
-                    Grid::RequestRebuild();
-                    WinManager::GetSingleton()->Save();
-                }
-            }
-        }
-
+        // The row was always the most delicate one in the panel: it could not
+        // apply mid-drag (re-placing the whole board every frame, while the
+        // settings window is anchored to the main window's right edge, walked
+        // the slider out from under the hand holding it), so it carried a
+        // held-value dance that nothing else here needs. With three boards
+        // answering to those two numbers now -- the main board and the two tab
+        // boards -- that is three re-placements per frame of a drag, for a
+        // number a player sets once and then leaves alone.
         // SKIN — ★GI73: grouped by CHROME FAMILY, two colour variants each.
         //
         // Six flat colour chips could not say what any of them were: 3/4 are
@@ -2614,13 +2551,10 @@ namespace FUI::UIRoot
         // ★TEXT SIZE sits right under SCALE: both answer "this is too small",
         // and putting them together is what lets a player try one and then the
         // other without hunting.
-        // ★GRID SIZE follows the two scale rows. All three answer "the board
-        // is the wrong size", and they answer it differently — the first two
-        // change how big the cells are drawn, this one changes how many there
-        // are. A player who tries SCALE and finds it was capacity they wanted
-        // should find this on the next line, not in another section.
+        // ★No GRID SIZE row -- see the note where RowBoardSize used to be.
+        // The two scale rows still answer "the cells are the wrong size";
+        // "the board is the wrong size" is an ini line now.
         constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowFontScale,
-                                                   RowBoardSize,
                                                    RowLanguage,
                                                    RowWheelEnable,
                                                    RowPreset, RowPresetExport };
@@ -2683,7 +2617,6 @@ namespace FUI::UIRoot
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
                 lw(Lang::Str::ScaleLabel),
                 lw(Lang::Str::FontScaleLabel),
-                lw(Lang::Str::BoardSizeLabel),
                 lw(Lang::Str::SkinLabel),
                 lw(Lang::Str::LanguageLabel),
                 lw(Lang::Str::PresetLabel),
@@ -3775,6 +3708,105 @@ namespace FUI::UIRoot
             DrawPromptRow(s_shown, s_shownWarn, s_fade);
         }
 
+        // ★★(1.6) THE BOARD STRIP -- ITEMS · QUEST · KEYS, in the row the
+        // ITEMS label used to have to itself.
+        //
+        // It is a strip of LABELS, not buttons, and that is the point: the
+        // header above the grid has always been one word in the section-label
+        // voice, and three framed buttons there would read as a toolbar
+        // sitting on top of the board. The active tab is drawn exactly as the
+        // old ITEMS label was (skins that use "◇ LABEL" still do); the other
+        // two are the same word held back to inkDim, and brighten on hover.
+        // Nothing about the row's height changes, so the window's layout
+        // arithmetic -- which pays for this line out of gridBodyH -- is
+        // untouched.
+        //
+        // ★A COUNT, and only when there is something to count. "KEYS" alone
+        // cannot say whether the board behind it is empty, and the whole
+        // promise of these tabs is that the player stops having to think
+        // about what is on them; "KEYS 12" answers it from the main board.
+        // ★A NEW arrival lights the tab in the accent, the same signal the
+        // board's own NEW wash carries -- an item that lands on a board you
+        // are not looking at has to be able to say so from here.
+        //
+        // Returns the width it consumed, so the caching counter can follow it.
+        float DrawGridTabs()
+        {
+            const auto& sk = Theme::S();
+            const float S = Theme::Scale();
+            const float gap = 16.0f * S;
+            const ImVec2 base = ImGui::GetCursorScreenPos();
+            const float lineH = ImGui::GetTextLineHeight();
+
+            struct TabDef { Grid::Tab tab; Lang::Str name; const Lang::Str* hint; };
+            static constexpr Lang::Str kQuestHint = Lang::Str::QuestTabHint;
+            static constexpr Lang::Str kKeysHint  = Lang::Str::KeysTabHint;
+            const TabDef kTabs[] = {
+                { Grid::Tab::kMain,  Lang::Str::Items,    nullptr },
+                { Grid::Tab::kQuest, Lang::Str::QuestTab, &kQuestHint },
+                { Grid::Tab::kKeys,  Lang::Str::KeysTab,  &kKeysHint },
+            };
+
+            // ★The whole strip is hit-tested against MEASURED rects rather
+            // than drawn as ImGui items, and the reason is the drawing itself:
+            // SectionLabel is a text call that reserves its own space, so
+            // wrapping each tab in a button would either move the word (the
+            // button's padding) or leave the button somewhere the word is not.
+            // Measuring first also lets a tab know it is hovered BEFORE it
+            // picks its colour -- an item-based hover is a frame behind, and
+            // one frame of the wrong colour on a three-word strip is visible.
+            const bool winHov = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            const bool clickable = winHov && !Grid::IsHolding() && !MouseInOverlay();
+            float x = 0.0f;
+            for (const TabDef& t : kTabs) {
+                // The count rides the label so the two are one measurement --
+                // a number positioned separately would have to guess at a
+                // string the skin may render with a prefix.
+                char label[64];
+                const int n = t.tab == Grid::Tab::kMain ? 0 : Grid::TabTileCount(t.tab);
+                if (n > 0) std::snprintf(label, sizeof(label), "%s %d", Lang::T(t.name), n);
+                else       std::snprintf(label, sizeof(label), "%s", Lang::T(t.name));
+
+                const float w = SectionLabelWidth(label);
+                const ImVec2 p0(base.x + x, base.y);
+                // Half the gap on either side, so a click that lands between
+                // two tabs goes to the nearer one instead of nowhere.
+                const ImVec2 h0(p0.x - gap * 0.5f, p0.y);
+                const ImVec2 h1(p0.x + w + gap * 0.5f, p0.y + lineH);
+                const bool hovered = clickable && ImGui::IsMouseHoveringRect(h0, h1);
+                const bool active = Grid::ActiveTab() == t.tab;
+
+                if (hovered) {
+                    if (t.hint) NoteHoverHint(Lang::T(*t.hint));
+                    if (!active && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        Grid::SetActiveTab(t.tab);
+                        Sfx::SelectOn();
+                    }
+                }
+
+                ImGui::SetCursorScreenPos(p0);
+                if (active) {
+                    SectionLabel(label);   // the voice the ITEMS label always had
+                } else {
+                    // ★NEW on a board you are NOT looking at outranks "this is
+                    // not your tab": an arrival you cannot see is the one thing
+                    // this strip exists to tell you about.
+                    const ImVec4 col = Grid::TabHasNew(t.tab) ? sk.sel
+                                     : hovered                ? sk.ink
+                                                              : sk.inkDim;
+                    SectionLabel(label, &col);
+                }
+                x += w + gap;
+            }
+            // ★The cursor is left exactly where a single SectionLabel would
+            // have left it -- on the next line, with the strip's line recorded
+            // as the previous one. That is what makes the caching counter's
+            // SameLine and the FIND box's right-alignment work here unchanged:
+            // this row swapped one word for three and nothing else.
+            return x - gap;
+        }
+
         void DrawMainWindow()
         {
             const auto& io = ImGui::GetIO();
@@ -3928,7 +3960,7 @@ namespace FUI::UIRoot
             ImGui::BeginChild("fab_right", ImVec2(gridW, bodyH), ImGuiChildFlags_None,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
-                SectionLabel(Lang::T(Lang::Str::Items));
+                DrawGridTabs();   // (1.6) ITEMS · QUEST · KEYS
                 auto* cache = IconCache::GetSingleton();
                 if (cache->IsBusy()) {
                     ImGui::SameLine();
@@ -4028,6 +4060,19 @@ namespace FUI::UIRoot
         } else {
             OutlinedText(a_col ? ImGui::GetColorU32(*a_col) : Theme::Chrome(1.0f), a_text);
         }
+    }
+
+    float SectionLabelWidth(const char* a_text)
+    {
+        if (!a_text) return 0.0f;
+        // ★Measured the way SectionLabel DRAWS it, prefix included. The board
+        // strip hit-tests these rects before it knows which colour a tab is
+        // in, and a width that forgot the diamond would put every tab's hit
+        // area two characters left of the word on three of the skins.
+        if (Theme::S().diamondLabels) {
+            return ImGui::CalcTextSize(("\xE2\x97\x87 " + std::string(a_text)).c_str()).x;
+        }
+        return ImGui::CalcTextSize(a_text).x;
     }
 
     void NoteHoverHint(const char* a_text)
@@ -4688,6 +4733,12 @@ namespace FUI::UIRoot
         // are set when the debt is paid -- one frame later, over there.
         Grid::ForgetSlotCenter();
         LootBarter::ForgetSlotCenter();
+        // ★(1.6) the bag opens on the board you actually carry. Which tab you
+        // were last looking at is session state, not a preference: leaving it
+        // on KEYS means the next I opens onto a board that is empty most of
+        // the time, and the pointer's home cell (forgotten just above) would
+        // be sent there with it.
+        Grid::SetActiveTab(Grid::Tab::kMain);
         g_homeOwed.store(LootBarter::CurrentMode() != LootBarter::Mode::kNormal
                              ? HomeSide::kPartner
                              : HomeSide::kPlayer);
@@ -5480,6 +5531,9 @@ namespace FUI::UIRoot
 
     void NoteGameplayMask(bool a_held) { g_gameplayMasked = a_held; }
     bool IsGameplayMasked()            { return g_gameplayMasked; }
+
+    void SetMovementWatch(bool a_on) { g_movementWatch = a_on; }
+    bool MovementWatch()             { return g_movementWatch; }
 
     void AddScrollEvent(float a_x, float a_y)
     {

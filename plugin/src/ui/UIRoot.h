@@ -42,6 +42,8 @@ namespace FUI::UIRoot
     // colour, but it does not get to wear a different typeface from the label
     // beside it.
     void SectionLabel(const char* a_text, const ImVec4* a_col = nullptr);
+    // What SectionLabel would measure for this text, prefix and all.
+    [[nodiscard]] float SectionLabelWidth(const char* a_text);
 
     // One line of help for the BOTTOM prompt bar, good for this frame only.
     // Call it while a control is hovered; the bar shows it in place of its
@@ -211,6 +213,18 @@ namespace FUI::UIRoot
     // kBlockedMask in main.cpp for the whole argument.
     void               NoteGameplayMask(bool a_held);
     [[nodiscard]] bool IsGameplayMasked();
+
+    // ★"!movewatch" — main.cpp's [MOVEWATCH] input-state trace. OFF by default;
+    // it prints a line whenever anything that can hold the player still
+    // changes (enabledControls, the engine's stored word, the input context
+    // stack, the movement/look handlers, blockPlayerInput). Kept because it is
+    // what finally named the conversation freeze — a dialogue photographing
+    // enabledControls through our mask — and the next input-state report will
+    // want the same timeline. The state lives beside the mask's own flag above
+    // for the same reason: main.cpp has no header, and this is the mask's
+    // module as far as everyone else is concerned.
+    void               SetMovementWatch(bool a_on);
+    [[nodiscard]] bool MovementWatch();
 
     // ---- gamepad -----------------------------------------------------------
     // The engine hides its Cursor Menu (and stops advancing MenuCursor) when a

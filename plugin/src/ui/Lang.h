@@ -35,12 +35,14 @@ namespace FUI::Lang
         X(Settings, "SETTINGS")                                                                             \
         X(ScaleLabel, "SCALE")                                                                        \
         X(FontScaleLabel, "TEXT SIZE")   /* player's font multiplier over the automatic scale */      \
-        X(BoardSizeLabel, "GRID SIZE")   /* main board, in cells: columns x rows */                   \
-        X(BoardSizeHint, "How many cells the inventory holds. Items that no longer fit move to the overflow rows below the board, which counts as over-encumbered.") \
         X(SkinLabel, "SKIN")                                                                                \
         X(LanguageLabel, "LANGUAGE")                                                                        \
         X(Gold, "GOLD")                                                                                     \
         X(Items, "ITEMS")                                                                                   \
+        X(QuestTab, "QUEST")   /* the board that holds quest objects (1.6) */                               \
+        X(KeysTab, "KEYS")     /* the board that holds keys (1.6) */                                        \
+        X(QuestTabHint, "Quest items live here. They take no space off your pack and never slow you down.") \
+        X(KeysTabHint, "Keys live here. They take no space off your pack and never slow you down.")         \
         X(EquipTab, "EQUIP")                                                                                \
         X(CloseHint, "I / ESC to close")                                                                    \
         X(ResetDefault, "Reset to default")                                                                 \
