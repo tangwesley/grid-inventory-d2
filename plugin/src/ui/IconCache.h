@@ -452,6 +452,14 @@ namespace FUI
         // grid re-queues them every frame and the caching spinner never ends
         std::unordered_set<std::uint64_t>      m_failed;
         bool                                   m_failLoaded = false;
+        // ★Named a nif that is not installed. Deliberately NOT m_failed and
+        // deliberately NOT persisted: the archive probe is instant and the item
+        // heals itself the moment the mesh arrives, so re-deciding it next
+        // session costs nothing. But it has to be remembered for THIS one --
+        // the probe used to run in PreRender and leave no trace, so a visible
+        // tile re-queued itself every single frame and the queue never reached
+        // zero: a precache stuck at "1 left" with the spinner turning for ever.
+        std::unordered_set<std::uint64_t>      m_meshGone;
         // GI68: ran out of window while the engine was STILL LOADING. Not a
         // failure -- a candidate for a later, unhurried pass. Kept apart from
         // m_failed so a retry can target exactly these and nothing else.

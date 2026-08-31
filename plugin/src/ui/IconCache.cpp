@@ -662,6 +662,23 @@ namespace FUI
     {
         auto* sp = a_obj ? a_obj->As<RE::SpellItem>() : nullptr;
         if (!sp) return a_obj;
+        // ★★A SCROLL ANSWERS YES TO THAT CAST, AND MUST NOT BE SUBSTITUTED.
+        //
+        // RE::ScrollItem DERIVES FROM SpellItem (see its base list), so every
+        // scroll arrives here as a spell -- and the substitution below is
+        // exactly backwards for one. A spell has no body and borrows its MDOB;
+        // a scroll IS a physical object, carrying its own nif on
+        // TESModelTextureSwap, and its MDOB is the picture the MAGIC MENU puts
+        // in the spell list rather than the thing lying in the bag.
+        //
+        // In vanilla that MDOB is 'Clutter\Books\TestBook01HighPoly.nif' -- cut
+        // content that ships in no archive -- and EVERY scroll record shares
+        // it. So every scroll was keyed and photographed as a book that does
+        // not exist: MeshMissing skipped it, nothing recorded the skip, and the
+        // grid re-queued it on the very next frame. Measured: 13,626 identical
+        // 'mesh not found' lines in one session. What the player sees is a
+        // precache that ends at "1 left" and an inspect that spins for ever.
+        if (a_obj->Is(RE::FormType::Scroll)) return a_obj;
         const auto renderable = [](RE::TESBoundObject* a_o) -> RE::TESBoundObject* {
             if (!a_o) return nullptr;
             const auto* m = a_o->As<RE::TESModel>();
@@ -2191,6 +2208,7 @@ namespace FUI
         if (m_icons.contains(key) || m_queued.contains(key)) return;
         EnsureFailLoaded();
         if (m_failed.contains(key)) return;   // gave up on this one — stay out
+        if (m_meshGone.contains(key)) return; // its nif is not installed
         if (m_pendingBusy && m_pending.key == key) return;
 
         // Session-persistent icons: load from disk before spending any
@@ -2222,6 +2240,7 @@ namespace FUI
         if (m_icons.contains(key) || m_queued.contains(key)) return;
         EnsureFailLoaded();
         if (m_failed.contains(key)) return;
+        if (m_meshGone.contains(key)) return;
         if (m_pendingBusy && m_pending.key == key) return;
         // already on disk: NO texture upload here — a grid that actually
         // draws the item loads it lazily via the normal QueueCapture path
@@ -2415,9 +2434,18 @@ namespace FUI
                 // fail list on purpose: the probe is instant, so re-deciding
                 // every session costs nothing and the item heals itself the
                 // moment the missing mesh is installed.
+                //
+                // ★It still has to be REMEMBERED for this session (m_meshGone).
+                // "continue" alone decides nothing the queue can see: a tile on
+                // screen re-queues itself the next frame, lands here again, and
+                // the queue never reaches zero -- so the spinner turns for ever
+                // and a precache sits at "1 left". Recording it also makes the
+                // warning fire once per item instead of once per frame.
                 if (MeshMissing(p.obj)) {
-                    SKSE::log::warn("[ICONS] '{}' skipped: mesh not found ('{}')",
-                        p.obj->GetName(), ModelPathOf(p.obj));
+                    if (m_meshGone.insert(p.key).second) {
+                        SKSE::log::warn("[ICONS] '{}' skipped: mesh not found ('{}')",
+                            p.obj->GetName(), ModelPathOf(p.obj));
+                    }
                     continue;
                 }
                 if (!m_icons.contains(p.key)) {
