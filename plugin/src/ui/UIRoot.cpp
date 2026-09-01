@@ -2,8 +2,8 @@
 #include "ui/Editor.h"
 #include "ui/Equip.h"
 #include "game/Costume.h"
-#include "game/DeltaWatch.h"
 #include "game/DualRing.h"
+#include "game/DeltaWatch.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/GridMenu.h"
@@ -5265,6 +5265,19 @@ namespace FUI::UIRoot
     void SetVanillaKey(int a_scancode) { g_vanillaKey.store(a_scancode); }
     int  VanillaKey() { return g_vanillaKey.load(); }
 
+    // Test switch, not a setting: see UIRoot.h.
+    std::atomic<bool> g_npcVanilla{ false };
+    bool NpcVanilla() { return g_npcVanilla.load(); }
+    void SetNpcVanilla(bool a_on)
+    {
+        g_npcVanilla.store(a_on);
+        if (a_on) {
+            SKSE::log::warn("[UI] ★!npcvanilla -- a FOLLOWER's trade container "
+                            "will open the ENGINE's window, not ours. Every "
+                            "other screen is unchanged.");
+        }
+    }
+
     void Render()
     {
         if (!g_initialized.load()) return;
@@ -5619,8 +5632,9 @@ namespace FUI::UIRoot
         // the costume dresses whatever is worn. Coalesced -- a full set change
         // fires many equip events and DoReset3D rebuilds the whole actor.
         Costume::Tick();
-        // Second ring: notices when the ring has left the inventory behind our
-        // back (sold, dropped, taken by a script) and stands the carrier down.
+        // Second ring: keeps the "at most one worn ring holds kRing" invariant
+        // -- hands a bit back when its ring leaves, separates a pair a load put
+        // back into contest. Costs one bool test while nothing is out.
         DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)

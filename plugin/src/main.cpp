@@ -2,14 +2,13 @@
 #include "game/BagFilter.h"
 #include "game/Census.h"
 #include "game/Costume.h"
+#include "game/DualRing.h"
 #include "game/DeltaWatch.h"
 #include "game/Ledger.h"
 #include "game/WornLedger.h"
-#include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "game/Lotd.h"
 #include "ui/Editor.h"
-#include "ui/Equip.h"
 #include "ui/Fallback.h"
 #include "ui/GridMenu.h"   // NoPause -- the gameplay-input mask is that mode's
 #include "ui/Lang.h"
@@ -991,16 +990,12 @@ namespace
                 {
                     const RE::FormID deltaForm = a_event->baseObj;
                     SKSE::GetTaskInterface()->AddTask([deltaForm]() {
-                        // ★★BEFORE the board is told, not after. Arrows arriving
-                        // while their kind is worn are merged onto the back by
-                        // the engine past whatever stack size we keep, and the
-                        // surplus is then on the body and off the board -- take
-                        // a hundred and fifty out of a chest with fifty on, and
-                        // two hundred are equipped with nothing in the pack.
-                        // Putting the surplus back first means the delta below
-                        // sees the inventory the player is about to be shown,
-                        // instead of one that needs correcting a frame later.
-                        FUI::Equip::NormaliseWornAmmo(deltaForm);
+                        // ★A quiver correction used to run here first, taking
+                        // the over-cap surplus back off the player's back
+                        // before the board was told. The board draws the quiver
+                        // as a capful now rather than making it into one, so
+                        // there is nothing to correct and this is just the
+                        // delta again (Equip.h, where the note lives).
                         if (!FUI::Grid::OnFormDelta(deltaForm)) {
                             FUI::Grid::RequestRebuild();
                         }
@@ -2559,6 +2554,17 @@ namespace
                 return false;
             }
             const auto cmode = menu->GetContainerMode();
+            // ★TEST ONLY ("!npcvanilla"): give the FOLLOWER's trade container
+            // back to the engine and keep every other screen. Asked here, after
+            // the mode is known, because that is the only place the follower
+            // can be told apart from a chest. See UIRoot.h for the report this
+            // exists to narrow.
+            if (cmode == RE::ContainerMenu::ContainerMode::kNPCMode &&
+                FUI::UIRoot::NpcVanilla()) {
+                logger::warn("[LOOT] !npcvanilla -- follower trade left to the "
+                             "engine, not intercepted");
+                return false;
+            }
             FUI::LootBarter::Mode gmode;
             switch (cmode) {
             case RE::ContainerMenu::ContainerMode::kLoot:
@@ -3148,10 +3154,13 @@ namespace
             // Costume::NoteGameLoaded: the engine rebuilds the actor for a
             // while after this message, and every rebuild undoes it.
             FUI::Costume::NoteGameLoaded();
-            // ★The equip survived the save; the LOAN did not -- the engine
-            // re-read the carrier from the plugin. Re-lend before the player
-            // can notice a second ring that stopped working.
-            FUI::DualRing::OnLoad();
+            // ★1.6.0 migration: an old save can still be WEARING the retired
+            // second-ring carrier. Deferred like the rest -- it unequips, and
+            // this message arrives while the engine is still settling. See
+            // Costume::SweepRetiredCarrier for why leaving it is not an option.
+            SKSE::GetTaskInterface()->AddTask([]() {
+                FUI::Costume::SweepRetiredCarrier();
+            });
             // ⓛ probe: the museum index. Deferred like the rest -- the display
             // references have to exist before their state means anything.
             SKSE::GetTaskInterface()->AddTask([]() { FUI::Lotd::Rebuild(); });
@@ -3173,13 +3182,17 @@ namespace
     }
 
     // ---- SKSE cosave: one record loop, dispatched by type ----
+    // ★A retired type, kept only so the loop can recognise and DROP it. The
+    // second-ring carrier owned 'DRNG' until 1.6.0; nothing writes it now, and
+    // every save made before the update still carries one.
+    constexpr std::uint32_t kRetiredDualRingRecord = 'DRNG';
+
     void SaveCallback(SKSE::SerializationInterface* a_intfc)
     {
         FUI::Loadout::SaveGame(a_intfc);
         FUI::Grid::SaveGame(a_intfc);
         FUI::GoldCoins::SaveGame(a_intfc);
         FUI::Costume::SaveGame(a_intfc);
-        FUI::DualRing::SaveGame(a_intfc);
         FUI::LootBarter::SaveGame(a_intfc);   // F7: container spot memory (GCLY)
         FUI::Wheeler::SaveGame(a_intfc);      // quick-wheel slot order (GWHL)
     }
@@ -3196,8 +3209,19 @@ namespace
                 FUI::GoldCoins::LoadRecord(a_intfc, version);
             } else if (type == FUI::Costume::kRecordType) {
                 FUI::Costume::LoadRecord(a_intfc, version);
-            } else if (type == FUI::DualRing::kRecordType) {
-                FUI::DualRing::LoadRecord(a_intfc, version);
+            } else if (type == kRetiredDualRingRecord) {
+                // ★1.6.0: the second ring is still here, but its CARRIER is
+                // gone and this record described the carrier. It is READ AND
+                // DROPPED rather than left to the unknown-type branch below --
+                // which would warn on every load of every save made before the
+                // update, for a record that is not corruption and holds
+                // nothing anyone still wants. The carrier it names is taken
+                // off by Costume::SweepRetiredCarrier, which asks the
+                // inventory instead of trusting this; and the second ring
+                // itself needs no record at all now, because a load restores
+                // the slot bits and Tick re-derives the rest from the body.
+                logger::info("[COSAVE] retired 'DRNG' record dropped "
+                             "(second-ring carrier, replaced in 1.6.0)");
             } else if (type == FUI::Wheeler::kRecordType) {
                 FUI::Wheeler::LoadRecord(a_intfc, version);
             } else if (type == FUI::LootBarter::kContRecordType) {
@@ -3217,7 +3241,7 @@ namespace
     {
         FUI::Loadout::RevertGame(a_intfc);
         FUI::Costume::RevertGame(a_intfc);
-        FUI::DualRing::RevertGame(a_intfc);
+        FUI::DualRing::RevertGame();
         FUI::Wheeler::RevertGame(a_intfc);
         FUI::Grid::RevertGame(a_intfc);
         FUI::GoldCoins::RevertGame(a_intfc);

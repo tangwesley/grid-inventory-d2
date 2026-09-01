@@ -109,6 +109,11 @@ namespace FUI::Grid
     // for square footprints, where pressing them does nothing.
     [[nodiscard]] bool HeldCanRotate();
 
+    // ★Is the cursor over the player's own board or a bag window this frame?
+    // Asked by the container's take-all, which must not fire where R already
+    // means "drop one".
+    [[nodiscard]] bool PlayerBoardHovered();
+
     // GI63: what the tooltip is describing THIS FRAME, for the prompt bar.
     // ★Recorded by DrawItemTooltip, which every board shares (grid, doll,
     // partner), so the bar needs to know nothing about who is hovering what.
@@ -142,12 +147,6 @@ namespace FUI::Grid
     // held item isn't from a partner). The partner window hides it so its source
     // cell reads as empty while carried.
     [[nodiscard]] RE::TESBoundObject* HeldPartnerObject();
-
-    // ★B4-4: is a CARRIER carry up -- the displaced second ring riding the
-    // cursor? The quiet ring-swap handoff keys its "no redraw needed" on
-    // exactly this: the drop path starts that carry before Wear runs, the
-    // right-click router displaces with no carry at all.
-    [[nodiscard]] bool CarrierCarryActive();
 
     // GI17: the same question narrowed to ONE sub-stack. Partner windows must
     // use this -- with several cells per form, the form-level test hides them
@@ -185,12 +184,9 @@ namespace FUI::Grid
     // a_count: how many units ride the cursor. One for anything worn a copy at
     // a time — but a quiver is unequipped whole, so the carry has to be whole
     // too, or the rest of it lands in the pack the instant it comes off.
-    // a_fromCarrier: lifted from the SECOND ring slot -- never engine-worn,
-    // so the carry must not claim a worn list (see Held::fromCarrier).
-    void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
-                    std::uint16_t a_sig = 0, int a_hand = 0,
-                    bool a_swappedOut = false, int a_count = 1,
-                    bool a_fromCarrier = false);
+    void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                    std::uint16_t a_sig, int a_hand = 0,
+                    bool a_swappedOut = false, int a_count = 1);
 
     // Phase 5-B: carry a PARTNER (merchant/container) item on the cursor.
     // Dropping it onto the player grid takes (loot) or buys (barter).
@@ -273,6 +269,30 @@ namespace FUI::Grid
                           std::uint16_t a_sig, int a_hand = 0,
                           const std::string& a_srcKey = {}, int a_units = 1,
                           int a_xlIdx = -1);
+
+    // ★★★THE UNIT COMING BACK, NAMED WHILE WE CAN STILL SEE IT.
+    //
+    // NotePendingEquip's mirror. That one says "this unit is LEAVING the
+    // board"; this one says "this unit is ARRIVING on it, and here is what it
+    // is" -- recorded by the action that displaces it, before the engine has
+    // moved anything.
+    //
+    // ★Why it has to be recorded rather than derived: OnFormDelta is an
+    // ENGINE-EVENT applier. The event carries a FormID and nothing else
+    // ("uniqueID is always zero, so it never names the unit"), so the board
+    // re-walks the form and works out what is new -- which is the right answer
+    // for a script, another mod, or the engine's own slot-conflict removal,
+    // and the WRONG one when the player just told us exactly what they did.
+    // Measured 2026-09-01: right-clicking a plain dagger displaced the TEMPERED
+    // one, the re-walk named the returning unit `sig 0000`, and every dagger on
+    // the board went on to read "Iron Dagger" -- the tempered one included.
+    //
+    // ★★Consumed by the next partial add for this form, and only when that add
+    // has exactly ONE fresh tile: one note, one arrival, no guessing. Anything
+    // else drops the note and lets the re-walk stay the authority -- a wrong
+    // name is worse than an ugly one (the rule SoleUnitEntry already follows).
+    void NoteReturningUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                           std::uint16_t a_sig);
     // Right-click on a book or note: show it in the game's OWN Book Menu.
     // Queued here, opened on the Tick — the menu must not be raised from
     // inside the render pass. While it is up, UIRoot stands down completely
@@ -377,6 +397,15 @@ namespace FUI::Grid
     // ★W3: carry-weight bonus -> owned cells past the hard board. Settings
     // (!cwcells = perCell, baseline, maxCells; perCell 0 = off) + the live
     // bonus for the panel.
+    // ★★AND AN ON/OFF OF ITS OWN ("!cwrows"), separate from the three numbers.
+    // Turning the feature off used to mean setting perCell to 0, which is a
+    // disable spelled as a tuning value: it is not obvious from reading the
+    // line, and it destroys the player's baseline and cap on the way past --
+    // they have to be typed again to turn it back on. The switch and the
+    // numbers are different questions, so they get different keys. OFF wins
+    // over any perCell.
+    void SetCwRows(bool a_on);
+    [[nodiscard]] bool CwRows();
     void SetCwCells(int a_perCell, int a_base, int a_maxCells);
     [[nodiscard]] int CwPerCell();
     [[nodiscard]] int CwBase();
@@ -501,13 +530,6 @@ namespace FUI::Grid
     // The layout half is ForgetTile's, called by rule 13 at the same site.
     void DropTileDisplay(const std::string& a_key, RE::TESBoundObject* a_obj);
 
-    // ★B4-4: a carrier-route equip LANDS at DualRing::Wear -- no engine equip
-    // event will ever come for the ring itself, so nothing else can retire
-    // its equip-queue entry. Left in the books, the entries a swap spam piles
-    // up each kept excluding one unit of the form until the TTL swept them,
-    // and an innocent same-form spare in the pack blinked (user report).
-    // Retires the oldest arriving entry of the form.
-    void ReleasePendingEquipFor(RE::FormID a_form);
     // B2: expire the partner-drop placement hint (qty slider cancelled/closed)
     void ClearDropHint();
 
@@ -995,6 +1017,13 @@ namespace FUI::Grid
     // occupy no board space; deletion is confirmed when the window (or the
     // whole menu) closes, oldest-first when the board needs room (FIFO).
     [[nodiscard]] bool IsTrashOpen();
+
+    // ★Is one of the player's own surfaces currently ASKING something -- the
+    // trash confirm, the pouch withdraw, the recharge picker? Asked by the
+    // container's take-all, which must not fire past a question. This is the
+    // companion to PlayerBoardHovered: boards answer by hover, questions
+    // answer by being open at all.
+    [[nodiscard]] bool PlayerPopupOpen();
     void ToggleTrash();          // the trash-can button
     bool CloseTrash();           // I/ESC layering: confirm-all + close if open
     // ---- find by name -------------------------------------------------------

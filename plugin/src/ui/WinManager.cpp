@@ -11,7 +11,6 @@
 #include "game/Census.h"
 #include "game/BagFilter.h"
 #include "game/DeltaWatch.h"
-#include "game/DualRing.h"
 #include "game/Ledger.h"
 
 #include <imgui_internal.h>   // ImTextCharFromUtf8 (the tracked-title walk)
@@ -470,12 +469,11 @@ namespace FUI
                     rest == "1" || rest == "true");
                 continue;
             }
-            // Carrier biped slot pin (editor 44..60) -- see DualRing.h. A
-            // modlist fact, so it is the player's line to write.
-            if (key == "!ring2slot") {
-                try { DualRing::SetSlotOverride(std::stoi(rest)); } catch (...) {}
-                continue;
-            }
+            // ★"!ring2slot" was the second-ring carrier's biped-slot pin,
+            // retired with the carrier in 1.6.0. No handler is needed to drop
+            // it: an unrecognised "!" key falls through to the window-geometry
+            // parse below, which fails on a bare number and skips the line --
+            // and the next settings write leaves it out for good.
             // Scancode that hands a screen to the engine and back -- a
             // diagnostic, so it ships unassigned. 87 = 0x57 = F11. See
             // UIRoot::SetVanillaKey.
@@ -487,6 +485,11 @@ namespace FUI
             // lives here rather than in the cosave.
             if (key == "!accdrawer") {
                 Equip::SetDrawerOpen(rest == "1" || rest == "true");
+                continue;
+            }
+            // Test switch, not a setting: see UIRoot::SetNpcVanilla.
+            if (key == "!npcvanilla") {
+                UIRoot::SetNpcVanilla(rest == "1" || rest == "true");
                 continue;
             }
             // Test switch, not a setting: see Grid::SetRebuildDrop.
@@ -517,6 +520,13 @@ namespace FUI
                     try { v[n] = std::stoi(tok); } catch (...) {}
                 }
                 Grid::SetBaseSize(v[0], v[1]);
+                continue;
+            }
+            // ★W3: does carry weight add rows at all? The switch, separate
+            // from the three numbers below -- see Grid.h. Read before them or
+            // after them, it makes no difference: nothing here measures.
+            if (key == "!cwrows") {
+                Grid::SetCwRows(!(rest == "0" || rest == "false"));
                 continue;
             }
             // ★W3: carry-weight bonus -> extra cells. Three values: CW per
@@ -1029,14 +1039,12 @@ namespace FUI
         if (!Census::Enabled())    out << "!census = 0\n";
         if (!Ledger::Enabled())    out << "!ledger = 0\n";
         if (!IconCache::GetSingleton()->WarmEnabled()) out << "!warmicons = 0\n";
-        if (DualRing::SlotOverride() >= 0) {
-            out << "!ring2slot = " << DualRing::SlotOverride() << "\n";
-        }
         if (UIRoot::VanillaKey() != 0) {
             out << "!vanillakey = " << UIRoot::VanillaKey() << "\n";
         }
         if (Equip::DrawerOpen())   out << "!accdrawer = 1\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
+        if (UIRoot::NpcVanilla())  out << "!npcvanilla = 1\n";
         // The main board's size, in cells
         // 기본 인벤토리 격자 크기
         // ★★WRITTEN UNCONDITIONALLY, like !cwcells and unlike the test
@@ -1059,6 +1067,15 @@ namespace FUI
             << Grid::BaseRowsSetting() << "\n";   // the REQUEST — see Grid.h
         // Carry Weight bonus -> extra inventory cells
         // 소지 중량 보너스의 칸 환전
+        // ★The switch, written UNCONDITIONALLY next to the numbers it governs
+        // -- the same reasoning as !basegrid. Save() truncates and rewrites the
+        // whole file, so a key that is only ever read is a key the next
+        // settings change deletes; and this one is meant to be found by a
+        // player reading their ini, which the inverted test-switch pattern
+        // above (write only while OFF) would hide until it was already set.
+        out << "; !cwrows = 1 to let carry weight add rows, 0 to switch it off\n";
+        out << "; !cwrows = 소지 중량으로 칸을 늘릴지 여부 (1 = 켬, 0 = 끔)\n";
+        out << "!cwrows = " << (Grid::CwRows() ? 1 : 0) << "\n";
         out << "; !cwcells = CW per cell (0 = off), baseline (0 = auto: race base), max bonus cells\n";
         out << "; !cwcells = 칸당 CW (0 = 끔), 기준선 (0 = 자동: 종족 기본치), 보너스 칸 상한\n";
         out << "!cwcells = " << Grid::CwPerCell() << ", " << Grid::CwBase()

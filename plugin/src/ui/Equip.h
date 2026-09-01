@@ -22,7 +22,7 @@ namespace FUI::Equip
     // EquipCountFor); every other form is equipped one at a time whatever the
     // tile holds.
     bool EquipItem(RE::TESBoundObject* a_obj, const std::string& a_slotId,
-                   std::uint16_t a_uid = 0, int a_xlIdx = -1, std::uint16_t a_sig = 0,
+                   std::uint16_t a_uid, int a_xlIdx, std::uint16_t a_sig,
                    const std::string& a_srcKey = {}, int a_tileCount = 1);
 
     // ★★A quiver is not equipped one arrow at a time. Vanilla puts the whole
@@ -35,31 +35,20 @@ namespace FUI::Equip
     // Everything else stays at one: a tile of ten potions is ten drinks.
     [[nodiscard]] int EquipCountFor(RE::TESBoundObject* a_obj, int a_tileCount);
 
-    // ★★★HOW MANY MORE ARROWS THE QUIVER WILL TAKE. 0 means it will not merge
-    // -- either this is not ammo, or the back is already full and the next
-    // tile REPLACES what is up there.
+    // ★★★TWO AMMO RULES USED TO LIVE HERE AND BOTH ARE GONE (1.6.1).
     //
-    // ★It lives here, in one place, because TWO sides ask it and they must not
-    // answer differently. The equip itself asks so it knows how much to put on;
-    // the board asks so it knows whether anything was DISPLACED, and a swap
-    // hands the displaced unit back to the cursor. A merge displaces nothing,
-    // so a board that guessed "swap" left a phantom riding the cursor -- which
-    // is exactly what a second copy of this rule, drifting from the first,
-    // would put back.
-    [[nodiscard]] int AmmoMergeRoom(RE::TESBoundObject* a_obj);
-
-    // ★★★THE QUIVER HAS A CEILING AND THE ENGINE DOES NOT KNOW ABOUT IT.
+    //   AmmoMergeRoom      how much room is left on the back
+    //   NormaliseWornAmmo  take the over-cap surplus back off, every delta
     //
-    // Arrows arriving while their kind is worn are merged onto the back by the
-    // engine, whatever we think the stack size is -- take a hundred and fifty
-    // out of a chest with fifty on and two hundred end up equipped. Our tiles
-    // stop at StackCap, so the surplus is on the body and off the board.
+    // They existed to keep the engine's worn count at a number the board could
+    // draw. Nothing reads that number now: the doll shows min(total, cap) and
+    // the board shows the rest, so forty worn and two hundred and forty worn
+    // are the same picture. The first was deciding something invisible; the
+    // second was a tug of war the engine undid on every following delta.
     //
-    // This takes the surplus back off. Called on the game thread from the
-    // container sink, for every ammo delta touching the player: a chest
-    // withdrawal, a purchase, arrows off the ground, a script's AddItem.
-    // No-op when nothing of that kind is worn, or when it fits.
-    void NormaliseWornAmmo(RE::FormID a_form);
+    // What went with them: an unequip of the whole quiver on every "replace"
+    // click, and a 3D model reset on every arrow retrieved at the cap.
+    // Full story and measurements: PLAN_AMMO_TOTALS.md.
 
     // ★★USING is not WEARING, and only the first has a type gate that makes
     // sense. EquipItem's whitelist answers "will a doll slot take this?" —
@@ -79,8 +68,8 @@ namespace FUI::Equip
     // engine has marked worn, and that needs no vtable.
     [[nodiscard]] RE::TESAmmo* EquippedAmmo(RE::Actor* a_actor);
 
-    bool UseItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0, int a_xlIdx = -1,
-                 std::uint16_t a_sig = 0, const std::string& a_srcKey = {},
+    bool UseItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid, int a_xlIdx,
+                 std::uint16_t a_sig, const std::string& a_srcKey = {},
                  int a_tileCount = 1);
 
     // Take a worn item off. ★Same queue as everything else, so it is safe from
@@ -89,28 +78,15 @@ namespace FUI::Equip
     // need it as a call.
     // a_hand: 0 none, 1 right, 2 left. It matters when both hands wear
     // identical units; 0 lets the engine pick, which is right for armour.
-    bool UnequipItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
-                     std::uint16_t a_sig = 0, int a_hand = 0, int a_count = 1);
-
-    // ★ONE PATH / O-1b: does this ring belong on the SECOND slot?
-    //
-    // The question the slotless router has always answered inside
-    // ProcessPending, asked out loud so the click can aim with it. A
-    // right-click that aims lands in the same targeted branch a drag onto the
-    // ring slot does -- one road for both, and the targeted one is the better
-    // of the two anyway: it resolves the exact unit instead of handing the
-    // engine a null list. The router stays for callers with no board behind
-    // them (the wheel), which is why the decision lives here rather than at
-    // either call site.
-    [[nodiscard]] bool RingWantsSecondSlot(RE::TESBoundObject* a_obj);
+    bool UnequipItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                     std::uint16_t a_sig, int a_hand = 0, int a_count = 1);
 
     // ★Ring session: a cancelled carry returns to the slot it was lifted
     // from (origin rule). Queues through the same pending pipeline as every
-    // equip -- router, conflict pass, srcList resolve all apply. a_second
-    // aims the SECOND ring slot (the carrier route); a_hand==2 sends a
+    // equip -- conflict pass and srcList resolve both apply. a_hand==2 sends a
     // one-hander back to the left hand.
     void RequestWear(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
-                     std::uint16_t a_sig, int a_hand, int a_count, bool a_second);
+                     std::uint16_t a_sig, int a_hand, int a_count);
 
     // Does using this take the unit OFF the board — worn, drunk, eaten, learnt?
     // The board bookkeeping (vacate the cell, forget the tile, hint the drain)

@@ -15,7 +15,6 @@
 #include "game/Census.h"
 #include "game/Costume.h"
 #include "game/WornLedger.h"
-#include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/UIRoot.h"
@@ -252,13 +251,6 @@ namespace FUI::Grid
             // stack is attributed to the stolen pool rather than to the plain
             // one it does not belong to.
             std::string         srcPool;
-            // ★★Lifted from the SECOND RING slot: its unit was never
-            // engine-worn (a carrier wears the effect), so this carry has NO
-            // worn list to be backed by -- treating it as fromDoll-worn made
-            // the accounting consume the FIRST ring's list instead (same
-            // plain form) and that unit leaked onto the board. Appended LAST
-            // (§10-6).
-            bool                fromCarrier = false;
             // ★ONE PATH / O-0: a SYNTHETIC carry -- one the code made on the
             // player's behalf so a right-click can travel the same road a drag
             // does. It is born and consumed inside one call, so it must never
@@ -344,6 +336,10 @@ namespace FUI::Grid
         // partial row), and the crimson overload line becomes the stepped
         // ownership boundary. Derived from the live AV every CapacityTick --
         // nothing is saved. 0 per-cell = feature off.
+        // ★!cwrows: the feature's own switch, asked before any of the numbers
+        // below. ON by default -- this is how the mod has always behaved, and
+        // the line only appears in the ini once someone turns it off.
+        bool g_cwRows = true;
         int g_cwPerCell = 10;     // !cwcells: CW per cell
         // baseline -- only CW above this converts. 0 = AUTO: the player
         // RACE's own baseCarryWeight, so an overhaul that changes the base
@@ -351,6 +347,25 @@ namespace FUI::Grid
         int g_cwBase = 0;
         int g_cwMaxCells = 50;    // bonus cap
         int g_cwBonusCells = 0;   // current, recomputed by CapacityTick
+        // ★Is the guard currently refusing readings? Only so the refusal is
+        // said ONCE rather than every tick it lasts -- see CapacityTick.
+        bool g_cwRejecting = false;
+        // ★★HOW LONG IT HAS BEEN REFUSING. The guard exists for TRANSITION
+        // FRAMES -- one or two, while an ability lands -- and it answered a
+        // refusal by keeping the last good value, with nothing to end it. A
+        // refusal that outlives the transition is not a flicker any more; it
+        // is the state, and holding the old number through it is the freeze
+        // reported as "they disappear and stay gone". CapacityTick runs every
+        // frame from UIRoot::Tick, so this counts frames.
+        int  g_cwRejectTicks = 0;
+        // ★Decided: the refusal outlived any transition, so the reading is the
+        // state. Sticks until it comes back in range -- see CapacityTick.
+        bool g_cwAccepting = false;
+        constexpr int kCwRejectMax = 30;   // ~0.5s: far past any transition
+        // ★Cooldown on re-seating a boost whose effect went missing. A repair
+        // that does not take must not be retried every frame -- that is spell
+        // churn on the player, which is worse than the fault.
+        int  g_boostRepairWait = 0;
 
         bool g_pouchOpen = false;       // G2: coin-pouch withdraw window
         int  g_pouchSlider = 0;
@@ -1269,6 +1284,10 @@ namespace FUI::Grid
 
         DefResolver                                    g_resolver;
 
+        // Mouse over the player's own board or one of its bag windows this
+        // frame. Raised by DrawGridView, re-armed by Draw.
+        bool                                           g_playerBoardHovered = false;
+
         // ONE tile holds at most this many units (Phase 2: the former 8-site
         // `(baseCap>1 && stack>0) ? stack : baseCap` copies converge here):
         // gear/coins = 1, else the editor per-item override (stack:N) if any,
@@ -1796,10 +1815,35 @@ namespace FUI::Grid
             // the LEFTOVER went -- see the placement in ACQUIRE. 0 = whatever
             // arrives (a single item, a buy, an older caller).
             int count = 0;
+            // ★★★WHICH OF THE TWO THINGS THIS HINT MEANS. The coordinates read
+            // the same and the intent does not:
+            //
+            //   false  the player aimed at an EMPTY cell -> mint a tile there
+            //   true   the player aimed at an EXISTING TILE of the same pool
+            //          -> top THAT tile up; the anchor is the tile's, not the
+            //             cursor's (see the note at the merge branch)
+            //
+            // Only the first can be handed to the rebuild, whose hint block
+            // MINTS. Handing it the second put a new tile on an occupied
+            // square, so it landed somewhere else and the merge the player
+            // asked for never happened -- reported the moment the aimed-drop
+            // decline went in.
+            bool onTile = false;
             [[nodiscard]] bool Wants(const std::string& a_base,
                                      const std::string& a_pool) const
             {
                 return col >= 0 && baseKey == a_base && (pool.empty() || pool == a_pool);
+            }
+            // ★★THE FORM ALONE: "is an aimed drop of this thing in flight?"
+            //
+            // Wants() takes a pool because it answers a narrower question --
+            // may THIS pool take the hint -- and the fast path has to stand
+            // down BEFORE it knows what the pools are. Asking Wants(base, "")
+            // does not do it: the empty test above is about the HINT's pool,
+            // so a hint carrying one answers no to every argument.
+            [[nodiscard]] bool WantsForm(const std::string& a_base) const
+            {
+                return col >= 0 && baseKey == a_base;
             }
         };
         DropHint                                       g_dropHint;
@@ -2096,10 +2140,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // that leaves an identical worn list behind) and answered
                 // every other shape by assumption; the assumption was right,
                 // but only because the swap was the only shape that ever
-                // asked. A carrier lift stays out on its own flag -- it was
-                // never engine-worn and has no doffing entry to consult.
-                bool stillWorn = g_held->fromDoll && !g_held->fromCarrier &&
-                                 g_held->obj &&
+                // asked.
+                bool stillWorn = g_held->fromDoll && g_held->obj &&
                                  WornLedger::Doffing(g_held->obj->GetFormID());
                 // (!simdrift) both halves of the identity are corrupted, so
                 // every exact path misses and only the carry fallback can
@@ -2177,52 +2219,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     out.push_back(std::move(t));
                 }
             }
-            // ★THE SECOND RING. Its unit stands in the PACK while a carrier
-            // wears its effect, so no worn list ever names it -- the stackable
-            // branch subtracts it by hand (wornUnits += 1) but the GEAR walk
-            // had no idea, listed it, and a pair of enchanted rings drew three
-            // tiles for two units (user report: "복사된 걸로 보인다"). One
-            // off-board unit, form-level identity: the carrier records only
-            // the FORM, and the units it can stand in for are interchangeable
-            // to the effect rule anyway. mayBeWorn=false -- the body never
-            // wears this unit, so it must not consume a worn list.
-            // ★...but NOT while an equip of this form is still in flight: the
-            // pending-equip suppression already hides the unit on its way to
-            // the carrier, and both at once hid a SPARE as well -- the
-            // identical ring in the pack flickered for the rebuild or two
-            // until the suppression died (user report). The entry takes over
-            // when the suppression releases: a seamless handoff, one
-            // exclusion at every moment.
-            // ★...and not while the carrier's own unit RIDES THE CURSOR: a
-            // fromCarrier carry IS that unit, already excluded as "held".
-            // ★★That is ONLY the LIFT window, and the take-off flag is what
-            // names it. The old test was object identity -- but units of one
-            // form share one TESBoundObject, so "held == second" was also
-            // true for a DISPLACED former second ring while its same-form
-            // successor stood on the carrier, and this exclusion went dark:
-            // the successor, still in the pack, drew on the board as a third
-            // copy next to the cursor and the doll (user report). The
-            // drop-swap window this guard once also covered is the
-            // pending-equip guard's below -- the accepted drop always files
-            // an entry (NotePendingEquip), and that suppression spans the
-            // window until Wear has run.
-            if (auto* second = DualRing::Second();
-                second && FormKey(second) == a_base &&
-                !(g_held && g_held->fromCarrier && g_held->obj == second &&
-                  DualRing::TakeOffPending()) &&
-                std::none_of(g_pendingEquip.begin(), g_pendingEquip.end(),
-                             [&](const OffBoardUnit& u) { return u.base == a_base; })) {
-                OffBoardUnit r;
-                r.base = a_base;
-                r.sig  = DualRing::SecondSig();   // 0 for every vanilla ring
-                // ★The uid too. This exclusion is matched against the pool the
-                // unit really belongs to, and a uid unit is the sole member of
-                // its own ("@uid") -- naming it by signature alone pointed the
-                // exclusion at a pool this unit was never in.
-                r.uid  = DualRing::SecondUid();
-                r.why  = "ring2";
-                out.push_back(std::move(r));
-            }
+            // ★THE SECOND RING used to be excluded here, and no longer needs
+            // to be. Its unit stood in the PACK while a carrier wore its
+            // effect, so no worn list ever named it and the gear walk drew a
+            // tile for a ring already on the doll -- an exclusion keyed on the
+            // carrier's form, with a lift window and a pending-equip handoff
+            // to keep it from hiding an innocent same-form spare as well.
+            // Since 1.6.0 a second ring is an outside mod's, worn on the BODY,
+            // and a body-worn unit carries a worn list like any other: the
+            // ordinary gear walk subtracts it with no special case at all.
             return out;
         }
 
@@ -3761,7 +3766,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 GoldCoins::IsPouch(fid) ? GoldCoins::PouchStoredOf(it.key)
                                                         : it.coinValue,
                                 price, false, nullptr, ExtraScope::kUnit,
-                                it.uid, it.xlIdx, 0, 0,
+                                // ★★★it.sig, NOT 0 -- the same correction the
+                                // partner side already carries, on the road it
+                                // was never applied to. With 0 here the
+                                // tooltip's pool fallback is switched off
+                                // (`if (!scoped && a_sig != 0)`) and the unit
+                                // is resolved by LIST POSITION alone.
+                                //
+                                // A position is a hint and not a promise, and
+                                // this file says so itself: a PLAIN unit's
+                                // recorded index is a leftover from when it
+                                // had a list at all -- a worn unit carries one
+                                // holding only ExtraWorn -- and the instant
+                                // that list goes away every later index slides
+                                // down (see EnumerateUnitRefs, same lesson).
+                                // So after one equip/unequip of a plain dagger
+                                // its index named the TEMPERED dagger's list,
+                                // and the name came back "Fine Iron Dagger"
+                                // for every plain copy while the rest of the
+                                // tooltip, which knows the pool, went on
+                                // showing the right numbers (user report:
+                                // "stats differed but every name was the
+                                // tempered one" -- GI61's symptom exactly,
+                                // through a door GI61 did not close).
+                                it.uid, it.xlIdx, it.sig, 0,
                                 TileContext{ it.key, it.def.bag != 0,
                                              it.inBag == kTrashKey, false, false,
                                              it.stolen, it.quest });
@@ -4337,6 +4365,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         void DrawGridView(View& a_view, int a_viewIdx)
         {
+            // ★★IS THE CURSOR OVER SOMETHING OF THE PLAYER'S? Both callers are
+            // player-side (the board and the bag windows), so noting it here
+            // covers every window where R already means something else --
+            // "drop one" on a hovered tile. The container's take-all asks this
+            // to know when it must stand down, instead of demanding to be
+            // hovered itself.
+            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows)) {
+                g_playerBoardHovered = true;
+            }
             const float gridW = a_view.cols * CellPx();
             const float gridH = a_view.rows * CellPx();
             const ImVec2 base = ImGui::GetCursorScreenPos();
@@ -4407,6 +4444,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     {
         return g_held.has_value();
     }
+
+    bool PlayerBoardHovered() { return g_playerBoardHovered; }
 
     bool HeldCanRotate()
     {
@@ -4492,24 +4531,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         bool ReturnCarryToOrigin(const Held& a_h)
         {
             if (!a_h.obj || a_h.swappedOut) return false;
-            if (a_h.fromCarrier) {
-                auto* armo = a_h.obj->As<RE::TESObjectARMO>();
-                if (!armo || DualRing::Second()) return false;
-                // the lift queued a carrier stand-down; it must not fire after
-                // the re-wear and strip the ring we just put back
-                DualRing::CancelTakeOff();
-                NotePendingEquip(a_h.obj, a_h.uid, a_h.sig, 0, a_h.key, 1,
-                                 a_h.xlIdx);
-                Equip::RequestWear(a_h.obj, a_h.uid, a_h.sig, 0, a_h.count,
-                                   /*a_second=*/true);
-                return true;
-            }
             if (a_h.fromDoll) {
                 NotePendingEquip(a_h.obj, a_h.uid, a_h.sig, a_h.hand, a_h.key,
                                  Equip::EquipCountFor(a_h.obj, a_h.count),
                                  a_h.xlIdx);
                 Equip::RequestWear(a_h.obj, a_h.uid, a_h.sig, a_h.hand,
-                                   a_h.count, /*a_second=*/false);
+                                   a_h.count);
                 return true;
             }
             return false;
@@ -4540,8 +4567,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig,
-                    int a_hand, bool a_swappedOut, int a_count,
-                    bool a_fromCarrier)
+                    int a_hand, bool a_swappedOut, int a_count)
     {
         if (!a_obj || g_held) return;
         const GridDef def = g_resolver ? g_resolver(a_obj) : GridDef{};
@@ -4631,32 +4657,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         g_held->swappedOut = a_swappedOut;
         // (B4-4: swapSameForm retired -- the doffing clock replaced its one
         // reader, the pendingEquip same-form-swap scan)
-        g_held->fromCarrier = a_fromCarrier;
         // B4-2c: a doll lift IS an unequip request -- tell the worn ledger at
         // the same moment the carry begins, so Doffing() can answer the
         // "still on the body?" question from the request/event lifecycle
-        // instead of scanning the equip queue. A carrier lift was never
-        // engine-worn; there is nothing to doff.
-        if (!a_fromCarrier) {
-            WornLedger::NoteDoffing(a_obj->GetFormID(), a_hand);
-        }
+        // instead of scanning the equip queue.
+        WornLedger::NoteDoffing(a_obj->GetFormID(), a_hand);
         if (g_poolTrace) {
             SKSE::log::info("[ACT] lift-from-doll '{}' hand={} uid {:04X} sig {:04X} key '{}'",
                 a_obj->GetName(), a_hand, a_uid, a_sig, g_held->key);
         }
         if (g_sound) g_sound(a_obj, true);
-        // ★B4-4: a CARRIER lift changes nothing the board draws -- the unit
-        // was never on it (carrier-worn, ring2-excluded) and its exclusion
-        // hands off to `held` without a gap. The redraw here was one of the
-        // frames painted mid-handoff in the ring swap window (the deferred
-        // blink's habitat). An engine-worn lift keeps its redraw: the
-        // parked-star bookkeeping (GI30/31) still draws through it.
-        // ★Ring session: a SWAP-DISPLACED lift changes nothing either -- the
-        // occupant was worn (no tile) and goes straight to the cursor, and
-        // this redraw fired in the middle of every drop-swap ([RB] measured
-        // it as half the 11/s storm). Only the plain doll lift keeps its
-        // redraw, and no engine churn races that one.
-        if (!a_fromCarrier && !a_swappedOut) RequestRebuild();
+        // ★Ring session: a SWAP-DISPLACED lift changes nothing the board draws
+        // -- the occupant was worn (no tile) and goes straight to the cursor,
+        // and this redraw fired in the middle of every drop-swap ([RB]
+        // measured it as half the 11/s storm). Only the plain doll lift keeps
+        // its redraw, and no engine churn races that one: the parked-star
+        // bookkeeping (GI30/31) still draws through it.
+        if (!a_swappedOut) RequestRebuild();
     }
 
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
@@ -6217,12 +6234,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     }
                 }
                 if (worn && wornUnits <= 0) wornUnits = 1;   // worn but unlisted
-                // ★★The SECOND ring is worn without the engine knowing it: a
-                // carrier wears its enchantment while the ring itself stays in
-                // the pack, so it carries no ExtraWorn for the count above to
-                // find. Counted by hand, or the player sees the very same ring
-                // on the doll AND on the board at once.
-                if (DualRing::Second() == obj) wornUnits += 1;
+                // (The second ring used to be added here by hand: a carrier
+                // wore its enchantment while the ring stayed in the pack, so it
+                // carried no ExtraWorn for the count above to find. Since 1.6.0
+                // an outside mod's second ring is on the BODY and brings its
+                // own worn list, which the walk above already counts.)
                 // ★★★P2/3-1, AND THIS IS THE LINE THAT DECIDES IT. A worn unit
                 // leaves the board by being SUBTRACTED here -- not by the
                 // per-unit skip further down, which is what the first attempt
@@ -6236,6 +6252,31 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // keeps its cells, its subgrid and its right-click, and the
                 // tray marker says it is also on the doll.
                 if (gdef.bag != 0) wornUnits = 0;
+                // ★★★A QUIVER IS A CAPFUL, AND THIS IS THE LINE THAT SHARES THE
+                // STOCK OUT. The doll draws min(total, cap) whatever the engine
+                // happens to be wearing (Equip.cpp, CollectEquipment), so the
+                // board's share is the REST OF THE STOCK -- not "everything not
+                // worn", which is a different number the moment those two
+                // disagree.
+                //
+                // ★Reported: 240 arrows shown as 100 + 100 + 40, equip the 40,
+                // and the board still drew 100 + 100 beside a quiver of 100.
+                // Three hundred arrows out of two hundred and forty, because
+                // the doll had been capped and this had not.
+                //
+                // ★★Both directions fall out of the one min(). Worn ABOVE the
+                // cap (the engine wearing the whole stock) and worn BELOW it (a
+                // shot taken while spares sit in the pack) both resolve to the
+                // same quiver of a capful -- which is what makes a shot come
+                // out of the PACK: total drops, min(total, cap) does not, so
+                // the board gives the arrow up.
+                //
+                // ★Only when a quiver is actually on. Nothing worn is not a
+                // quiver of zero, it is no quiver at all, and the whole stock
+                // belongs to the board.
+                if (wornUnits > 0 && obj->Is(RE::FormType::Ammo)) {
+                    wornUnits = (std::min)(count, (std::max)(1, cap));
+                }
                 int units = count - wornUnits -
                             Loadout::ReservedCount(obj->GetFormID());
                 // Phase 7: units sold/stored whose engine removal is still queued
@@ -8185,6 +8226,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // exactly yesterday's, the fast path only covers what it can prove. Every
     // decline logs its reason, so the coverage is measured, not assumed
     // (the same bargain !rbdrop struck).
+
+    // ★The board's half of "our own actions carry their identity". One note
+    // per form: a second displacement before the first is applied replaces it,
+    // which is correct -- the later action is the one still in flight.
+    namespace
+    {
+        struct ReturningUnit { std::uint16_t uid = 0; std::uint16_t sig = 0; };
+        std::map<RE::FormID, ReturningUnit> g_returning;
+    }
     bool OnFormDelta(std::uint32_t a_form)
     {
         const auto decline = [&](const char* a_why) {
@@ -8244,17 +8294,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return decline("coin mirror");
         }
         // ★B4-4: a form the board NEVER SHOWS is a full answer, not a
-        // decline. The ring carrier, the costume anchors and non-playable
-        // scripting copies move containers and fire equip events like
-        // anything else -- and every one of those used to fall through to
-        // "decline -> full rebuild": three rebuilds per ring swap for a form
-        // with no tile anywhere (log-measured; that window is the deferred
-        // ring blink's habitat). SkipInventoryEntry is the board's own door
-        // policy, so the same rules decide here.
+        // decline. The costume anchors and non-playable scripting copies move
+        // containers and fire equip events like anything else -- and every one
+        // of those used to fall through to "decline -> full rebuild": three
+        // rebuilds per ring swap for a form with no tile anywhere
+        // (log-measured). SkipInventoryEntry is the board's own door policy,
+        // so the same rules decide here.
+        // ★The retired ring carrier needs no clause of its own: it is costume
+        // anchor 32, and IsAnchor answers for all thirty-two.
         {
             const char* nm = obj->GetName();
             if (!obj->GetPlayable() || Costume::IsAnchor(obj) ||
-                DualRing::IsCarrier(obj) || !nm || !*nm) {
+                !nm || !*nm) {
                 SKSE::log::info("[B3] partial add ({:08X}): board-invisible "
                                 "form -- nothing to do", a_form);
                 return true;
@@ -8333,7 +8384,51 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (Ledger::OpenOutgoingCount(a_form) > 0) return decline("removal in flight");   // B4-3c
             if (Loadout::ReservedCount(a_form) > 0) return decline("reserved");
             if (TrashedUnits(baseKey) > 0) return decline("trash parked");
-            if (DualRing::Second() == obj) return decline("dual ring");
+            // ★★★AN AIMED DROP IS NOT A CASE THIS PATH CAN PROVE.
+            //
+            // It fills partial tiles first and mints what is left over at the
+            // hint, so the square the player chose gets the REMAINDER. Measured
+            // with three potions on the board and ten dragged onto an empty
+            // cell -- the same millisecond, in this order:
+            //
+            //   [B3] ★stack fill … +7 -> 10      (the old tile, topped up)
+            //   [B3] ★stack mint … x3 at [0,4]   (the aim, given the leftovers)
+            //
+            // The rebuild answers the other way round, from a report: it takes
+            // the aim's share FIRST and lets the fill have the rest ("A DROP
+            // HINT IS A PLACEMENT, NOT A LEFTOVER"). Un-aimed arrivals -- loot,
+            // a purchase, a reward -- are still filled first by both, which is
+            // right and is not touched here.
+            //
+            // ★So this declines, exactly as the note above prescribes for
+            // anything it cannot prove, and the rebuild does the whole job. The
+            // hint survives a decline BY DESIGN (see "THE HINT IS SPENT ON
+            // COMMIT"), which is what makes handing it over work at all.
+            //
+            // ★★And it is not a new behaviour: an aimed drop of AMMO has been
+            // taking this exact road for months, by accident. Loadout presets
+            // holding arrows made ReservedCount non-zero, the line above
+            // declined every arrival, and the rebuild placed them at the aim --
+            // which nobody ever reported as wrong. Fixing that leak (8a8078a)
+            // is what put arrows on this path and started them filling like
+            // everything else.
+            //
+            // ★Form only, not pool: the pools are not worked out until further
+            // down, and by then the fill order is already being decided.
+            //
+            // ★★★AND ONLY THE MINT KIND. A hint raised by dropping onto an
+            // EXISTING tile means "top that one up", and its coordinates are
+            // the tile's own anchor -- the rebuild would read them as "mint
+            // here", find the square taken, and put the units somewhere else
+            // entirely. Reported straight away: dropping potions onto potions
+            // stopped merging and landed in a free cell instead.
+            //
+            // That kind is exactly what THIS path is good at -- its sort makes
+            // the named tile lead the fill -- so it keeps it. Only the aim at
+            // an empty square, which this path cannot express, goes over.
+            if (g_dropHint.WantsForm(baseKey) && !g_dropHint.onTile) {
+                return decline("aimed drop");
+            }
 
             // pools from the shared authority (nothing is queued out of them
             // -- the gates above proved it)
@@ -8454,7 +8549,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // them, and a full bag bounces to main (decision 1).
             std::map<std::string, std::vector<std::vector<bool>>> typedOcc;
             struct Fill { int idx; int add; };
-            struct Mint { LayoutEntry le; int units; };
+            // ★viaHint: did this tile take the drop hint's square, or first-fit?
+            // The log line cannot tell them apart otherwise, and "why did it
+            // land THERE" is the whole question when a stale hint is suspected.
+            struct Mint { LayoutEntry le; int units; bool viaHint = false; };
             std::vector<Fill> fills;
             std::vector<Mint> mints;
             for (auto& [pool, want] : pools) {
@@ -8543,6 +8641,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             mp.le.rot = hrot;
                             OccMark(occ, mp.le.col, mp.le.row, hm);
                             hintTaken = true;
+                            mp.viaHint = true;
                         }
                     }
                     // ★S4: the typed-bag seat comes FIRST for a filtered form
@@ -8646,10 +8745,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (mp.le.bag.empty()) {
                     g_spaceUsed += MaskCells(g_items.back().mask.rows);
                 }
-                SKSE::log::info("[B3] ★stack mint '{}' x{} key '{}' at [{},{}]{} -- "
+                SKSE::log::info("[B3] ★stack mint '{}' x{} key '{}' at [{},{}]{}{} -- "
                                 "no rebuild",
                     obj->GetName(), mp.units, key, mp.le.col, mp.le.row,
-                    mp.le.bag.empty() ? "" : " (typed bag)");
+                    mp.le.bag.empty() ? "" : " (typed bag)",
+                    mp.viaHint ? " (hint)" : " (first-fit)");
             }
             g_liveObjs.insert(obj);
             MarkCapacityDirty();
@@ -8720,11 +8820,41 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return &occByBag.emplace(a_bag,
                 ViewOccOf(g_views[static_cast<std::size_t>(vi)])).first->second;
         };
-        struct Planned { const UnitTile* u; LayoutEntry le; };
+        struct Planned { const UnitTile* u; LayoutEntry le; int xlIdx; };
         std::vector<Planned> plan;
+        // ★★★OUR OWN ACTION NAMED THIS UNIT -- TAKE ITS WORD OVER THE WALK'S.
+        //
+        // The walk answers from the engine, and the engine's event does not
+        // say which unit moved -- so a displaced TEMPERED dagger came back
+        // named `sig 0000` and every dagger on the board then read as plain
+        // (measured 2026-09-01). NoteReturningUnit recorded what the doll was
+        // wearing at the moment of the click: not a re-derivation, the
+        // observation the action had already made.
+        //
+        // ★Exactly one note, exactly one fresh tile. Anything else and we do
+        // not guess -- the note is dropped and the walk stays the authority,
+        // the same call SoleUnitEntry makes: a wrong name is worse than an
+        // ugly one.
+        const auto retIt = g_returning.find(a_form);
+        const bool adopt = retIt != g_returning.end() && fresh.size() == 1;
+        ReturningUnit note{};
+        if (retIt != g_returning.end()) { note = retIt->second; g_returning.erase(retIt); }
+
         for (const auto* u : fresh) {
             LayoutEntry le;
             if (const auto li = g_layout.find(u->key); li != g_layout.end()) le = li->second;
+            int seatXl = u->xlIdx;
+            if (adopt) {
+                le.uid = note.uid;
+                le.sig = note.sig;
+                // ★The position goes with it. A recorded index is a leftover
+                // from a moment this unit had a list at all; with an identity
+                // in hand MakeDisplayTile finds the list itself.
+                seatXl = -1;
+                SKSE::log::info("[B3] ★returning unit named by the action: "
+                                "'{}' u{:04X}/s{:04X} (walk said u{:04X}/s{:04X})",
+                    obj->GetName(), le.uid, le.sig, u->uid, u->sig);
+            }
             auto* seatOcc = occOf(le.bag);
             if (!seatOcc) return decline("no seatable view for the saved bag");
             if (le.col >= 0) {
@@ -8751,7 +8881,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         le.bag = g_dropHint.bag;
                         OccMark(*hOcc, le.col, le.row, hm);
                         hintTaken = true;
-                        plan.push_back({ u, le });
+                        plan.push_back({ u, le, seatXl });
                         continue;
                     }
                 }
@@ -8768,14 +8898,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     MaskOf(gdef, CanRotate(gdef) ? (le.rot & 3) : 0))) {
                 return decline("landed in the growth zone");
             }
-            plan.push_back({ u, le });
+            plan.push_back({ u, le, seatXl });
         }
 
         // Commit: the one tile factory, then every bookkeeping trace the
         // rebuild would have left for this tile (rule 5).
         for (const auto& p : plan) {
             g_layout[p.u->key] = p.le;   // persist BEFORE mint: the tile reads it
-            MakeDisplayTile(obj, entry, gdef, glow, p.u->key, 1, p.le, p.u->xlIdx);
+            MakeDisplayTile(obj, entry, gdef, glow, p.u->key, 1, p.le, p.xlIdx);
             const int idx = static_cast<int>(g_items.size()) - 1;
             const int tvi = viewIdxOf(p.le.bag);   // ★S3: the seat's own view
             if (tvi < 0) { RequestRebuild(); return true; }
@@ -8801,9 +8931,33 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             g_prevKeys.insert(p.u->key);
-            SKSE::log::info("[B3] ★partial add '{}' key '{}' at [{},{}]{} -- no rebuild",
+            // ★★SAY WHAT THE TILE CLAIMS AND WHAT IT ACTUALLY GOT.
+            //
+            // This line named the key and the cell, which is where the tile
+            // went -- never WHICH UNIT went into it. So a plain dagger filed
+            // into a tempered dagger's tile read exactly like a correct add,
+            // and the report ("every copy shows as tempered") could not be
+            // matched to any line in the log at all (measured 2026-09-01:
+            // three sessions of this path, no signal of any kind).
+            //
+            // ★The tile's identity lives in the layout entry, not in the key
+            // (Grid.cpp:6461 -- "the pool this tile belongs to lives in ns.le").
+            // MakeDisplayTile reads it from there, so THAT is the label the
+            // player sees; the unit is what they get when they click it. When
+            // the two disagree the tile is lying, and the log now says so.
+            // ★Never on a tile we deliberately re-labelled: an adopted tile
+            // differs from the walk BY DESIGN (that is the whole point), and
+            // reporting it as a mislabel taught the log to cry wolf -- five
+            // of them in the very run that proved the fix works.
+            const bool mislabel = !adopt &&
+                                  (p.le.uid != p.u->uid || p.le.sig != p.u->sig);
+            SKSE::log::info("[B3] ★partial add '{}' key '{}' at [{},{}]{} "
+                            "unit(u{:04X}/s{:04X}) tile(u{:04X}/s{:04X}){} "
+                            "-- no rebuild",
                 obj->GetName(), p.u->key, p.le.col, p.le.row,
-                p.le.bag.empty() ? "" : " (bag)");
+                p.le.bag.empty() ? "" : " (bag)",
+                p.u->uid, p.u->sig, p.le.uid, p.le.sig,
+                mislabel ? " ★MISLABEL" : "");
         }
         // ★NOW it is spent -- the plan committed, so the cell the player aimed
         // at has actually been used. A decline above returns without touching
@@ -9253,11 +9407,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                        /*a_drained=*/false);
     }
 
-    bool CarrierCarryActive()
-    {
-        return g_held && g_held->fromCarrier;
-    }
-
     int GoldAmount()
     {
         return g_gold;
@@ -9398,6 +9547,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // ★S-G: NotePaidGold is retired -- a payment debits named coin tiles
     // (CoinSpend), so nothing is guessed for the spill pass any more.
 
+    void NoteReturningUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                           std::uint16_t a_sig)
+    {
+        if (!a_obj) return;
+        g_returning[a_obj->GetFormID()] = { a_uid, a_sig };
+    }
+
     void NotePendingEquip(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                           std::uint16_t a_sig, int a_hand, const std::string& a_srcKey,
                           int a_units, int a_xlIdx)
@@ -9482,20 +9638,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     void MarkEquipsApplied()
     {
         for (auto& u : g_pendingEquip) u.applied = true;
-    }
-
-    void ReleasePendingEquipFor(RE::FormID a_form)
-    {
-        auto* form = RE::TESForm::LookupByID(a_form);
-        auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
-        if (!obj) return;
-        const std::string base = FormKey(obj);
-        for (auto it = g_pendingEquip.begin(); it != g_pendingEquip.end(); ++it) {
-            if (it->base == base && it->arriving) {
-                g_pendingEquip.erase(it);
-                return;
-            }
-        }
     }
 
     void ReleaseLandedPendingEquip(RE::FormID a_form)
@@ -10877,6 +11019,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     // ★W3: settings + the live bonus (see CapacityTick for the measurement)
+    void SetCwRows(bool a_on) { g_cwRows = a_on; }
+    bool CwRows() { return g_cwRows; }
     void SetCwCells(int a_perCell, int a_base, int a_maxCells)
     {
         g_cwPerCell = (std::max)(0, a_perCell);
@@ -11010,7 +11154,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // lived longer than a frame). The active-effect list cannot
             // race: an effect is applied to it and to the AV in the same
             // step, so the subtraction and the reading always agree.
-            if (g_cwPerCell > 0) {
+            // ★Did the walk below actually SEE the boost's effect? The toggle
+            // at the end needs to know: HasSpell can be true while the effect
+            // is gone, and that pair is exactly what leaves `ours` reading zero
+            // with nothing in the code to notice or repair it.
+            bool sawBoost = false;
+            // ★★THE SWITCH IS ASKED FIRST, BEFORE ANY READING IS TAKEN. Off
+            // means the AV is never measured, the out-of-range guard never
+            // arms, and nothing is logged -- a player who has turned the
+            // feature off should not be able to tell from the log that it
+            // exists. The else-branch below is what takes the rows back when
+            // it is switched off at runtime.
+            if (g_cwRows && g_cwPerCell > 0) {
                 float ours = 0.0f;
                 if (auto* mt = player->AsMagicTarget()) {
                     if (auto* list = mt->GetActiveEffectList()) {
@@ -11029,6 +11184,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                     RE::ActorValue::kCarryWeight) {
                                 continue;
                             }
+                            if (ae->spell == g_abBoost) sawBoost = true;
                             ours += eff->baseEffect->data.flags.all(
                                         RE::EffectSetting::EffectSettingData::
                                             Flag::kDetrimental)
@@ -11037,17 +11193,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                 }
-                float cw = avo->GetActorValue(RE::ActorValue::kCarryWeight) - ours;
+                const float avRaw = avo->GetActorValue(RE::ActorValue::kCarryWeight);
+                float cw = avRaw - ours;
                 // ★baseline 0 = AUTO: the race's own base, so overhauls that
                 // rewrite it (race records) need no manual setting. Stamina
                 // level-ups grow the AV past the racial base and so still
                 // count as earned bonus.
                 int base = g_cwBase;
+                const char* baseFrom = "ini";
                 if (base <= 0) {
                     auto* race = player->GetRace();
-                    base = race && race->data.baseCarryWeight > 0.0f
-                               ? static_cast<int>(race->data.baseCarryWeight)
-                               : 300;
+                    if (race && race->data.baseCarryWeight > 0.0f) {
+                        base = static_cast<int>(race->data.baseCarryWeight);
+                        baseFrom = "race";
+                    } else {
+                        base = 300;
+                        baseFrom = "fallback";
+                    }
                 }
                 const int ext = static_cast<int>(cw) - base;
                 // ★★A reading taken while an ability toggle is still landing
@@ -11059,13 +11221,102 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // legitimate bonus is within two orders of that scale, so a
                 // reading out of range keeps the last good answer instead of
                 // minting fifty phantom cells out of a frame boundary.
-                if (std::abs(ext) <= 100000) {
+                // ★★★THE COMPONENTS, NOT JUST THE ANSWER. This printed the cell
+                // count and how far past the baseline it read -- which says
+                // WHAT happened and never WHY. Reported (Nexus, 1.5.1): "the
+                // extra slots are extremely inconsistent, they disappear
+                // constantly", and "a 50-carry-weight perk should give 5 slots;
+                // my inventory almost doubled". Fifty cells is the cap, so that
+                // reading was ext ~= 500 out of a perk worth 50, and the line
+                // as it stood could not tell a wrong AV from a wrong baseline.
+                //
+                // ★The baseline is the suspect worth naming: `ours` subtracts
+                // OUR two abilities and nothing else, so every other source of
+                // carry weight counts as the world's bonus. That is right for a
+                // perk, a potion, an enchantment -- and wrong for anything that
+                // is really part of the player's BASELINE and does not live in
+                // the race record we read it from. Printing av / ours / base
+                // together is what tells those apart in one line of a log.
+                //
+                // ★Still only ON CHANGE. A settled board says nothing.
+                // ★★★A REFUSAL THAT OUTLIVES THE TRANSITION IS NOT A TRANSITION.
+                //
+                // The guard was written for the frame or two while an ability
+                // lands, and it answered by keeping the last good value -- with
+                // nothing to end the keeping. So anything that holds the reading
+                // out of range froze the bonus at whatever it happened to be:
+                // at zero, and the cells "disappear and stay gone until
+                // something unknown brings them back"; at a large number, and
+                // they are "way larger than they should be". One fault, two
+                // faces, and the reported words for both.
+                //
+                // Reproduced: `player.modav carryweight 200000` from zero cells.
+                //
+                //   [GRID] CW reading out of range -- av=700300 ours=+500000
+                //          base=300 (race) ext=+200000; KEEPING 0 cell(s)
+                //
+                // and from there a real +50 could not be measured either --
+                // ext stayed out of range, so the refusal did. Undoing the
+                // modav is what "brought them back".
+                //
+                // ★So the refusal is now bounded. Past kCwRejectMax frames the
+                // reading is taken as the state it evidently is, clamped like
+                // any other -- and the clamp is what makes that safe: the worst
+                // an absurd reading can buy is g_cwMaxCells, which is a great
+                // deal better than a board frozen at nothing.
+                // ★★★THREE STATES, NOT TWO -- AND THE THIRD IS WHY THIS IS NOT
+                // A LOG FLOOD. Waiting the transition out and then taking the
+                // reading are different things, and a version that only had the
+                // first reset its counter on every acceptance: refuse, decide,
+                // refuse, decide, twice a second for as long as the state
+                // lasted. Measured at once -- the same pair of lines every
+                // 300ms -- which is the missing-mesh probe's fault wearing
+                // different words.
+                //
+                // So the decision STICKS. Once the refusal has outlived any
+                // transition the reading is taken as the state, and it goes on
+                // being taken until it comes back in range. One line to say the
+                // refusal began, one to say it was decided, one to say it
+                // ended.
+                const bool inRange = std::abs(ext) <= 100000;
+                if (inRange) {
+                    if (g_cwRejecting || g_cwAccepting) {
+                        SKSE::log::info("[GRID] CW reading is back in range");
+                    }
+                    g_cwRejecting = false;
+                    g_cwAccepting = false;
+                    g_cwRejectTicks = 0;
+                } else if (!g_cwAccepting) {
+                    ++g_cwRejectTicks;
+                    // ★★SAY WHEN THE GUARD REFUSES. It used to keep the last
+                    // good answer silently, which is what "they stay gone until
+                    // something unknown brings them back" looks like from the
+                    // outside when that answer was zero.
+                    if (!g_cwRejecting) {
+                        g_cwRejecting = true;
+                        SKSE::log::warn(
+                            "[GRID] CW reading out of range -- av={:.0f} ours={:+.0f} "
+                            "base={} ({}) ext={:+}; keeping {} cell(s) for up to "
+                            "{} more frame(s)",
+                            avRaw, ours, base, baseFrom, ext, g_cwBonusCells,
+                            kCwRejectMax);
+                    }
+                    if (g_cwRejectTicks >= kCwRejectMax) {
+                        g_cwRejecting = false;
+                        g_cwAccepting = true;
+                        SKSE::log::info("[GRID] CW reading is out of range but "
+                                        "STEADY -- taking it as the state");
+                    }
+                }
+                if (inRange || g_cwAccepting) {
                     const int cells = std::clamp(
                         ext > 0 ? ext / g_cwPerCell : 0, 0, g_cwMaxCells);
                     if (cells != g_cwBonusCells) {
                         SKSE::log::info(
-                            "[GRID] carry-weight bonus: {} cell(s) ({:+} CW past "
-                            "the baseline)", cells, ext);
+                            "[GRID] CW: av={:.0f} ours={:+.0f} base={} ({}) -> "
+                            "ext={:+} -> {} cell(s), was {}",
+                            avRaw, ours, base, baseFrom, ext, cells,
+                            g_cwBonusCells);
                         g_cwBonusCells = cells;
                         MarkCapacityDirty();
                         RequestRebuild();
@@ -11081,7 +11332,39 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // least one full tick away from the last toggle -- the engine has
             // had a frame to finish applying or removing the effect before
             // anyone reads the AV against the list again.
-            if (!player->HasSpell(g_abBoost)) player->AddSpell(g_abBoost);
+            // ★★★HasSpell IS NOT "THE EFFECT IS ON". The spell list and the
+            // active-effect list are two places, and only the second is what
+            // `ours` can subtract. Something that dispels the effect without
+            // taking the spell away leaves this line satisfied for ever: the
+            // spell is there, so it is never re-added, and the measurement
+            // above reads ours=0 against an AV that still carries the boost --
+            // half a million past the baseline, refused, frozen.
+            //
+            // ★So the repair is on the pair, not on the spell alone. Bounded
+            // by a cooldown because a repair that does not take must not be
+            // retried every frame: spell churn on the player is worse than the
+            // fault it is chasing.
+            if (!player->HasSpell(g_abBoost)) {
+                player->AddSpell(g_abBoost);
+            // ★The repair asks the SWITCH too, and must. `sawBoost` is set by
+            // the effect walk above, which does not run when the feature is
+            // off -- so without this the repair would read "spell present, no
+            // effect" every tick, re-seat the spell every two seconds and warn
+            // about a measurement nobody is taking. Only the code that reads
+            // the effect may ask for it to be repaired.
+            } else if (g_cwRows && g_cwPerCell > 0 && !sawBoost) {
+                if (g_boostRepairWait > 0) {
+                    --g_boostRepairWait;
+                } else {
+                    g_boostRepairWait = 120;   // ~2s between attempts
+                    player->RemoveSpell(g_abBoost);
+                    player->AddSpell(g_abBoost);
+                    SKSE::log::warn("[GRID] the carry-weight boost is in the spell "
+                                    "list but has no active effect -- re-seated");
+                }
+            } else {
+                g_boostRepairWait = 0;
+            }
             const bool has = player->HasSpell(g_abOver);
             if (g_overloaded && !has) player->AddSpell(g_abOver);
             else if (!g_overloaded && has) player->RemoveSpell(g_abOver);
@@ -12095,6 +12378,40 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // to TESForm::GetName(), which returns the raw record text.
         if (a_xl) {
             if (const char* n = a_xl->GetDisplayName(a_obj); n && *n) return n;
+            // ★★★★TEMPER IS NOT A DISPLAY NAME, and that one fact is the whole
+            // bug. ExtraDataList::GetDisplayName answers for ExtraTextDisplayData
+            // -- a quest alias, a name the player typed -- and a tempered dagger
+            // has neither, so it comes back EMPTY. The "Fine" prefix was never
+            // in there to be found: the engine builds it on the ENTRY, from the
+            // unit's ExtraHealth.
+            //
+            // ★So the unit needs an entry of its own -- one throwaway holding
+            // this list alone. The same trick, with the same detach-before-
+            // destruct care, that UnitValueWith already uses for the price and
+            // the damage/armor cards use in-game. Which is exactly why the
+            // report was "the stats differ but every name is the tempered one":
+            // the numbers were asking per unit and the name was not.
+            //
+            // ★★Copied out rather than returned by pointer. The name belongs to
+            // an entry that dies at the closing brace, and a comparison tooltip
+            // holds TWO names live at once (the hovered item and the equipped
+            // card), so one shared buffer would let the second overwrite the
+            // first. A small rotation is enough for every caller this file has.
+            RE::BSSimpleList<RE::ExtraDataList*> sl;
+            sl.push_front(a_xl);
+            RE::InventoryEntryData e(a_obj, 1);
+            e.extraLists = &sl;
+            const char* unitName = e.GetDisplayName();
+            static std::array<std::string, 4> s_ring;
+            static std::size_t                s_next = 0;
+            std::string* slot = nullptr;
+            if (unitName && *unitName) {
+                slot = &s_ring[s_next];
+                *slot = unitName;
+                s_next = (s_next + 1) % s_ring.size();
+            }
+            e.extraLists = nullptr;   // detach BEFORE ~InventoryEntryData
+            if (slot) return slot->c_str();
         } else if (a_entry) {
             if (const char* n = a_entry->GetDisplayName(); n && *n) return n;
         }
@@ -12852,31 +13169,50 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         RE::ExtraDataList* scoped = nullptr;
         switch (a_scope) {
         case ExtraScope::kUnit:
-            // ★★★POSITION, VERIFIED, THEN BY POOL. A unit sitting in a
-            // container on our side of a transfer has no uid (the engine
-            // assigns none) and no recorded position (xlIdx is -1), so a
-            // position-only lookup misses and a tempered dagger reads as plain
-            // -- measured, two of them in one barrel both lost their name while
-            // their signature matched the held list exactly.
+            // ★★★★IDENTITY FIRST, POSITION LAST -- AND A PLAIN UNIT HAS NO
+            // POSITION AT ALL.
             //
-            // ★And a position that is stale but IN RANGE is worse than one that
-            // misses: it answers with another unit's list, so the old "fall back
-            // only on nullptr" never got its turn. A partner cell holds its
-            // position for the life of the cell, and AddExtraList prepends --
-            // so storing one enchanted bow into a chest that already held one
-            // printed the stored bow's affix on BOTH tooltips. ExtraForUnit
-            // checks the position against the pool before trusting it.
+            // This asked the POSITION first and only fell through to the pool
+            // when it came back empty, which is backwards for the same reason
+            // ProcessPending's srcList was: a stale index still resolves to a
+            // REAL list, just the wrong one, so the pool answer never got to
+            // run. Handing the tooltip `it.sig` (it was passing 0) was
+            // necessary and not sufficient -- the sig fallback sat behind a
+            // door that never opened.
             //
-            // ★This is NOT the entry fallback the note below forbids, and the
-            // difference is the whole point: the entry's name is its FIRST
-            // sub-stack's, borrowed by units that are nothing like it, whereas
-            // a signature match means the same contents -- same temper, same
-            // enchantment, same name. Reading either is reading this unit's.
+            // ★And the plain case is not a fallback at all, it is a rule this
+            // file already states out loud in EnumerateUnitRefs: "uid 0 and
+            // sig 0 mean nothing distinguishes this unit, which is the
+            // definition of LISTLESS -- so any position recorded for it is a
+            // leftover from a moment when it DID have a list (a worn unit
+            // carries one holding only ExtraWorn)."
             //
-            // ★a_namePlainPool FALSE, which is what keeps the `aggregate` rule
-            // below working: a plain-pool tile must still resolve to NOTHING,
-            // because that is how a merged stackable row is recognised.
-            scoped = ExtraForUnitImpl(entry, a_uid, a_xlIdx, a_sig, false);
+            // ★★It was not the whole report, and this note used to claim it
+            // was. The tiles were ALSO handed the wrong identity on their way
+            // back from the doll -- see NoteReturningUnit. Two separate faults
+            // behind one symptom: the resolver read the tile wrongly, and the
+            // tile itself was wrong. Fixing either alone changed nothing the
+            // player could see, which is why this took three attempts
+            // (measured 2026-09-01).
+            if (a_uid != 0 || a_sig != 0) {
+                scoped = ExtraForPool(entry, a_uid, a_sig);
+                if (!scoped) scoped = ExtraForTile(entry, a_uid, a_xlIdx);
+            }
+            // ★★★THE POOL ANSWER IS THE PRIMARY ONE, and it earned that place
+            // before this: a unit sitting in a container on our side of a
+            // transfer has no uid (the engine assigns none) and no recorded
+            // position (xlIdx is -1), so a position-only lookup missed and a
+            // tempered dagger read as plain -- measured, two of them in one
+            // barrel both lost their name while their signature matched the
+            // held list exactly. It was added as a FALLBACK then; the case
+            // above shows why it had to be the first question instead.
+            //
+            // ★A signature match is not the entry fallback the note below
+            // forbids, and the difference is the whole point: the entry's name
+            // is its FIRST sub-stack's, borrowed by units that are nothing
+            // like it, whereas a signature match means the same contents --
+            // same temper, same enchantment, same name. Reading either is
+            // reading this unit's.
             break;
         case ExtraScope::kWorn:
             scoped = WornExtraMatching(entry, a_uid, a_sig, a_hand);
@@ -13692,6 +14028,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
     void Draw()
     {
+        // ★Re-armed every frame, before anything draws -- a stale "yes" would
+        // silence the container's take-all for a frame the cursor had already
+        // left. The views below raise it again if it is still true.
+        g_playerBoardHovered = false;
         RotateHeldItem();   // GI62: A / D, before any grid reads the footprint
         if (g_views.empty()) return;
         // ★(1.6) which of the three boards the strip has selected. Resolved by
@@ -14694,6 +15034,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // P2/3-5d: both defined further down; the partner-drop route needs
         // them before either exists.
         void ResolveDrop(Held& a_held);
+        // ★Same reason: the partner-drop route has to ask which pool the carry
+        // belongs to before the answer is defined further down.
+        std::string HeldPool(const Held& a_held);
 
         bool DropPartnerHeld(Held& a_held)
         {
@@ -14792,7 +15135,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // not a merge: swap. The cells exchange positions and
                         // the occupant comes to the cursor.
                         const auto occ = sd;   // copy: reset() invalidates it
-                        LootBarter::SwapHeldCellWith(occ.occSpotKey);
+                        LootBarter::SwapHeldCellWith(occ.occSpotKey, occ.col,
+                                                     occ.row, a_held.rot);
                         if (g_sound) g_sound(a_held.obj, false);
                         g_held.reset();
                         // GI24: the displaced occupant keeps its OWN identity
@@ -14891,20 +15235,48 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // F7-swap: a partner item dropped on a SINGLE occupied player tile
             // takes/buys into that spot and the displaced tile rides the
             // cursor (player-grid C4 grammar). Coins/pouch keep the old no-op.
+            // ★★A SAME-STACK BLOCKER IS A TOP-UP, NOT A TRADE. One blocker meant
+            // "swap" whatever it was (coins aside), so dragging arrows out of a
+            // chest onto the arrows already in the pack traded the two piles
+            // instead of pouring one into the other. The player board has drawn
+            // this line between its own tiles for a long time (C4-S): same
+            // pool, stackable, room left is a merge -- and a FULL stack, where
+            // there is genuinely nothing to pour into, still swaps.
             const Item* swapDisp = nullptr;
+            const Item* mergeDisp = nullptr;
             if (g_target.has && !g_target.valid && g_target.blockers.size() == 1 &&
                 !LootBarter::IsPartnerHovered() &&
                 g_target.view < static_cast<int>(g_views.size())) {
                 const Item& cand = g_items[g_target.blockers.front()];
                 if (!GoldCoins::IsCoinForm(cand.obj->GetFormID()) &&
                     cand.coinValue < 0) {
-                    swapDisp = &cand;
+                    const int cap = EffectiveCap(a_held.obj);
+                    if (cap > 1 && cand.count < cap &&
+                        PoolOfSlot(cand.key) == HeldPool(a_held)) {
+                        mergeDisp = &cand;
+                    } else {
+                        swapDisp = &cand;
+                    }
                 }
             }
-            if (g_target.has && (g_target.valid || swapDisp) &&
+            if (g_target.has && (g_target.valid || swapDisp || mergeDisp) &&
                 !LootBarter::IsPartnerHovered() &&
                 g_target.view < static_cast<int>(g_views.size())) {
                 const auto& v = g_views[g_target.view];   // (trash: asked above)
+                // ★★THE WHOLE CARRY, MERGE OR NOT -- and that is a decision,
+                // measured rather than assumed. Holding the surplus back on the
+                // cursor was tried and cannot work here: the fast placement path
+                // refuses while the form is on the cursor ("partial add
+                // declined: carried"), so the units go through a full rebuild --
+                // and the rebuild has no notion of an AIMED tile. It fills
+                // partial piles in board order, which is how eight lockpicks
+                // aimed at the pack went into an open lockpick BAG instead.
+                //
+                // Taking the lot ends the carry, which lets the fast path run,
+                // and the fast path is the one place that knows "the tile the
+                // player dropped on leads the fill". The cost is that the
+                // surplus becomes a tile of its own instead of staying on the
+                // hand -- the same items, a different square.
                 const int cnt = a_held.count;
                 bool ok = true;
                 if (LootBarter::CurrentMode() == LootBarter::Mode::kBarter && cnt <= 1) {
@@ -15020,9 +15392,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // survives for the two directions that still ask.
                     const int hintCount = tookNow > 0 ? tookNow
                                                       : ((cnt > 1) ? 0 : cnt);
-                    g_dropHint = { hintBase, hintPool,
-                                   g_target.col, g_target.row, v.bagKey, a_held.rot,
-                                   hintCount };
+                    // ★★A MERGE NAMES THE PILE'S OWN ANCHOR, not the cell under
+                    // the cursor. The fast path decides which partial leads the
+                    // fill by comparing the hint against TILE POSITIONS, and a
+                    // cell in the middle of a tile matches none of them -- so
+                    // the aim was thrown away and board order decided, which is
+                    // how an open typed bag won a drop aimed at the pack.
+                    if (mergeDisp) {
+                        g_dropHint = { hintBase, hintPool,
+                                       mergeDisp->col, mergeDisp->row,
+                                       mergeDisp->inBag, a_held.rot, hintCount,
+                                       /*onTile=*/true };
+                    } else {
+                        g_dropHint = { hintBase, hintPool,
+                                       g_target.col, g_target.row, v.bagKey,
+                                       a_held.rot, hintCount };
+                    }
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item
                         // and put it on the cursor (same as the C4 swap)
@@ -15268,7 +15653,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         bool StackFragStore(Held& a_held)
         {
-            if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count)) {
+            // ★The aim is read first here too -- a fragment can land on an
+            // occupant just as a whole tile can, and the square that occupant
+            // is about to give up counts as room. (Same note as WholeStore.)
+            const auto sdRoom = LootBarter::QueryStoreDrop();
+            if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count, a_held.rot,
+                                               sdRoom.occ ? sdRoom.occSpotKey
+                                                          : std::string{})) {
                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));   // (1.3.3)
                 return true;   // the fragment keeps riding the cursor
             }
@@ -15280,7 +15671,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const auto sd = LootBarter::QueryStoreDrop();
             LootBarter::RequestStore(a_held.obj, a_held.count,
                                      HeldUidOf(a_held.key, a_held.uid), a_held.sig,
-                                     a_held.fav, -1, a_held.key);   // (3) store
+                                     a_held.fav, -1, a_held.key,
+                                     a_held.rot);   // (3) store
             if (sd.onCell && sd.freeSpot) {
                 LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
                                             sd.col, sd.row, a_held.rot,
@@ -15399,13 +15791,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // swap handed the cursor an occupant that had not gone anywhere.
             // A phantom stack followed the mouse for the rest of the session
             // (user report, straight after the merge landed).
-            // ★The room is asked of Equip::AmmoMergeRoom, which is also what
-            // the equip itself asks. Two copies of this rule could disagree
-            // about whether a given drop merges or replaces, and either answer
-            // is a bug on one side of the pair -- a full quiver DOES replace,
-            // and that swap is correct and stays.
-            const bool ammoMerge = worn && worn == a_held.obj &&
-                                   Equip::AmmoMergeRoom(a_held.obj) > 0;
+            // ★★AND IT ALWAYS MERGES NOW, because there is no longer such a
+            // thing as a full quiver. This used to ask Equip::AmmoMergeRoom for
+            // the space left on the back and let a FULL one swap instead --
+            // which was right while the doll drew the worn count, since a
+            // replaced quiver really did change what the player saw.
+            //
+            // It does not any more. The doll draws min(total, cap) and the
+            // board draws the rest, so arrows of the same kind arriving on the
+            // back change no number anywhere: total is the same before and
+            // after. A swap would hand the cursor an occupant that never went
+            // anywhere, which is the phantom this line was written to stop.
+            //
+            // ★Same FORM only, as it always was. Steel over iron still swaps --
+            // that one really does displace a quiver.
+            const bool ammoMerge = worn && worn == a_held.obj;
             const bool swapping = !ammoMerge && worn &&
                                   !(worn == a_held.obj && wsig == a_held.sig &&
                                     a_held.fromDoll && !a_held.swappedOut &&
@@ -15470,24 +15870,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // Only an ACCEPTED equip that actually displaces something starts the
             // return carry. A potion or spell tome dropped on a slot is drunk or
             // read -- nothing comes off, and there is nothing to hand back.
-            // ★★The SECOND RING'S displaced occupant rides the cursor like
-            // every other swap -- its carry is marked fromCarrier, so the
-            // worn-backed accounting cannot let it claim the FIRST ring's
-            // list (the leak that made the first cursor attempt draw the ring
-            // twice). The ONE exception: first slot empty, where Wear moves
-            // the displaced ring onto the FIRST slot instead of the pack --
-            // nothing leaves the body, and a cursor copy really would be a
-            // duplicate.
-            const bool ringL = g_slotTarget == "ringL";
+            // ★1.6.0: "ringL" is an ORDINARY doll slot again. It used to be
+            // the carrier's, and its displaced occupant needed a carry marked
+            // fromCarrier plus a first-slot-empty exception, because Wear --
+            // not the engine -- decided where the ring went. Both are gone
+            // with the carrier: whatever the doll shows on ringL is
+            // engine-worn, so its displacement is the same swap every other
+            // slot performs.
             SKSE::log::info("[RING] drop-swap slot '{}': in='{}' occupant='{}' "
-                            "second='{}' accepted={}",
+                            "accepted={}",
                 g_slotTarget, swapInObj ? swapInObj->GetName() : "?",
                 worn ? worn->GetName() : "-",
-                DualRing::Second() ? DualRing::Second()->GetName() : "-",
                 accepted ? 1 : 0);
-            const bool ringLToFirst = ringL &&
-                                      Equip::WornObjectAt("ringR") == nullptr;
-            if (accepted && swapping && !ringLToFirst) {
+            if (accepted && swapping) {
                 // The engine has not unequipped it yet, so this is exactly a doll
                 // pickup -- and it must name the HAND, or the worn-unit match can
                 // consume the copy we just put IN and leave the displaced one
@@ -15499,15 +15894,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // them went to the pack instead of onto the cursor.
                 BeginCarry(worn, wuid, wsig, wornHand, /*swappedOut=*/true,
                            Equip::EquipCountFor(worn,
-                               Equip::WornCountAt(g_slotTarget)),
-                           /*fromCarrier=*/ringL);
+                               Equip::WornCountAt(g_slotTarget)));
             }
             // ★No tail rebuild for ACCEPTED drops. The !rbdrop interrogation
             // measured every accepted shape without it: plain equips, swaps,
             // same-form swaps, stackables, potions and tomes were all fine --
             // the carry had already left the board at lift, so there was
-            // nothing for a full rebuild to draw. The carrier's stand-down
-            // moved into DualRing::TakeOff itself (rule 6).
+            // nothing for a full rebuild to draw.
             // ★★A REJECTED drop is the case the interrogation never ran: the
             // carry is consumed either way (g_held.reset above), the layout
             // entry is intact, and the only thing that ever put the tile back
@@ -15762,20 +16155,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // in the inventory" did nothing at all (AddItemMenu).
             // count: what THIS tile holds. Ammo goes on by the tileful
             // (EquipCountFor); everything else ignores it and takes one.
-            // ★O-1b: a ring bound for the SECOND slot is AIMED, not left to a
-            // router downstream. Aiming puts the click in the same targeted
-            // branch a drag onto that slot uses -- and that branch names the
-            // exact unit (it resolves srcList) where the router hands the
-            // engine a null list and lets it pick. One road, and the better of
-            // the two. A refusal there falls through to the first slot, so
-            // nothing is lost by aiming.
+            // ★O-1b aimed a ring bound for the SECOND slot at "ringL" here,
+            // so the click travelled the same targeted branch a drag onto that
+            // slot used. There is no second slot to aim at since 1.6.0 -- the
+            // engine wears one ring and an outside mod owns the rest -- so a
+            // ring is used like everything else and the engine decides.
             const bool queued =
-                Equip::RingWantsSecondSlot(a_held.obj)
-                    ? Equip::EquipItem(a_held.obj, "ringL", a_held.uid,
-                                       a_held.xlIdx, a_held.sig, a_held.key,
-                                       a_held.count)
-                    : Equip::UseItem(a_held.obj, a_held.uid, a_held.xlIdx,
-                                     a_held.sig, a_held.key, a_held.count);
+                Equip::UseItem(a_held.obj, a_held.uid, a_held.xlIdx,
+                               a_held.sig, a_held.key, a_held.count);
             if (!queued) {
                 return false;   // refused at our own gate: straight back
             }
@@ -15808,7 +16195,36 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // The optimistic exit, drawn without a full rebuild -- the same
             // partial the deferred click-remove used to run, called straight
             // out because this already runs outside the draw pass.
-            if (!TryUseClickPartialRemove(key, obj, /*take=*/0, /*drained=*/false)) {
+            //
+            // ★★★EXCEPT FOR AMMO, WHICH IS NOT ONE TILE LEAVING. That partial
+            // knows exactly one trick -- take the clicked tile's units off the
+            // board -- and for a quiver the click does something else entirely:
+            // the total does not move at all, and the whole stock is re-shared
+            // between a capful on the doll and the rest on the grid.
+            //
+            // Taking only the clicked tile off left the two halves disagreeing
+            // for the frames until the rebuild landed. Reported with pictures:
+            // 241 arrows shown as 100 + 41 + 100, click the 41, and the doll
+            // was drawing its capful while the grid still held 100 + 100 --
+            // three hundred arrows on screen out of two hundred and forty-one.
+            //
+            // ★It read as SLOW, and it was not: [FLICK] shows one clean
+            // transition (241 -> 141) and no intermediate at all, because that
+            // wrong frame never came from a rebuild. It came from here.
+            //
+            // ★Declining is what this returns for "anything unproven", which is
+            // exactly what an ammo equip is to it. The rebuild was already
+            // coming; this only stops us drawing a wrong answer while it is on
+            // its way. The store and sell callers keep the partial -- their
+            // total really does change, and the clicked tile really is what
+            // leaves.
+            if (obj->Is(RE::FormType::Ammo)) {
+                SKSE::log::info("[ONEPATH] ammo equip ('{}') -- the quiver re-shares "
+                                "the whole stock, so no partial can draw it",
+                    key);
+                RequestRebuild();
+            } else if (!TryUseClickPartialRemove(key, obj, /*take=*/0,
+                                                 /*drained=*/false)) {
                 SKSE::log::info("[ONEPATH] use partial declined ('{}') -- full rebuild",
                     key);
                 RequestRebuild();
@@ -15883,11 +16299,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             // (no quest guard: storing CHANGES CONTAINERS -- see PoolIsQuest)
             bool queued = false;   // O-2: did anything actually leave?
-            if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count)) {
+            // ★★ASKED BEFORE THE ROOM TEST, because a SWAP changes the answer.
+            // The occupant leaves as the carry arrives, so its square is part
+            // of the room available -- and measuring with it still in place
+            // refused trades the pack had space for (reported: a 1x2 sitting in
+            // a 2x3 hole, traded for a 2x3, called full).
+            // ★A pure query -- mouse position against the drawn board -- so
+            // asking it earlier costs nothing and changes nothing.
+            const auto sd = LootBarter::QueryStoreDrop();   // F7 (dead outside kLoot/kSteal)
+            if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count, a_held.rot,
+                                               sd.occ ? sd.occSpotKey : std::string{})) {
                 // (1.3.3) a follower's pack is 10 x 8 -- keep carrying
                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
             } else if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
-                const auto sd = LootBarter::QueryStoreDrop();   // F7 (dead outside kLoot/kSteal)
                 {
                     // ★(1.5.x stack flow) NO QUANTITY WINDOW, AND THE STACK
                     // INHERITS THE SINGLE UNIT'S MANNERS.
@@ -15908,7 +16332,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // the cursor, which is what shift+left split is for.
                     LootBarter::RequestStore(a_held.obj, a_held.count,
                                              HeldUidOf(a_held.key, a_held.uid), a_held.sig,
-                                             a_held.fav, a_held.xlIdx, a_held.key);
+                                             a_held.fav, a_held.xlIdx, a_held.key,
+                                             a_held.rot);
                     NotePendingRemove(a_held.obj, a_held.key, a_held.count, a_held.xlIdx);
                     queued = true;   // O-2: this tile really is leaving
                     if (a_held.isBag) {
@@ -15935,8 +16360,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // rule 4: swap — the stored item takes the
                             // occupant's square, the occupant rides the cursor
                             const auto occ = sd;   // copy: reset invalidates it
+                            // ★★THE SQUARE THE PLAYER AIMED AT, not the
+                            // occupant's anchor. "The stored item takes the
+                            // occupant's square" is the same statement only
+                            // while the two are the same SIZE -- drop a 2x1 on
+                            // the bottom of a 2x4 and the occupant's anchor is
+                            // four rows up, so the item jumped to the top of
+                            // something it was carefully placed under.
+                            // ★Safe by construction: a swap is EXACTLY ONE
+                            // blocker, so every other square under the aimed
+                            // footprint was already free, and the one that was
+                            // not is the occupant now leaving.
                             LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
-                                occ.occCol, occ.occRow, a_held.rot,
+                                occ.col, occ.row, a_held.rot,
                                 HeldUidOf(a_held.key, a_held.uid), HeldInstanceSig());
                             g_held.reset();
                             // GI24: same as the rearrange swap — the occupant
@@ -16959,6 +17395,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // ---- F2: trash window public surface ----
 
     bool IsTrashOpen() { return g_trashOpen; }
+
+    // ★★★THE SURFACES THAT ARE ASKING THE PLAYER SOMETHING -- the half of "one
+    // of the player's own" that hovering cannot answer for.
+    //
+    // PlayerBoardHovered covers the BOARDS (the grid, the bag windows), and it
+    // is right to ask about the cursor there: a board only disagrees with a
+    // global key while the pointer is on it. These three are different in kind.
+    // They are TAKING INPUT, so a key typed at one of them is meant for it
+    // wherever the mouse happens to be sitting.
+    //
+    // ★Found by the container's take-all walking straight through all of them.
+    // A favourite dropped in the trash raises the confirm, R is typed at that
+    // confirm, and the chest behind it empties instead -- which is the exact
+    // accident the gate exists to prevent, arriving through a door nobody had
+    // listed. LootBarter's IsPopupOpen draws this line for its own
+    // sub-windows; this is the same line on our side of the fence, and the
+    // gate has to ask both. (Reported 2026-08-31.)
+    //
+    // ★The trash VIEW is deliberately absent. It is a board, not a question,
+    // and it answers through the hover rule along with the rest.
+    bool PlayerPopupOpen()
+    {
+        return g_trashAsk.active || IsPouchOpen() || IsRechargeOpen();
+    }
 
     void ToggleTrash()
     {

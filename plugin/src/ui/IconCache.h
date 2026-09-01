@@ -459,7 +459,6 @@ namespace FUI
         // the probe used to run in PreRender and leave no trace, so a visible
         // tile re-queued itself every single frame and the queue never reached
         // zero: a precache stuck at "1 left" with the spinner turning for ever.
-        std::unordered_set<std::uint64_t>      m_meshGone;
         // GI68: ran out of window while the engine was STILL LOADING. Not a
         // failure -- a candidate for a later, unhurried pass. Kept apart from
         // m_failed so a retry can target exactly these and nothing else.
