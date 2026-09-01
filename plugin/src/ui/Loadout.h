@@ -12,17 +12,12 @@
 // The internal name "Loadout" avoids clashing with the pre-existing editor
 // sense of "preset" (shared icon and category configuration).
 //
-// A set covers every slot on the doll, both ring cells included.
-//
-// This used to need a special case. Before 1.6.0 the second ring was worn by a
-// stand-in carrier while the ring itself stayed in the pack, so the worn scan
-// could not see it and an ordinary unequip could not take it off -- it had to
-// be snapshotted, stood down and re-worn through DualRing, or the doll's
-// bottom-right slot kept its ring through every switch while every other slot
-// changed. Both rings are worn by the engine now, so the ordinary worn scan
-// finds them. What a set still records for a ring is which CELL it sat in,
-// because that is placement rather than a fact about the body: see the
-// leftHand field in Loadout.cpp.
+// A set covers every slot on the doll, including the ones the engine does not
+// wear itself. The second ring is worn by DualRing's carrier while the ring
+// itself sits in the pack, so the worn scan cannot see it and an ordinary
+// unequip cannot take it off. It has to be snapshotted, stood down and re-worn
+// through DualRing -- otherwise the doll's bottom-right cell keeps its ring
+// through every switch while every other slot changes.
 
 namespace FUI::Loadout
 {
