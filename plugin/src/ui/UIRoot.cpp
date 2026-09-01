@@ -782,6 +782,13 @@ namespace FUI::UIRoot
             // there is nothing to inherit. LS is the one button on the pad
             // this UI had never given a meaning to.
             kActSwapSide  = 1u << 13,
+            // ★★THE BOARD STRIP ON THE SHOULDERS. ITEMS · QUEST · KEYS is a
+            // row of words a mouse clicks; on a pad that meant steering the
+            // pointer up to a three-word strip to change board. LB/RB is where
+            // every game with tabs puts this, and the two buttons came free
+            // when favourite moved to Back and the 3D view to the right stick.
+            kActTabPrev   = 1u << 14,
+            kActTabNext   = 1u << 15,
         };
 
         std::atomic<std::uint32_t> g_padRaw{ 0 };       // physical buttons held
@@ -874,6 +881,37 @@ namespace FUI::UIRoot
             if (!g_padActive.exchange(true)) g_padSeed.store(true);
         }
 
+        // ★★Walk the board strip, wrapping. Called straight from the pad
+        // translation below rather than routed through a synthesised key, and
+        // that is a DEPARTURE from every other action here -- so, why:
+        //
+        // The key-synthesis trick exists to keep two input roads on one
+        // handler. Every other gesture already HAD a keyboard handler that a
+        // pad had to reach (R = take all, Q = swap side), so sending the key
+        // is what stops the two drifting. The strip has no such handler -- it
+        // is three words a mouse clicks -- so there is no second road to stay
+        // on, and inventing a keyboard shortcut to route through would be
+        // adding a binding nobody asked for just to have something to forge.
+        // This IS the one piece of code, and the strip's own click path calls
+        // SetActiveTab exactly the same way.
+        //
+        // ★Both callers run on the render thread and g_activeTab is atomic, so
+        // there is nothing to serialise here.
+        void StepTab(int a_dir)
+        {
+            // ★Carrying an item blocks it, exactly as the strip's click does.
+            // A carried tile belongs to the board it was lifted from; changing
+            // the board out from under it would leave it hovering over a grid
+            // that never held it.
+            if (Grid::IsHolding()) return;
+            constexpr int n = static_cast<int>(Grid::Tab::kCount);
+            const int cur = static_cast<int>(Grid::ActiveTab());
+            const int next = ((cur + a_dir) % n + n) % n;   // wraps both ways
+            if (next == cur) return;
+            Grid::SetActiveTab(static_cast<Grid::Tab>(next));
+            Sfx::SelectOn();
+        }
+
         // actions -> the input this UI is already built on
         void TranslatePadButtons()
         {
@@ -936,6 +974,17 @@ namespace FUI::UIRoot
             // ONE piece of code reads the gesture (HandleSideSwap) and the two
             // input roads cannot drift apart.
             if (edge(kActSwapSide))  io.AddKeyEvent(ImGuiKey_Q, down(kActSwapSide));
+            // ★The shoulders walk ITEMS · QUEST · KEYS. Blocked while a popup
+            // owns the screen -- a quantity slider is counting out an item
+            // that lives on the board behind it, and moving that board while
+            // it counts is the one thing this gesture must not do -- and while
+            // the search box holds the keyboard. Nothing is left half-done by
+            // skipping a press: the step is instantaneous, so a release that
+            // arrives after the guard lifts has no state to clear.
+            if (!modal && !io.WantTextInput) {
+                if (edge(kActTabPrev) && down(kActTabPrev)) StepTab(-1);
+                if (edge(kActTabNext) && down(kActTabNext)) StepTab(1);
+            }
             if (edge(kActSplit)) {
                 io.AddKeyEvent(ImGuiMod_Shift, down(kActSplit));
                 io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
@@ -1013,6 +1062,32 @@ namespace FUI::UIRoot
             // nothing at all) on some setups. Same reasoning as rotation: an
             // action vanilla has never had cannot be looked up.
             if (a_idCode == K::kLeftThumb) return kActSwapSide;
+            // ★★★AND SO ARE THESE FOUR (user ask, 1.6.1) -- PINNED AHEAD OF
+            // THE LOOKUP ON PURPOSE, which is the whole reason they sit here
+            // rather than in the switch at the foot of the function.
+            //
+            // The switch below is only reached when ControlMap has NO name for
+            // a button in any of our three contexts. Both shoulders DO have
+            // one (measured: RB comes back as 'ChargeItem'), so a physical
+            // default for them was unreachable the moment the engine had an
+            // opinion -- and the engine's opinion about the shoulders is about
+            // vanilla's list menu, which has no board strip to walk. Same for
+            // Back, which vanilla spends on menu chrome we do not have.
+            //
+            // So the four are simply OURS now, in the same sense LS above is:
+            //   Back  favourite   -- was LB
+            //   RS    3D view     -- was RB (the CLICK; deflecting the right
+            //                        stick is still the scroll wheel, and the
+            //                        two cannot collide -- one is an axis, the
+            //                        other a button bit)
+            //   LB/RB the tab strip
+            // ★A rebind cannot move them any more, which is the cost. It buys
+            // a layout that is the same on every setup -- and three of the
+            // four had no vanilla meaning worth inheriting to begin with.
+            if (a_idCode == K::kBack)           return kActFavorite;
+            if (a_idCode == K::kRightThumb)     return kActInspect;
+            if (a_idCode == K::kLeftShoulder)   return kActTabPrev;
+            if (a_idCode == K::kRightShoulder)  return kActTabNext;
             auto* cm = RE::ControlMap::GetSingleton();
             auto* ue = RE::UserEvents::GetSingleton();
             if (cm && ue) {
@@ -1042,8 +1117,15 @@ namespace FUI::UIRoot
                 if (is(ue->accept))         return kActPrimary;
                 if (is(ue->equip) || is(ue->xButton)) return kActSecondary;
                 if (is(ue->dropItem) || is(ue->takeAll) || is(ue->yButton)) return kActDrop;
-                if (is(ue->toggleFavorite)) return kActFavorite;
-                if (is(ue->itemZoom))       return kActInspect;
+                // ★toggleFavorite / itemZoom USED TO BE ASKED FOR HERE, and
+                // must not be now that Back and RS carry those two outright.
+                // A pinned action that is ALSO reachable through the lookup is
+                // worse than either alone: some other button would answer to
+                // it as well, and -- because ResolvePadLabels labels an action
+                // with the FIRST button it finds carrying it -- the strip could
+                // end up printing that other button while Back is what the
+                // player is told to press. The glyph and the gesture have to
+                // come from one place.
                 if (is(ue->left))  return kActNudgeL;
                 if (is(ue->right)) return kActNudgeR;
                 if (is(ue->up))    return kActNudgeU;
@@ -1057,8 +1139,9 @@ namespace FUI::UIRoot
             case K::kA:             return kActPrimary;
             case K::kX:             return kActSecondary;
             case K::kY:             return kActDrop;
-            case K::kLeftShoulder:  return kActFavorite;
-            case K::kRightShoulder: return kActInspect;
+            // (the shoulders left this switch when they became the tab strip,
+            // and Back/RS took favourite and the 3D view -- all four are
+            // pinned at the top of this function now)
             // ★★THE TRIGGERS MEAN TWO THINGS, AND THE CURSOR SAYS WHICH.
             //
             // Holding an item, they ROTATE it. Otherwise they are the split /
@@ -1096,7 +1179,7 @@ namespace FUI::UIRoot
         // runs the binding lookup above (ControlMap + string compares) once per
         // button, so it is resolved on menu open and cached — KeyLabel() is
         // called every frame a tooltip is up.
-        const char* g_padLabel[10]{};   // indexed by Act
+        const char* g_padLabel[12]{};   // indexed by Act
         bool        g_padLabelReady = false;
 
         void ResolvePadLabels()
@@ -1110,6 +1193,11 @@ namespace FUI::UIRoot
                 { K::kLeftShoulder, "LB" }, { K::kRightShoulder, "RB" },
                 { K::kLeftTrigger, "LT" }, { K::kRightTrigger, "RT" },
                 { K::kLeftThumb, "LS" }, { K::kRightThumb, "RS" },
+                // ★The 360 name, because Skyrim's own pad glyphs are 360 ones
+                // and this strip has to read like the rest of the game's. It
+                // is the button a Series pad calls View and a PlayStation one
+                // Select / Create -- one physical button, three vendor names.
+                { K::kBack, "Back" },
                 { K::kUp, "D-Up" }, { K::kDown, "D-Down" },
                 { K::kLeft, "D-Left" }, { K::kRight, "D-Right" },
             };
@@ -1125,6 +1213,8 @@ namespace FUI::UIRoot
                 // LS, pinned in ActionForButton -- so the loop below finds it
                 // on the left thumb and the prompt bar can name the button.
                 kActSwapSide,
+                // ...and the shoulders, pinned the same way.
+                kActTabPrev, kActTabNext,
             };
             static_assert(std::size(kWanted) == std::size(g_padLabel));
 
@@ -3529,10 +3619,29 @@ namespace FUI::UIRoot
             if (g_hoverHintFrame == ImGui::GetFrameCount() && !g_hoverHint.empty()) {
                 bits = { { "", g_hoverHint } };
             } else if (IsInspectOpen()) {
-                bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
-                         { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) },
-                         { K(Act::kDrop), T(S::PromptReset), true },
-                         { "ESC", T(S::PromptClose), true } };
+                // ★On a pad the row names the BUTTONS -- this was the last
+                // branch still speaking mouse to a controller. The GESTURES are
+                // unchanged, because on a pad they already resolve to exactly
+                // the input this view listens for: the left stick drives the
+                // pointer and the primary button IS mouse button 0 (the inspect
+                // view is not one of TranslatePadButtons' `modal` popups, so it
+                // stays a click rather than becoming Enter), the right stick is
+                // the wheel (NotePadStick -> AddScrollEvent), kActDrop is the R
+                // that resets, and B closes the top layer through the same
+                // user-event channel ESC uses. Only the WORDS were wrong:
+                // "drag" and "wheel" named a device the player is not holding.
+                if (g_padActive.load()) {
+                    bits = { { K(Act::kPrimary), "" },
+                             { "L Stick", T(S::PromptOrbit) },
+                             { "R Stick", T(S::PromptZoom), true },
+                             { K(Act::kDrop), T(S::PromptReset), true },
+                             { "B", T(S::PromptClose), true } };
+                } else {
+                    bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
+                             { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) },
+                             { K(Act::kDrop), T(S::PromptReset), true },
+                             { "ESC", T(S::PromptClose), true } };
+                }
             // an explicit click deserves an answer, so this outranks every
             // ambient state below — but not an open 3D view, which is modal
             // and cannot be reached from the settings window anyway
@@ -3610,8 +3719,24 @@ namespace FUI::UIRoot
                 } else if (const auto hp = Grid::HoveredPrompt(); hp.active) {
                     bits = { { K(Act::kPrimary), T(S::PromptSelect) } };
                 } else {
-                    bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
-                             { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) } };
+                    // ★★NOT "drag orbit / wheel zoom". Those are the INSPECT
+                    // overlay's gestures and nothing else's: the only
+                    // drag-to-orbit and the only wheel-zoom in the build sit
+                    // behind `g_inspObj` in DrawInspect. And this branch is
+                    // BELOW IsInspectOpen() in the chain, so it can only ever
+                    // draw while that view is SHUT -- the row was four words
+                    // that were false every time they appeared.
+                    //
+                    // It dates from when an icon's angle was aimed by dragging
+                    // the preview. That moved twice since: the angle is typed
+                    // into the panel's RX/RY/RZ sliders now, and the 3D view
+                    // went behind the inspect key (which works in EDIT mode on
+                    // purpose -- Grid.cpp targets the same def the editor would
+                    // select, so an adopted angle lands on it). So the idle row
+                    // names THAT key: the one thing an empty cursor in EDIT can
+                    // still reach, and the place those four words are true.
+                    // Through KeyLabel, so it is pad-correct for free.
+                    bits = { { K(Act::kInspect), T(S::PromptInspect) } };
                 }
             } else if (const auto hp = Grid::HoveredPrompt(); hp.active) {
                 // ★Hovering an item takes the bar, and it carries EVERY key the
@@ -3688,6 +3813,15 @@ namespace FUI::UIRoot
             } else if (Grid::IsOverloaded()) {
                 warn = true;
                 bits = { { "", T(S::WarnOverload) }, { "", T(S::WarnOverloadFix), true } };
+            // ★★PAD ONLY, and dead last -- the idle row, which until now was
+            // blank. On a mouse the strip is three words you click, and a
+            // standing row naming a gesture the pointer already performs would
+            // be noise. On a pad it is the ONLY place the shoulders are named:
+            // nothing on screen suggests a board can be walked from a button.
+            // Same reasoning as the barter row's lone "switch side" bit.
+            } else if (g_padActive.load()) {
+                bits = { { K(Act::kTabPrev), "" },
+                         { K(Act::kTabNext), T(S::PromptTabs) } };
             }
 
             // ★Fade, and hold the last row while it fades OUT. Without the
@@ -4939,7 +5073,15 @@ namespace FUI::UIRoot
         // the ImGui translation), so it needs no lookup.
         static constexpr const char* kKeyboard[] = {
             "LMB", "RMB", "R", "F", "C", "Shift", "A", "D", "T", "Q",
+            // ★The tab strip has no key: a mouse CLICKS the word it wants, so
+            // there was never a shortcut to name. Empty rather than invented --
+            // a keycap here would promise a key that does nothing.
+            "", "",
         };
+        // ★Three tables indexed by the same enum (this one, g_padLabel and
+        // ResolvePadLabels' kWanted). Adding an Act and forgetting one of them
+        // is a silent wrong glyph, so it is a build error instead.
+        static_assert(std::size(kKeyboard) == std::size(g_padLabel));
         const auto i = static_cast<std::size_t>(a_act);
         if (i >= std::size(kKeyboard)) return "";
         // (recharge used to stop at the keyboard here -- it rides LT now and

@@ -320,11 +320,27 @@ namespace FUI::LootBarter
     [[nodiscard]] bool SliderActive();
 
     // Phase 5: favorite-sale confirm popup. a_baseTotal = speech XP points.
+    // (1.6.1) a_shortGold turns it into the POOR-MERCHANT offer instead:
+    // a_price is then the merchant's whole purse and a_fullPrice the sum the
+    // sale fell short of. Prefer AskIfMerchantShort below -- it decides which
+    // of the two (or neither) applies.
     void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal = 0,
                         const std::string& a_srcKey = {},
                         std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
                         bool a_fav = true,
-                        int a_xlIdx = -1);   // GI25 / GI36 (this popup only fires for a star)
+                        int a_xlIdx = -1,   // GI25 / GI36
+                        bool a_shortGold = false, int a_fullPrice = 0);
+
+    // ★(1.6.1) VANILLA PARITY, restored: a merchant who cannot cover the price
+    // OFFERS what they have rather than refusing the sale. Every sell road
+    // calls this before it commits and stands down when it returns true --
+    // either the buzz already sounded (an empty purse buys nothing) or the
+    // popup now owns the offer, and in both cases nothing has left the pack.
+    // a_price is the full asking price; a_fav only decorates the popup.
+    [[nodiscard]] bool AskIfMerchantShort(RE::TESBoundObject* a_obj, int a_count, int a_price,
+                                          int a_baseTotal, const std::string& a_srcKey,
+                                          std::uint16_t a_uid, std::uint16_t a_sig,
+                                          bool a_fav, int a_xlIdx);
     void DrawConfirm();   // UIRoot::Render (top level)
     [[nodiscard]] bool ConfirmActive();
 

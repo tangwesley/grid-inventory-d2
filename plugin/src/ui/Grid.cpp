@@ -2215,6 +2215,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 OffBoardUnit r;
                 r.base = a_base;
                 r.sig  = DualRing::SecondSig();   // 0 for every vanilla ring
+                // ★The uid too. This exclusion is matched against the pool the
+                // unit really belongs to, and a uid unit is the sole member of
+                // its own ("@uid") -- naming it by signature alone pointed the
+                // exclusion at a pool this unit was never in.
+                r.uid  = DualRing::SecondUid();
                 r.why  = "ring2";
                 out.push_back(std::move(r));
             }
@@ -15284,8 +15289,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             } else {
                 const int total = val > 0
                     ? LootBarter::SellPriceTotal(a_held.obj, val, a_held.count) : 0;
-                if (total > 0 && LootBarter::MerchantGold() < total) {
-                    Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
+                if (LootBarter::AskIfMerchantShort(a_held.obj, a_held.count, total,
+                                                   val * a_held.count, a_held.key,
+                                                   a_held.uid, a_held.sig, a_held.fav,
+                                                   a_held.xlIdx)) {
+                    // a merchant who can't cover it now OFFERS their purse
+                    // (vanilla parity) -- the popup owns the sale from here, so
+                    // the fragment stays split off and nothing is deducted yet.
+                    // A refusal (empty purse) lands the same way it always did.
                 } else {
                     LootBarter::RequestSell(a_held.obj, a_held.count,
                         total, val * a_held.count, a_held.uid, a_held.sig, a_held.fav,
@@ -15988,8 +15999,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         false, a_held.fav);
                 } else {
                     const int total = val > 0 ? LootBarter::SellPrice(a_held.obj, val) : 0;
-                    if (total > 0 && LootBarter::MerchantGold() < total) {
-                        Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
+                    if (LootBarter::AskIfMerchantShort(a_held.obj, 1, total, val,
+                                                       a_held.key, a_held.uid, a_held.sig,
+                                                       a_held.fav, a_held.xlIdx)) {
+                        // ★(1.6.1) VANILLA PARITY: the poor merchant offers what
+                        // they have instead of refusing. Same shape as the star's
+                        // popup below -- `queued` stays 0, so the tail leaves the
+                        // board alone until the question is answered. The star,
+                        // if this cell wore one, is folded into that same window
+                        // as a note rather than asking twice in a row.
                     } else if (a_held.fav) {
                         // ★ONE PATH / O-3: THE STAR ASKS FIRST, on both roads.
                         // This popup lived only on the right-click, so dragging

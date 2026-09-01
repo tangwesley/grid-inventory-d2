@@ -272,6 +272,14 @@ namespace FUI::UIRoot
         // ★Switch boards: Q on a keyboard, LS on a pad. Ours too -- vanilla
         // has no such action, because vanilla's container screen is one list.
         kSwapSide,
+        // ★★Walk the board strip (ITEMS · QUEST · KEYS) on the shoulders.
+        // PAD-ONLY, and the only two actions here that are: the strip is three
+        // words a mouse simply clicks, so there is no keyboard key to name and
+        // KeyLabel answers "" for them off a pad. They exist as actions anyway
+        // so the prompt bar can print the BUTTON, which is the one way a pad
+        // player finds out the gesture is there at all.
+        kTabPrev,
+        kTabNext,
     };
     [[nodiscard]] const char* KeyLabel(Act a_act);
 

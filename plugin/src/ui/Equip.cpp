@@ -504,7 +504,87 @@ namespace FUI::Equip
             // found it, and the doll would have shown an empty slot while the
             // effect was plainly active.
             if (auto* second = DualRing::Second()) {
-                add("ringL", second, 1, Grid::GlowBits(second, nullptr, nullptr));
+                // ★★★AND ITS OWN LIST, RESOLVED BY SIGNATURE.
+                //
+                // This was `GlowBits(second, nullptr, nullptr)` with no list
+                // handed to `add` at all, so the slot was built with uid 0, sig
+                // 0 and a glow byte asked of the BASE FORM alone. Every fact
+                // that lives on a unit's own ExtraDataList was therefore lost
+                // the moment a ring reached the second slot: a ring whose
+                // enchantment is per-UNIT (player-enchanted, or minted per unit
+                // by an item mod) showed no blue wedge, no extension tint and no
+                // enchantment line on the doll, while the identical tile still
+                // in the pack showed all three (user report). The stolen mark
+                // and the favourite star read the same sig and went blank for
+                // exactly the same reason.
+                //
+                // It could not come from the walk above: that walk is
+                // `entry->IsWorn()`, and this unit is deliberately NOT worn --
+                // a carrier stands in for it and the ring itself stays in the
+                // pack. So it is resolved here, by SecondSig(), which is the
+                // identity the carry recorded and the same key the board's
+                // ring2 exclusion picks this unit out of its pool with.
+                //
+                // ★ExtraForPool, NOT ExtraForUnit, and the difference matters
+                // here. There is no list position to refine with (the doll has
+                // never held one), and ExtraForUnit's last resort hands back a
+                // WORN list -- which for a same-form pair of rings is the FIRST
+                // ring's unit, exactly the one this slot must never borrow. The
+                // pool resolver excludes worn lists outright, and the carried
+                // ring is by construction a PACK unit, so nothing is lost.
+                // Sig 0 still resolves (GI39: a plain unit lives in a shared
+                // list too), which is what carries the ownership stamp the
+                // stolen mark reads.
+                RE::InventoryEntryData* rEntry = nullptr;
+                auto rInv = player->GetInventory([&](RE::TESBoundObject& o) {
+                    return &o == static_cast<RE::TESBoundObject*>(second);
+                });
+                for (auto& [robj, rdata] : rInv) {
+                    rEntry = rdata.second.get();
+                    break;
+                }
+                // ★★UID AND SIGNATURE, and passing only the second was the
+                // reason the first cut of this fix changed nothing. ExtraForPool
+                // answers a uid from its uid branch and REFUSES uid-bearing
+                // lists in its signature branch (GI42) -- so on a save where the
+                // engine hands out uids, which is most of them, asking by
+                // signature alone resolved nothing at all. Measured: the wear
+                // logged sig 0xf3a2 and the doll's own self-check printed
+                // ringL='Silver Ring'(u0000/s0000) on the same frame.
+                auto* rxl = Grid::ExtraForPool(rEntry, DualRing::SecondUid(),
+                                               DualRing::SecondSig());
+                // ★★★AND IT SAYS SO WHEN IT MISSES. This lookup has now failed
+                // twice for reasons that were invisible from the outside -- the
+                // slot simply drew a plain ring -- and each round cost a full
+                // report-build-test cycle to learn one fact about the unit. If
+                // it ever misses again, the log names every candidate it walked
+                // past and why none matched.
+                if (!rxl && (DualRing::SecondUid() || DualRing::SecondSig())) {
+                    static std::string s_prevMiss;
+                    std::string line = std::format(
+                        "[DOLL] ringL '{}' unresolved: want uid {:#06x} sig {:#06x}; lists:",
+                        second->GetName(), DualRing::SecondUid(), DualRing::SecondSig());
+                    if (!rEntry || !rEntry->extraLists) {
+                        line += " (entry has none)";
+                    } else {
+                        for (auto* xl : *rEntry->extraLists) {
+                            if (!xl) continue;
+                            std::uint16_t u = 0;
+                            if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
+                                u = xu->uniqueID;
+                            }
+                            line += std::format(" [uid {:#06x} sig {:#06x}{}{}]", u,
+                                Grid::InstanceSigOf(xl),
+                                xl->HasType<RE::ExtraWorn>() ? " worn" : "",
+                                xl->HasType<RE::ExtraEnchantment>() ? " ench" : "");
+                        }
+                    }
+                    if (line != s_prevMiss) {
+                        s_prevMiss = line;
+                        SKSE::log::warn("{}", line);
+                    }
+                }
+                add("ringL", second, 1, Grid::GlowBits(second, rEntry, rxl), rxl);
             }
 
             // ★Every accessory is in hand now, so the cells can be handed out
@@ -887,20 +967,38 @@ namespace FUI::Equip
                 ImVec2(a_w, a_h));
 
             if (!Grid::IsHolding()) {
+                // ★★The second ring has NO worn copy for the unequip queue to
+                // find: the engine is wearing a carrier, not the ring. Both
+                // click paths have to route through DualRing instead -- the
+                // right-click one because the unequip would do nothing, and the
+                // left-click one because the carry would lift the item while it
+                // stayed on the doll, reading as a duplicate.
+                // ★And the READS below want the same fact, which is why this
+                // moved up here: a scope of kWorn asks for a worn list this
+                // unit has never had, so the tooltip resolved to nothing and
+                // printed the BASE FORM -- no enchantment line, no extension
+                // tint on the name -- for a ring the pack showed in full.
+                const bool secondRing = eq && std::string_view(a_slot.id) == "ringL" &&
+                                        DualRing::Second() == eq->obj;
+
                 if (eq && ImGui::IsItemHovered()) {
                     // I1: name + stats. D1: the doll shows the WORN unit.
                     // kWorn resolves "the first worn list of this form"; with a
                     // copy in each hand that is the wrong one for one of the two
                     // slots. Hand the tooltip the list this slot actually wears.
                     Grid::DrawItemTooltip(eq->obj, eq->count, -1, -1, false, nullptr,
-                                          Grid::ExtraScope::kWorn,
+                                          secondRing ? Grid::ExtraScope::kUnit
+                                                     : Grid::ExtraScope::kWorn,
                                           eq->uid, -1, eq->sig, eq->hand,
                                           Grid::TileContext{ {}, false, false, false, true });
                     // (1.3.1) T = recharge the WORN unit -- while equipped the
                     // charge lives in this hand's AV, and OpenRecharge knows.
+                    // ★...and the carried ring is not worn: its charge is on
+                    // its own list in the pack, exactly like a spare's.
                     if (ImGui::IsKeyPressed(ImGuiKey_T, false) &&
                         !ImGui::GetIO().WantTextInput) {
-                        Grid::OpenRecharge(eq->obj, eq->uid, eq->sig, true, eq->hand);
+                        Grid::OpenRecharge(eq->obj, eq->uid, eq->sig, !secondRing,
+                                           eq->hand);
                     }
                     // ★F stars it, the same key and the same queue the board
                     // uses. The doll and the drawer are where a player looks at
@@ -932,15 +1030,6 @@ namespace FUI::Equip
                         UIRoot::OpenInspect(eq->obj, Grid::DefKeyOf(eq->obj));
                     }
                 }
-                // ★★The second ring has NO worn copy for the unequip queue to
-                // find: the engine is wearing a carrier, not the ring. Both
-                // click paths have to route through DualRing instead -- the
-                // right-click one because the unequip would do nothing, and the
-                // left-click one because the carry would lift the item while it
-                // stayed on the doll, reading as a duplicate.
-                const bool secondRing = eq && std::string_view(a_slot.id) == "ringL" &&
-                                        DualRing::Second() == eq->obj;
-
                 if (eq && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {   // D5
                     if (secondRing) {
                         SKSE::log::info("[ACT] rclick-unequip second ring '{}'",
@@ -1440,8 +1529,13 @@ namespace FUI::Equip
             // fell through to the plain engine swap. Only a same-form pair
             // ever routed -- its worn sibling survived on the pass's sameUnit
             // exemption. The router must read the board BEFORE anyone clears
-            // it. (Wear ignores its list argument, so resolving srcList later
-            // costs this call nothing.)
+            // it.
+            // ★★AND IT PASSES ITS LIST NOW. This used to hand Wear a nullptr on
+            // the note that "Wear ignores its list argument" -- true then, and
+            // the reason the second slot could not wear a per-unit enchantment:
+            // Wear reads the list for the effect it lends AND for the signature
+            // that names the unit. Resolved here by pool, exactly as the drop
+            // path below resolves srcList.
             if (act.slotId.empty()) {
                 if (auto* ringIn = obj->As<RE::TESObjectARMO>();
                     ringIn && Grid::IsRing(ringIn) && !DualRing::IsCarrier(ringIn)) {
@@ -1450,7 +1544,15 @@ namespace FUI::Equip
                     // FALLBACK for callers that have no board to aim from --
                     // the wheel, which equips slotless while our menu is shut.
                     const bool toSecond = RingWantsSecondSlot(ringIn);
-                    if (toSecond && DualRing::Wear(ringIn, nullptr)) {
+                    // ★A slotless wheel equip names no unit (uid 0 / sig 0) and
+                    // resolves to nothing; RingEnch's form-wide fallback is what
+                    // covers that caller.
+                    RE::ExtraDataList* ringXl =
+                        (act.uid != 0 || act.sig != 0)
+                            ? Grid::ExtraForPool(Grid::LiveEntryOf(player, obj),
+                                                 act.uid, act.sig)
+                            : nullptr;
+                    if (toSecond && DualRing::Wear(ringIn, ringXl)) {
                         Grid::ForgetTile(act.srcKey);   // rule 13, same as the drop path
                         Grid::NoteFormSeen(obj);
                         // B4-4: one tile's exit, not a repaint (see the ringL

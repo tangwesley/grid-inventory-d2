@@ -1725,18 +1725,47 @@ namespace FUI::Wheeler
         // events behind them are silenced instead, one layer earlier, with the
         // same blank-call-restore the wheel uses for movement.
         //
-        // ★Matching on the user event rather than the scancode is what the
-        // engine's own handlers do, so a rebound attack or sneak key is covered
-        // for free -- and it is the reason this list is written out by name
-        // instead of being derived from the flags it stands in for.
-        [[nodiscard]] bool IsStanceEvent(const RE::BSFixedString& a_ue)
+        // ★★★IT USED TO BE A LIST OF SEVEN EVENT NAMES -- leftAttack,
+        // rightAttack, dualAttack, forceRelease, readyWeapon, shout, sneak --
+        // chosen to stand in for exactly the two flags above. That was the bug:
+        // the list answers "which buttons do kFighting and kSneaking govern",
+        // when the question this hook actually has to answer is "which buttons
+        // can drive the player while the board is up", and the second is only
+        // equal to the first if the ControlMap mask covers everything else.
+        //
+        // It does not. `kBlockedMask` in main.cpp deliberately leaves kMenu up
+        // (menus must keep working), and a controlmap is free to put a gameplay
+        // event on a kMenu-only flag word: measured on this machine's
+        // controlmap, Main Gameplay's `Wait` (flags 0x808) and `Journal`
+        // (0x808) carry no masked bit and no stance name, so both reached the
+        // player through a hole the list could not see. Wait sits on Back --
+        // which is the favourite button now.
+        //
+        // So the filter is gone. PlayerControls drives the PLAYER and nothing
+        // else; while our board holds the mask there is no button on any device
+        // whose gameplay meaning we want, so every one of them is blanked and
+        // put straight back. A rebind cannot open a new hole in a rule with no
+        // list in it. (Thumbsticks are deliberately untouched -- movement and
+        // look are flag-masked already, and our own cursor reads the sticks
+        // from the restored event.)
+        [[nodiscard]] bool IsMenuOpenEvent(const RE::BSFixedString& a_ue)
         {
+            // The MenuControls half of the same door (see MenuLock). These are
+            // the events that OPEN a vanilla menu from gameplay; they are not
+            // routed through PlayerControls at all, so the blanking above never
+            // sees them. None is anything our board needs -- it reads Accept /
+            // Cancel / the directions / X / Y, and not one of those is here --
+            // which is what makes a targeted list safe on this hook where a
+            // blanket one would eat our own menu's input.
             auto* ue = RE::UserEvents::GetSingleton();
             if (!ue) return false;
-            return a_ue == ue->leftAttack || a_ue == ue->rightAttack ||
-                   a_ue == ue->dualAttack || a_ue == ue->forceRelease ||
-                   a_ue == ue->readyWeapon || a_ue == ue->shout ||
-                   a_ue == ue->sneak;
+            return a_ue == ue->wait || a_ue == ue->journal ||
+                   a_ue == ue->tweenMenu || a_ue == ue->favorites ||
+                   a_ue == ue->quickInventory ||
+                   a_ue == ue->hotkey1 || a_ue == ue->hotkey2 ||
+                   a_ue == ue->hotkey3 || a_ue == ue->hotkey4 ||
+                   a_ue == ue->hotkey5 || a_ue == ue->hotkey6 ||
+                   a_ue == ue->hotkey7 || a_ue == ue->hotkey8;
         }
 
         struct InputLock
@@ -1792,13 +1821,15 @@ namespace FUI::Wheeler
                         b->GetRuntimeData().value = 0.0f;
                     }
                 } else if (a_event && UIRoot::IsGameplayMasked()) {
-                    // ★The grid's half (see IsStanceEvent above). An `else`,
-                    // not a second pass: with the wheel up every button is
-                    // already blanked, and blanking one twice would restore the
-                    // zero rather than the value.
+                    // ★The grid's half (see the note above the helpers). An
+                    // `else`, not a second pass: with the wheel up every button
+                    // is already blanked, and blanking one twice would restore
+                    // the zero rather than the value.
+                    // ★No name filter any more -- every button, because there
+                    // is no gameplay button we want while the board is up.
                     for (auto* e = *a_event; e; e = e->next) {
                         auto* b = e->AsButtonEvent();
-                        if (!b || !IsStanceEvent(b->QUserEvent())) continue;
+                        if (!b) continue;
                         if (n >= 16) continue;   // no blank without a restore
                         saved[n++] = { b, b->Value() };
                         b->GetRuntimeData().value = 0.0f;
@@ -1935,6 +1966,37 @@ namespace FUI::Wheeler
                             if (!InCombo(pad, b->GetIDCode())) continue;
                         }
                         if (n >= 16) continue;   // see InputLock: no blank without a restore
+                        saved[n++] = { b, b->Value() };
+                        b->GetRuntimeData().value = 0.0f;
+                    }
+                // ★★★THE GRID'S HALF, AND IT HAD TO BE ON THIS HOOK.
+                //
+                // `Wait` and `Journal` are opened by MenuOpenHandler, which is
+                // a MENUCONTROLS handler -- InputLock above never sees them, so
+                // blanking every button there does not touch either one. They
+                // are the two Main Gameplay events on this machine's controlmap
+                // that carry no bit `kBlockedMask` takes down, and Wait sits on
+                // Back: the button favourite now uses.
+                //
+                // ★An `else if`, so it cannot fight the wheel's own pass over
+                // the same events (double-blanking restores the zero).
+                // ★And a NAMED list, unlike InputLock -- the opposite choice on
+                // purpose. This hook is upstream of every menu including ours:
+                // the board's Cancel-to-close arrives through here, so blanking
+                // wholesale would wall the player into a menu they cannot shut.
+                // Only the gameplay menu-openers are taken, and none of them is
+                // an event the board reads.
+                //
+                // ★It also asks nothing about `g_enabled`. The wheel's branch
+                // above is gated on the wheel being switched on and on no menu
+                // owning input -- and our board sets kUsesMenuContext, so it
+                // trips AnotherMenuOwnsInput() every time. The wheel's gate is
+                // the wheel's; the board's mask is its own question.
+                } else if (a_event && UIRoot::IsGameplayMasked()) {
+                    for (auto* e = *a_event; e; e = e->next) {
+                        auto* b = e->AsButtonEvent();
+                        if (!b || !IsMenuOpenEvent(b->QUserEvent())) continue;
+                        if (n >= 16) continue;   // no blank without a restore
                         saved[n++] = { b, b->Value() };
                         b->GetRuntimeData().value = 0.0f;
                     }

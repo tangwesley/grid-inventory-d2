@@ -281,6 +281,9 @@ namespace FUI::LootBarter
 
         // Phase 5: favorite-sale confirm popup — a single favorited item asks
         // before selling (prevents fat-finger loss of a marked item).
+        // ★(1.6.1) SECOND REASON TO ASK, same window: the merchant cannot cover
+        // the full price. Vanilla offered the short sale rather than refusing
+        // it, and this inventory dropped that offer -- see AskSellConfirm.
         struct SellConfirm
         {
             bool                active = false;
@@ -293,6 +296,15 @@ namespace FUI::LootBarter
             std::uint16_t       sig = 0;
             bool                fav = false;   // GI36
             int                 xlIdx = -1;    // (1.3.3) which unit leaves
+            bool                shortGold = false;   // price is the purse, not the worth
+            int                 fullPrice = 0;       // what it would have paid
+            // ★The frame the popup was RAISED on. Every road here runs EARLIER
+            // in the same frame than DrawConfirm (the slider's own confirm, a
+            // drop handled while the grid draws), and ImGui reports a key press
+            // to every caller for the whole frame -- so one Enter both confirmed
+            // the slider and answered the question it had just asked. The
+            // window shows, and stands down from input, for that one frame.
+            int                 frame = -1;
         };
         SellConfirm g_confirm;
 
@@ -2573,8 +2585,13 @@ namespace FUI::LootBarter
             }
             case XferDir::kSell: {
                 const int total = SellPriceTotal(g_slider.obj, g_slider.unitValue, g_slider.value);
-                if (total > 0 && MerchantGold() < total) {
-                    Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
+                if (AskIfMerchantShort(g_slider.obj, g_slider.value, total,
+                                       g_slider.unitValue * g_slider.value,
+                                       g_slider.srcKey, g_slider.uid, g_slider.sig,
+                                       g_slider.fav, g_slider.xlIdx)) {
+                    // the popup inherited the sale (or the purse was empty):
+                    // the slider closes below either way and the board is
+                    // untouched, so the pending-remove waits for the answer
                 } else {
                     RequestSell(g_slider.obj, g_slider.value, total,
                         g_slider.unitValue * g_slider.value,
@@ -2596,13 +2613,48 @@ namespace FUI::LootBarter
 
     void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
                         const std::string& a_srcKey, std::uint16_t a_uid, std::uint16_t a_sig,
-                        bool a_fav, int a_xlIdx)
+                        bool a_fav, int a_xlIdx, bool a_shortGold, int a_fullPrice)
     {
         if (a_obj && a_count > 0) {
             g_confirm = { true, a_obj, a_count, a_price, a_baseTotal, a_srcKey, a_uid, a_sig,
-                          a_fav, a_xlIdx };
+                          a_fav, a_xlIdx, a_shortGold,
+                          a_shortGold ? a_fullPrice : a_price,
+                          ImGui::GetFrameCount() };
             Sfx::SelectOn();
         }
+    }
+
+    // ★★(1.6.1) THE POOR-MERCHANT GATE, and the reason it exists: the three
+    // sell roads (slider, dragged stack fragment, dragged whole tile) each
+    // answered "the merchant can't cover this" with a buzz and moved nothing.
+    // VANILLA NEVER REFUSED THAT SALE -- it asked, and paid out the merchant's
+    // last coin. Three copies of the check meant three places to restore it, so
+    // the check lives here once and each road only asks whether it still owns
+    // the sale.
+    //
+    // Returns true when this function HANDLED it -- the buzz for an empty
+    // purse, or the popup now holding the offer. Either way nothing left the
+    // player's pack, so the caller must not sell and must not touch the board.
+    bool AskIfMerchantShort(RE::TESBoundObject* a_obj, int a_count, int a_price,
+                            int a_baseTotal, const std::string& a_srcKey,
+                            std::uint16_t a_uid, std::uint16_t a_sig,
+                            bool a_fav, int a_xlIdx)
+    {
+        // A free sale (price 0) has nothing for the merchant to be short OF --
+        // it is the valueless-goods case, not the poor-merchant one.
+        if (!a_obj || a_count <= 0 || a_price <= 0) return false;
+        const int purse = MerchantGold();
+        if (purse >= a_price) return false;   // they can pay in full: not our case
+        // An empty purse is not a discount, it is a giveaway: vanilla's offer
+        // is "take everything I have", and here that is nothing. Refuse it the
+        // way this menu always has, rather than asking the player to donate.
+        if (purse <= 0) {
+            Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
+            return true;
+        }
+        AskSellConfirm(a_obj, a_count, purse, a_baseTotal, a_srcKey, a_uid, a_sig,
+                       a_fav, a_xlIdx, /*shortGold=*/true, /*fullPrice=*/a_price);
+        return true;
     }
 
     bool ConfirmActive() { return g_confirm.active; }
@@ -2625,18 +2677,39 @@ namespace FUI::LootBarter
 
         const std::string title = PopupTitleOf(g_confirm.obj);
         const char* const name = title.c_str();
-        const char* question = Lang::T(Lang::Str::SellFavoriteConfirm);
+        // ★★WHAT THE WINDOW SAYS depends on WHY it opened. The star's question
+        // was the only one it ever asked; the poor merchant's is the second,
+        // and when both are true the money question leads (it is the one whose
+        // answer costs gold) with the star demoted to a note -- two questions
+        // stacked read as one contradicting the other.
+        const bool shortGold = g_confirm.shortGold;
+        const char* const question = Lang::T(shortGold
+            ? Lang::Str::MerchantShortGoldConfirm : Lang::Str::SellFavoriteConfirm);
         char priceLine[32];
         std::snprintf(priceLine, sizeof(priceLine), "%d G", g_confirm.price);
+        // ★The number the player is GIVING UP, spelled out. A short sale is a
+        // loss taken on purpose, and "250 G" alone never says how big it is.
+        char fullLine[64] = {};
+        if (shortGold) {
+            std::snprintf(fullLine, sizeof(fullLine),
+                Lang::T(Lang::Str::SellFullPrice), g_confirm.fullPrice);
+        }
+        const char* const favNote = (shortGold && g_confirm.fav)
+            ? Lang::T(Lang::Str::SellFavoriteNote) : nullptr;
 
         const float lineH = ImGui::GetTextLineHeightWithSpacing();
         const float sp = ImGui::GetStyle().ItemSpacing.y;
+        // question + price, plus the full-price line and the star's note when
+        // this is a short sale
+        const int bodyLines = 2 + (shortGold ? 1 : 0) + (favNote ? 1 : 0);
         const float contentW = (std::max)({ btnRow,
             ImGui::CalcTextSize(question).x,
+            shortGold ? ImGui::CalcTextSize(fullLine).x : 0.0f,
+            favNote ? ImGui::CalcTextSize(favNote).x : 0.0f,
             ImGui::CalcTextSize(name).x * 1.35f });
         const ImVec2 size(
             contentW + 30.0f * S + 2.0f * insX,
-            barH + 8.0f * S + 2.0f * lineH + sp + 6.0f * S +
+            barH + 8.0f * S + bodyLines * lineH + sp + 6.0f * S +
                 ImGui::GetFrameHeight() + 18.0f * S + 2.0f * insY);
         if (wm->BeginConfirmPopup("sellconfirm", "##gi_sellconfirm", name, size)) {
             g_confirm.active = false;   // outside click cancels
@@ -2651,20 +2724,51 @@ namespace FUI::LootBarter
         center(ImGui::CalcTextSize(question).x);
         ImGui::TextColored(sk.ink, "%s", question);
         center(ImGui::CalcTextSize(priceLine).x);
-        ImGui::TextColored(Theme::ValVec(), "%s", priceLine);   // a price is a figure
+        // a price is a figure — and on a short sale THIS is the payout, so it
+        // keeps the figure colour while the price it fell short of goes dim
+        ImGui::TextColored(Theme::ValVec(), "%s", priceLine);
+        if (shortGold) {
+            center(ImGui::CalcTextSize(fullLine).x);
+            ImGui::TextColored(sk.inkDim, "%s", fullLine);
+        }
+        if (favNote) {
+            center(ImGui::CalcTextSize(favNote).x);
+            ImGui::TextColored(sk.inkDim, "%s", favNote);
+        }
 
         ImGui::Dummy(ImVec2(0.0f, 6.0f * S));
         center(btnRow);
+        // ★The frame it opened on is the frame some other popup's confirm key
+        // is still being reported on (see SellConfirm::frame) -- the window
+        // draws, but nothing it drew can be pressed yet.
+        const bool fresh = ImGui::GetFrameCount() == g_confirm.frame;
         // GI52 typing guard + the pointed-at-Cancel rule live in Sfx::ConfirmKey
-        const bool keyOk = Sfx::ConfirmKey();
-        const bool okClick = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0));
+        const bool keyOk = !fresh && Sfx::ConfirmKey();
+        const bool okClick = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0)) &&
+                             !fresh;
         ImGui::SameLine(0.0f, 8.0f * S);
-        const bool cancel = Sfx::CancelButton(Lang::T(Lang::Str::Cancel),
-                                              ImVec2(btnW, 0), keyOk) ||
-                            ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+        const bool cancel = (Sfx::CancelButton(Lang::T(Lang::Str::Cancel),
+                                               ImVec2(btnW, 0), keyOk) ||
+                             ImGui::IsKeyPressed(ImGuiKey_Escape, false)) && !fresh;
         const bool ok = !cancel && (okClick || keyOk);
         if (ok) {
-            RequestSell(g_confirm.obj, g_confirm.count, g_confirm.price, g_confirm.base,
+            // ★★RE-READ THE PURSE AT THE ANSWER, not at the question. The offer
+            // was "all the gold they have", and how much that is was measured a
+            // frame or a hundred ago -- a merchant who has since been paid (a
+            // buy settling out of the same window) must not hand over a figure
+            // they no longer hold, and one who has since been emptied must not
+            // be robbed of goods for nothing.
+            int price = g_confirm.price;
+            if (g_confirm.shortGold) {
+                price = (std::min)(price, MerchantGold());
+                if (price <= 0) {
+                    Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
+                    g_confirm.active = false;
+                    ImGui::End();
+                    return;
+                }
+            }
+            RequestSell(g_confirm.obj, g_confirm.count, price, g_confirm.base,
                         g_confirm.uid, g_confirm.sig, g_confirm.fav, g_confirm.xlIdx,
                         g_confirm.srcKey);
             Grid::NotePendingRemove(g_confirm.obj, g_confirm.srcKey, g_confirm.count,

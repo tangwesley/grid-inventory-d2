@@ -142,6 +142,11 @@ namespace FUI::Lang
         X(MerchantGoldLabel, "Merchant Gold")                                                               \
         X(MerchantNoGold, "Merchant can't afford that")                                                     \
         X(SellFavoriteConfirm, "Sell this favorited item?")                                                 \
+        /* vanilla parity: a merchant too poor for the whole price ASKS instead of refusing -- */           \
+        /* confirming sells the goods for every coin they still have.                          */           \
+        X(MerchantShortGoldConfirm, "The merchant is short on gold. Sell for all they have?")               \
+        X(SellFullPrice, "Full price: %d G")   /* what the sale WOULD have paid */                          \
+        X(SellFavoriteNote, "This item is favorited")   /* the star's warning, as a note */                 \
         X(MerchantWontBuy, "The merchant doesn't deal in that")   /* Phase 6 restriction */                 \
         X(QuestItemLocked, "Quest items can't be removed")   /* Phase 7 quest guard */                      \
         X(TakeLabel, "Take")   /* slider action labels */                                                   \
@@ -259,6 +264,7 @@ namespace FUI::Lang
         X(PromptMax, "all")                                                                                 \
         X(PromptTakeAll, "take all")                                                                        \
         X(PromptSwitchSide, "switch side")   /* Q / LS: pointer to the other board (loot & barter) */       \
+        X(PromptTabs, "switch board")   /* LB/RB: walk ITEMS-QUEST-KEYS. Pad only (a mouse clicks it) */    \
         X(PromptQty, "set quantity")                                                                        \
         X(PromptSave, "save")                                                                               \
         X(PromptDrag, "drag")                                                                               \
