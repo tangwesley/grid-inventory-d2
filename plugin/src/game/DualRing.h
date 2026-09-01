@@ -4,205 +4,227 @@
 
 // THE SECOND RING -- WORN FOR REAL.
 //
-// The engine wears exactly one. BipedAnim is `BIPOBJECT objects[kTotal]` --
-// one item per slot -- and kRing is a single bit, so two rings claiming that
-// bit means the engine takes the first one off. Moving the slot does not help:
-// probed three ways (both masks moved, ARMO only, and claiming NO slot at all)
-// the engine took the first ring off every time.
+// The engine only ever wears one ring. BipedAnim is `BIPOBJECT
+// objects[kTotal]`, one item per slot, and kRing is a single bit -- so when two
+// rings both claim that bit, the engine takes the first one off. Moving the
+// slot does not help. We probed three ways (moving both masks, moving the ARMO
+// mask only, and claiming no slot at all) and the engine removed the first ring
+// every time.
 //
-// ★So the contest is ENDED rather than worked around: the ring already on the
-// body gives up its kRing bit, and the incoming one takes the slot with
-// nothing to displace. Both are then engine-worn in every sense the rest of
-// this plugin asks about -- ExtraWorn, effects, tooltips, the doll walk, the
-// board's worn accounting -- and none of them needs a special case.
+// So instead of working around the contest, we end it: the ring already on the
+// body gives up its kRing bit, and the incoming ring takes the slot with
+// nothing left to displace. Both rings are then worn by the engine in every
+// sense the rest of the plugin cares about -- ExtraWorn, active effects,
+// tooltips, the doll walk, the board's worn accounting -- so none of those
+// needs a special case for the second ring.
 //
-// ★★THIS REPLACES A CARRIER, and the replacement is why the 1.5.x bug cannot
-// come back. That version equipped an invisible costume anchor and copied the
-// ring's `formEnchanting` onto it. A PLAYER-ENCHANTED ring keeps its
-// enchantment on the INSTANCE (ExtraEnchantment), not on the record, so there
-// was nothing to copy: no effects applied at all, and the item showed its
-// unenchanted value (user report, 1.5.0 -- "Enchantment disappear after
-// equipping", value 4362 -> 500). Wearing the real item cannot have that bug.
-// The technique is Jewelry Limiter's (dylbill, Nexus 22098), which reaches the
-// same end from Papyrus with RemoveSlotFromMask.
+// WHY THIS REPLACED THE OLD "CARRIER" APPROACH.
+// Version 1.5.x equipped an invisible costume anchor and copied the ring's
+// `formEnchanting` onto it. That cannot work for a ring the player enchanted
+// themselves, because a player enchantment lives on the unit's ExtraEnchantment
+// and not on the record -- there was nothing to copy. The result was a ring
+// with no effects at all, showing its unenchanted value (reported against
+// 1.5.0: "Enchantment disappear after equipping", value dropping 4362 -> 500).
+// Wearing the real item cannot reproduce that bug. The technique we use is
+// Jewelry Limiter's (dylbill, Nexus 22098), which does the same thing from
+// Papyrus with RemoveSlotFromMask.
 //
-// ★★★STILL NOT DRAWN, and now for a smaller and more honest reason than the
-// one this file used to give. An ARMO with no biped slot has nowhere for
-// BipedAnim to put it, so the ring that gave up its bit is invisible; a ring's
-// mesh also carries slot 36 inside the NIF, which the first ring holds.
-// The old note called that settled after two routes (inside the equipment
-// system, and a hand-loaded model through BSModelDB, which comes back
-// `skin=NO`). ★A THIRD ROUTE EXISTS and Left Hand Rings SKSE takes it: deep-copy
-// the part the engine ALREADY skinned, rewrite `NiSkinInstance::bones` onto
-// another finger, and force the partition on with
+// THE SECOND RING IS STILL NOT DRAWN ON THE HAND.
+// An ARMO with no biped slot gives BipedAnim nowhere to put it, so the ring
+// that gave up its bit is invisible. A ring's mesh also has slot 36 baked into
+// the NIF, and the first ring holds that slot. We tried two routes -- going
+// through the equipment system, and hand-loading the model through BSModelDB,
+// which comes back `skin=NO`. A third route does exist: Left Hand Rings SKSE
+// deep-copies the part the engine has already skinned, rewrites
+// `NiSkinInstance::bones` onto another finger, and forces the partition on with
 // `BSDismemberSkinInstance::UpdateDismemberPartion(slot, true)`. That is a
-// piece of work of its own and is not attempted here -- but it is not
-// impossible, and this comment should stop saying that it is.
+// sizeable piece of work and we have not attempted it -- but it is possible,
+// and this comment should not claim otherwise.
 //
-// ★★★★NOTHING IS REMEMBERED ACROSS A LOAD, deliberately. The engine re-reads
-// ARMO records from the plugin every load -- measured, and the reason the old
-// carrier had to re-lend its enchantment there -- so the bits we took are
-// already back by the time a save opens. Rather than serialise a debt the load
-// has cancelled, the invariant is re-derived from the body: see Tick.
+// NOTHING IS SAVED ACROSS A LOAD, on purpose. The engine re-reads ARMO records
+// from the plugin on every load (measured -- it is also why the old carrier had
+// to re-copy its enchantment there), so the slot bits we removed are already
+// restored by the time a save opens. Rather than serialise a debt the load has
+// already cancelled, we re-derive the arrangement from the body itself. See
+// Tick.
 namespace FUI::DualRing
 {
-    // ---- no rules ---------------------------------------------------------
-    // ★★★THERE ARE NO REFUSALS. A ring dropped on either cell goes on.
+    // ---- there are no refusals --------------------------------------------
+    // A ring dropped on either cell goes on. Nothing here rejects one.
     //
-    // Two used to live here -- "not another unit of a worn form" and "not the
-    // same magic effect twice" -- and both are gone for the same reason: each
-    // sat on ONE road (the second cell's drop) while the right-hand cell, a
-    // click and the wheel let the very same pair through. ★A rule kept on half
-    // the roads is worse than no rule: it annoys the player who meets it and
-    // does nothing about the player who does not.
+    // Two rules used to live here -- "not another unit of a form you are
+    // already wearing" and "not the same magic effect twice" -- and both were
+    // removed for the same reason: each only ran on the second cell's drop,
+    // while the right-hand cell, an ordinary click and the quick wheel all let
+    // the same pair through. A rule enforced on only some of the paths is worse
+    // than no rule at all: it inconveniences the player who happens to hit it
+    // and does nothing about the player who does not.
     //
-    // The effect rule also had a technical reason once, and lost it. Under the
-    // carrier ONE stand-in wore a borrowed enchantment, so a duplicate really
-    // was a strange state. Both rings are engine-worn now and the game applies
-    // both effects perfectly well (measured) -- whether that is desirable is a
-    // BALANCE question, and vanilla never had to answer it because vanilla
-    // wears one ring.
+    // The duplicate-effect rule also had a technical reason once, and lost it.
+    // Under the carrier, a single stand-in wore a borrowed enchantment, so two
+    // rings with one effect really was a broken state. Both rings are worn by
+    // the engine now and the game applies both effects correctly (measured).
+    // Whether wearing two of the same effect *should* be allowed is a balance
+    // question, and vanilla never had to answer it because vanilla wears one
+    // ring.
     //
-    // ★★And removing it took a whole class of bugs with it: the effect test was
-    // the only reason the drop GATE had to work out which UNIT was coming, and
-    // a plain unit carries no uid and no list index to be named by. It named
-    // the wrong one -- refusing a plain ring for the enchantment of an
-    // enchanted sibling, and only in one left/right order (measured).
+    // Removing that rule also removed a whole class of bugs. The effect test
+    // was the only reason the drop gate had to work out which unit was arriving
+    // -- and a plain unit has no uid and no list index to be identified by, so
+    // the gate regularly picked the wrong one. It would refuse a plain ring
+    // because of an enchanted sibling's enchantment, and only when the two were
+    // put on in one particular order (measured).
 
     // ---- which ring is which ----------------------------------------------
-    // ★★DOES THIS RING HOLD THE ENGINE'S RING SLOT -- is it the one you can
-    // SEE on the hand? This is what the doll's two ring cells mean:
+    // Does this ring hold the engine's ring slot -- is it the one you can
+    // actually see on the hand? This is what the doll's two ring cells show:
     //
     //     ringR = the ring holding kRing (drawn on the hand)
-    //     ringL = the one that gave the slot up
+    //     ringL = the ring that gave the slot up
     //
-    // ★They used to mean nothing physical at all. The doll filled ringR with
-    // whichever worn ring the inventory walk reached first -- hash order -- and
-    // the slot bit went to the lowest FormID, so "the visible ring" and "the
-    // right-hand cell" were independent answers that happened to agree.
-    // A drop then aimed at one ring and the engine displaced the other
-    // (measured 2026-09-01: the cursor took a ring that was still worn, and
-    // the board needed a full rebuild to recover).
+    // These cells used to mean nothing physical. The doll put whichever worn
+    // ring the inventory walk happened to reach first into ringR -- hash order
+    // -- while the slot bit went to the lowest FormID. "The visible ring" and
+    // "the right-hand cell" were two independent answers that merely tended to
+    // agree. When they disagreed, a drop aimed at one ring and the engine
+    // displaced the other (measured 2026-09-01: the cursor picked up a ring
+    // that was still worn, and the board needed a full rebuild to recover).
     [[nodiscard]] bool HoldsRingSlot(const RE::TESObjectARMO* a_armo);
 
-    // ★★★...BUT THE CELL IS NOT THE BIT, and tying them together was wrong in
-    // the other direction. The bit moves for mechanical reasons -- the equip
-    // takes it off whatever stays so the incoming ring can join -- so the
-    // NEWEST ring always ended up holding it, and "cell = holder" then put
-    // every new ring on the RIGHT and slid the old one LEFT. A ring dropped on
-    // the left cell appeared on the right, and the pair looked like it had
-    // swapped places for no reason the player did (user report).
-    // ★So the cell is remembered as PLACEMENT -- where the player put it --
-    // and the bit is left free to do its job underneath. They answer different
-    // questions and neither has to follow the other.
-    // ★★Keyed by form AND content signature, so a plain ring and an enchanted
-    // one of the same kind keep their own cells. Two units that match on both
-    // are interchangeable to every reader here, and either may take the seat.
-    // ★★★WRITING it is private -- PrepareForEquip records the placement as
-    // part of the one act, and that is the only moment anything knows where
-    // the player put a ring. The setter was public while a caller still had
-    // to sequence the three functions by hand; leaving it public now would
-    // invite exactly the protocol that consolidation removed.
-    // Does this ring unit belong in the LEFT cell? False also means "no
-    // opinion" -- the doll then falls back to the slot bit, which is right for
-    // a pair the player never placed by hand.
+    // Which cell does this ring unit belong in? The cell is NOT the slot bit,
+    // and tying the two together was wrong in the other direction.
+    //
+    // The bit moves for mechanical reasons -- an equip takes it off whatever
+    // stays so the incoming ring can join -- so the newest ring always ends up
+    // holding it. With "cell = bit holder", every new ring appeared on the
+    // right and pushed the old one to the left, so a ring dropped on the LEFT
+    // cell showed up on the RIGHT and the pair looked like it had swapped
+    // places for no reason (user report).
+    //
+    // So a cell is remembered as PLACEMENT -- where the player put the ring --
+    // and the slot bit is left free to do its own job underneath. The two
+    // answer different questions and neither has to follow the other.
+    //
+    // Placement is keyed by form AND content signature, so a plain ring and an
+    // enchanted ring of the same kind keep their own cells. Two units matching
+    // on both are interchangeable to every reader here, and either may take the
+    // seat.
+    //
+    // Writing the placement is private: PrepareForEquip records it as part of
+    // the same action, which is the only moment anything knows where the player
+    // put a ring. The setter was public back when callers still had to call
+    // three functions in the right order by hand; leaving it public now would
+    // invite exactly the fragile protocol that consolidation removed.
+    //
+    // Returns false both for "belongs in the right cell" and for "no opinion".
+    // The doll then falls back to the slot bit, which is the right answer for a
+    // pair the player never placed by hand.
     [[nodiscard]] bool IsSecondCell(const RE::TESObjectARMO* a_armo, std::uint16_t a_sig);
-    // Has the player placed ANYTHING in the left cell? ★The doll needs this
-    // separately: its walk is in inventory order, so an unplaced ring can
-    // reach the cell first and take the seat the placed one was promised.
+
+    // Has the player placed anything in the left cell at all? The doll needs
+    // this as a separate question, because its walk runs in inventory order: an
+    // unplaced ring can reach the cell first and take the seat that a
+    // deliberately placed ring was promised.
     [[nodiscard]] bool HasSecondCell();
 
-    // ---- the one act -------------------------------------------------------
-    // ★★★A RING IS ABOUT TO BE EQUIPPED. LEAVE THE BODY READY FOR IT.
+    // ---- the one action ---------------------------------------------------
+    // A ring is about to be equipped. Leave the body ready for it.
     //
-    //   a_incoming   the ring going on
-    //   a_sig        its content signature (names the UNIT)
-    //   a_aimed      the UNIT the player pointed at -- the cell's occupant, as
-    //                the worn list that names it. null for a click or the
-    //                wheel, which point at nothing
-    //   a_secondCell the drop named the LEFT cell
+    //   a_incoming    the ring going on
+    //   a_sig         its content signature, which names the unit
+    //   a_aimed       the unit the player pointed at -- the cell's current
+    //                 occupant, given as the worn list that names it. Null for
+    //                 a click or the quick wheel, which point at nothing
+    //   a_secondCell  the drop named the LEFT cell
     //
-    // Takes off whatever must leave, hands the slot bit round so the engine
-    // single-ends nothing, and records the placement. ★The caller must SKIP
-    // its conflict pass for rings afterwards -- everything is already arranged,
-    // and that pass would undo it.
+    // This takes off whatever has to leave, moves the slot bit around so the
+    // engine has nothing to displace, and records the placement. The caller
+    // must then SKIP its own conflict pass for rings: everything is already
+    // arranged and that pass would undo it.
     //
-    // ★★★★a_aimed IS A UNIT AND WAS A FORM, and the difference is a bug the
-    // player could see. The cell's occupant arrived here as `occ->As<ARMO>()`
-    // -- so with two units of ONE form on the body, "the ring in this cell"
-    // matched whichever came first in INVENTORY order. The wrong one came off,
-    // the board handed the cursor the one it thought it had displaced, and
-    // that ring was still on the finger: a phantom the player could only drop
-    // into nothing, while the other ring went quietly into the pack (user
-    // report). ★Two units alike in uid AND signature stay interchangeable --
-    // removing either is the same act to every reader here, including the
-    // player -- so naming the unit by pool is exact where exactness exists and
-    // arbitrary only where the difference does not exist either.
+    // a_aimed is a UNIT, and it used to be a form. That difference was a bug
+    // the player could see. The cell's occupant arrived here as
+    // `occ->As<ARMO>()`, so when two units of one form were on the body, "the
+    // ring in this cell" matched whichever came first in inventory order. The
+    // wrong ring came off, the board handed the cursor the ring it believed it
+    // had displaced, and that ring was actually still on the finger -- leaving
+    // the player with a phantom they could only drop into nothing, while the
+    // other ring went quietly into the pack (user report).
     //
-    // ★★THIS WAS THREE FUNCTIONS AND A PROTOCOL. MakeRoom / TakeOneOff /
-    // NoteSecondCell had to be called in the right order, by every road a ring
-    // can arrive on, and the caller had to know which road it was on. The order
-    // was got wrong four times in one day -- a click path that skipped the cap,
-    // a drop path that skipped it too, a missing second MakeRoom, and a swap
-    // that removed a ring the caller was also removing. A caller that must know
-    // a sequence is a caller that will get the sequence wrong.
+    // Two units alike in both uid and signature stay interchangeable: removing
+    // either is the same act to every reader here, the player included. So
+    // naming the unit by pool is exact wherever exactness is possible, and
+    // arbitrary only where there is no difference to get wrong.
     //
-    // ★★★And the engine cannot be asked to help. Its conflict pass removes
-    // every worn ring whose mask OVERLAPS the incoming one's, the slot bit is a
-    // FORM fact rather than a unit one, and so the pass can be aimed at "all"
-    // or "none" but never at "that one". Three attempts to steer it produced
-    // three separate failures -- a phantom ring on the cursor, a pair both
-    // coming off, a third ring going on (all measured 2026-09-01). The removal
-    // is ours, explicitly, and the pass is kept away from rings entirely.
+    // This used to be three functions and a protocol. MakeRoom, TakeOneOff and
+    // NoteSecondCell had to be called in the right order by every path a ring
+    // could arrive on, and each caller had to know which path it was. The order
+    // was got wrong four times in a single day: a click path that skipped the
+    // cap, a drop path that skipped it too, a missing second MakeRoom, and a
+    // swap that removed a ring the caller was already removing. A caller that
+    // has to know a sequence is a caller that will eventually get it wrong.
+    //
+    // The engine cannot help with any of this. Its conflict pass removes every
+    // worn ring whose slot mask overlaps the incoming ring's, and the slot bit
+    // is a fact about the FORM rather than about a unit -- so the pass can be
+    // aimed at "all" or at "none", but never at "that one". Three attempts to
+    // steer it produced three different failures: a phantom ring on the cursor,
+    // both rings coming off, and a third ring going on (all measured
+    // 2026-09-01). We do the removal ourselves and keep that pass away from
+    // rings entirely.
     void PrepareForEquip(RE::TESObjectARMO* a_incoming, std::uint16_t a_sig,
                          RE::ExtraDataList* a_aimed, bool a_secondCell);
 
-    // ---- taking one off ----------------------------------------------------
-    // ★★★TAKE ONE RING OFF AND LEAVE THE OTHERS' MAGIC ALONE.
+    // ---- taking one off ---------------------------------------------------
+    // Take one ring off without disturbing the other rings' magic.
     //
-    // ★THE ENGINE DISPELS BY ENCHANTMENT, NOT BY UNIT. An ActiveEffect
-    // remembers `spell` (the EnchantmentItem) and `source` (the item FORM), and
-    // neither of those names a unit -- so two identical enchanted rings raise
-    // two effects that are indistinguishable, and MagicTarget::DispelEffect
-    // takes a spell and a caster. Unequipping ONE of them therefore dispels
-    // BOTH: the ring still on the finger keeps its tooltip, its value and its
-    // place on the doll, and quietly stops doing anything (user report).
-    // Vanilla never had to answer this, because vanilla wears one ring.
+    // THE ENGINE DISPELS BY ENCHANTMENT, NOT BY UNIT. An ActiveEffect records
+    // `spell` (the EnchantmentItem) and `source` (the item form), and neither
+    // of those identifies a unit. Two identical enchanted rings therefore raise
+    // two effects that cannot be told apart, and MagicTarget::DispelEffect
+    // takes a spell and a caster. Unequipping one of them dispels BOTH: the
+    // ring still on the finger keeps its tooltip, its value and its place on
+    // the doll, and silently stops doing anything (user report). Vanilla never
+    // had to solve this, because vanilla wears one ring.
     //
-    // ★★There is no counterpart to Actor::DispelWornItemEnchantments to undo it
+    // There is no counterpart to Actor::DispelWornItemEnchantments to undo it
     // with -- the engine can clear worn enchantments but has no "apply them
-    // again" -- so the survivor is simply PUT BACK ON. The equip is what
+    // again" -- so we simply put the surviving ring back on. Equipping is what
     // establishes the effect in the first place, and re-establishing it is all
     // this does.
     //
-    // ★★★Deliberately NOT the sweep's job, which is where every other repair in
-    // this file lives. The sweep OBSERVES the body, and "this ring's effect is
-    // missing" is not a fact about the body: an effect can be legitimately
-    // absent (dispelled, resisted, its conditions false), and a sweep reading
-    // that as damage would re-equip rings nobody touched, forever. The
-    // collateral has one cause and it is known exactly -- so it is repaired
-    // where it is caused.
+    // This is deliberately not the sweep's job, even though every other repair
+    // in this file lives there. The sweep OBSERVES the body, and "this ring's
+    // effect is missing" is not a fact about the body: an effect can be
+    // legitimately absent because it was dispelled, resisted, or its conditions
+    // are false. A sweep that read absence as damage would re-equip rings
+    // nobody touched, forever. This particular collateral has exactly one known
+    // cause, so it is repaired at that cause.
     //
-    // ★★★★Every road a ring LEAVES on must come through here, for the same
-    // reason every road it arrives on comes through PrepareForEquip: a rule
-    // kept on half the roads is worse than no rule.
+    // Every path by which a ring LEAVES has to come through here, for the same
+    // reason every path it arrives on goes through PrepareForEquip: a rule kept
+    // on only some of the paths is worse than no rule.
     void RemoveWornUnit(RE::TESObjectARMO* a_armo, RE::ExtraDataList* a_xl);
 
     // ---- lifecycle --------------------------------------------------------
-    // ★Per game-update tick, and it OBSERVES rather than remembers: the world
-    // changes behind this system's back (a ring sold, dropped, taken by a
-    // script, or a save loaded with two already on). One invariant, restored
-    // from what the body is actually wearing --
+    // Runs once per game update. It OBSERVES rather than remembers, because the
+    // world changes behind this system's back: a ring can be sold, dropped,
+    // taken by a script, or a save can be loaded with two already on. There is
+    // one invariant, restored from whatever the body is actually wearing:
     //
     //     IF ANY RING IS WORN, EXACTLY ONE OF THEM HOLDS kRing.
     //
-    // -- which covers every direction at once: a bit is handed back when its
-    // ring leaves, a pair a load put back into contest is separated again,
-    // and a survivor left slotless by the removal of the visible ring gets
-    // the slot back instead of turning invisible for the rest of the save.
-    // ★Not a per-frame walk: it sleeps until something asks, and then on a
-    // slow heartbeat only while a bit is out.
+    // That single rule covers every direction at once. A bit is handed back
+    // when its ring leaves; a pair that a load put back into contest is
+    // separated again; and a ring left slotless by the removal of the visible
+    // ring gets the slot back instead of staying invisible for the rest of the
+    // save.
+    //
+    // This is not a per-frame walk. It sleeps until something asks for it, and
+    // then runs on a slow heartbeat only while a bit is out on loan.
     void Tick();
-    // Hand every bit back, then ask for a fresh sweep. New game / pre-load.
+
+    // Hand every borrowed bit back, then ask for a fresh sweep.
+    // Called on a new game and before a load.
     void RevertGame();
 }

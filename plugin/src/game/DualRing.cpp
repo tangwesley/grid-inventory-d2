@@ -13,16 +13,16 @@ namespace FUI::DualRing
     {
         using Slot = RE::BGSBipedObjectForm::BipedObjectSlot;
 
-        // ★The forms we took kRing from, and owe it back to. Session state
+        // The forms we took kRing from, and owe it back to. Session state
         // only: a load restores every record from the plugin, so a debt
-        // written into the cosave would already be paid by the time it was
-        // read. Tick re-derives instead (see the header).
+        // written into the cosave would already have been paid by the time we
+        // read it back. Tick re-derives the arrangement instead (see header).
         std::vector<RE::FormID> g_stripped;
 
-        // ★Where the player PUT the second ring -- the left cell's tenant, by
-        // form. Placement, not physics: see IsSecondCell in the header for
-        // why this cannot be read off the slot bit. 0 = nobody placed one,
-        // and the doll falls back to the bit.
+        // Where the player PUT the second ring -- which form is sitting in the
+        // left cell. This is placement, not physics; see IsSecondCell in the
+        // header for why it cannot be read off the slot bit. 0 means nobody
+        // has placed one, and the doll falls back to the bit.
         RE::FormID    g_leftRing = 0;
         std::uint16_t g_leftSig  = 0;
 
@@ -33,8 +33,8 @@ namespace FUI::DualRing
         std::uint64_t g_frame = 0;
         std::uint64_t g_nextSweep = 0;
         constexpr std::uint64_t kSweepGap = 30;   // ~0.5s at 60fps
-        // A frame is 16.7ms at 60fps. Anything at this scale is a
-        // visible hitch and wants to be in the log by name.
+        // A frame is 16.7ms at 60fps, so anything on this scale is a visible
+        // hitch and should name itself in the log.
         constexpr double        kSweepWarnMs = 2.0;
 
         [[nodiscard]] const char* NameOf(RE::TESForm* a_f)
@@ -50,18 +50,19 @@ namespace FUI::DualRing
                     static_cast<std::uint32_t>(Slot::kRing)) != 0;
         }
 
-        // ★★★MAY THIS RING GIVE UP ITS BIT AND STILL BE A RING?
+        // Can this ring give up its slot bit and still count as a ring?
         //
-        // Grid::IsRing answers on the kRing bit OR the ClothingRing keyword.
-        // Take the bit from a ring that has ONLY the bit and it stops being a
-        // ring to every reader in this plugin at once: the doll files it as
-        // odd armour, the board's rules change under it, and -- the part that
-        // does not heal -- WornRings can no longer see it, so the sweep never
-        // finds it to hand the bit BACK. The ring would be stranded slotless
-        // for the rest of the save.
-        // ★Vanilla rings all carry the keyword, so this refuses nothing an
-        // ordinary game can produce; it is the mod ring parked on a custom
-        // slot with no keyword that must be left alone.
+        // Grid::IsRing answers yes on the kRing bit OR the ClothingRing
+        // keyword. If we take the bit from a ring that has only the bit, it
+        // stops being a ring to every reader in this plugin at once: the doll
+        // files it as odd armour, the board's rules change under it, and --
+        // the part that never recovers -- WornRings can no longer see it, so
+        // the sweep never finds it to hand the bit back. That ring would be
+        // stranded with no slot for the rest of the save.
+        //
+        // Every vanilla ring carries the keyword, so this refuses nothing an
+        // ordinary game can produce. It exists for the modded ring parked on a
+        // custom slot without the keyword, which has to be left alone.
         [[nodiscard]] bool MayGiveUpRingBit(const RE::TESObjectARMO* a_armo)
         {
             constexpr RE::FormID kClothingRing = 0x0010CD09;   // Skyrim.esm
@@ -81,10 +82,11 @@ namespace FUI::DualRing
             SKSE::log::info("[DUALRING] '{}' gave up its ring slot", NameOf(a_armo));
         }
 
-        // ★Only ever to a form WE took it from. A modded ring can be authored
-        // with no kRing bit at all -- it sits on a custom slot and answers for
-        // itself through the ClothingRing keyword -- and handing that one a bit
-        // it never had would move it onto the finger its author kept clear.
+        // Only ever give a bit back to a form we took one from. A modded ring
+        // can be authored with no kRing bit at all -- sitting on a custom slot
+        // and identifying itself through the ClothingRing keyword -- and
+        // handing that ring a bit it never had would move it onto the finger
+        // its author deliberately kept clear.
         void GiveRingBitBack(RE::FormID a_id)
         {
             auto* f = RE::TESForm::LookupByID(a_id);
@@ -103,10 +105,10 @@ namespace FUI::DualRing
             RE::ExtraDataList*  xl   = nullptr;
         };
 
-        // ★Every ring the body is wearing, in FormID order so the choice of
-        // which one keeps kRing is the same answer twice running. An arbitrary
-        // order would move the visible ring from one finger to the other on
-        // every load for no reason the player could see.
+        // Every ring the body is wearing, sorted by FormID so that "which one
+        // keeps kRing" gives the same answer twice running. An arbitrary order
+        // would move the visible ring from one finger to the other on every
+        // load, for no reason the player could see.
         [[nodiscard]] std::vector<WornRing> WornRings(RE::PlayerCharacter* a_p)
         {
             std::vector<WornRing> out;
@@ -131,15 +133,18 @@ namespace FUI::DualRing
             return out;
         }
 
-        // ★★★ONE WALK A FRAME, SHARED -- the same bargain the doll already
-        // makes. GetInventory DEEP-COPIES every matching entry, which is why
-        // CollectEquipment was rebuilt around a single shared walk; asking it
-        // again per question quietly undid that. A single ring swap asked four
-        // times (the drop gate, MakeRoom, the cap, AimAt) plus the sweep's own,
-        // all in one frame, over every piece of armour the player owns.
-        // ★Only MEMBERSHIP is cached. Slot bits are read live off the ARMO, so
-        // a mask this pass changes is visible to the next reader immediately --
-        // which is exactly what PrepareForEquip's steps 3 and 4 rely on.
+        // One inventory walk per frame, shared -- the same trade-off the doll
+        // already makes. GetInventory DEEP-COPIES every matching entry, which
+        // is why CollectEquipment was rebuilt around a single shared walk;
+        // asking again for each separate question quietly undid that saving. A
+        // single ring swap used to ask four times (the drop gate, MakeRoom, the
+        // cap check and AimAt) plus the sweep's own walk, all within one frame,
+        // over every piece of armour the player owns.
+        //
+        // Only MEMBERSHIP is cached. Slot bits are still read live off the
+        // ARMO, so a mask changed by this pass is visible to the next reader
+        // immediately -- which is exactly what steps 3 and 4 of
+        // PrepareForEquip depend on.
         std::vector<WornRing> g_wornCache;
         std::uint64_t         g_wornFrame = ~0ull;
 
@@ -152,23 +157,23 @@ namespace FUI::DualRing
             return g_wornCache;
         }
 
-        // Membership changed under us -- the next reader must walk again.
+        // Membership changed underneath us, so the next reader must walk again.
         void ForgetWorn() { g_wornFrame = ~0ull; }
 
-        // Remember where the player PUT a ring (see the header). Private: the
-        // only moment anything knows this is the request PrepareForEquip is
-        // acting on, and it records it there.
+        // Remember which cell the player put a ring in (see the header).
+        // Private, because the only moment anything knows this is while
+        // PrepareForEquip is acting on the request that carries it.
         void NoteSecondCell(const RE::TESObjectARMO* a_ring, std::uint16_t a_sig)
         {
             g_leftRing = a_ring ? a_ring->GetFormID() : 0;
             g_leftSig  = a_ring ? a_sig : 0;
         }
 
-        // ★The enchantment a worn unit actually carries: the INSTANCE'S own
-        // when the player made it (ExtraEnchantment), otherwise the record's.
-        // Both matter here -- a pair of vanilla Rings of Resist Magic share
-        // formEnchanting exactly as a pair of player-enchanted rings share
-        // their ExtraEnchantment, and the engine dispels either the same way.
+        // The enchantment a worn unit actually carries: the unit's own when the
+        // player enchanted it (ExtraEnchantment), otherwise the record's.
+        // Both cases matter here. A pair of vanilla Rings of Resist Magic share
+        // one formEnchanting exactly as a pair of player-enchanted rings share
+        // one ExtraEnchantment, and the engine dispels either the same way.
         [[nodiscard]] RE::EnchantmentItem* EnchantmentOf(const RE::TESObjectARMO* a_armo,
                                                          RE::ExtraDataList* a_xl)
         {
@@ -181,19 +186,20 @@ namespace FUI::DualRing
             return a_armo ? a_armo->formEnchanting : nullptr;
         }
 
-        // ★★THE INVARIANT, restored from the body:
+        // The invariant, restored by reading the body:
         //
         //     IF ANY RING IS WORN, EXACTLY ONE OF THEM HOLDS kRing.
         //
-        // ★"At most one" is what this pass enforced first, and it was half a
-        // rule. Take the visible ring off a pair and the survivor is left with
-        // no bit at all -- one ring on the body, wearing no slot, INVISIBLE
-        // for the rest of the save with nothing to notice it. Both directions
-        // have to be walked, and then the whole bookkeeping falls out of one
-        // question asked of the body: no state to keep in step, and every
-        // stale case repairs itself on the next sweep.
-        // Returns false when the body could not be read -- the caller stays
-        // armed and asks again rather than dropping the request on the floor.
+        // This pass originally enforced only "at most one", which turned out to
+        // be half a rule. Take the visible ring off a pair and the survivor is
+        // left with no bit at all: one ring on the body, wearing no slot,
+        // invisible for the rest of the save with nothing to notice. Once both
+        // directions are enforced, all the bookkeeping falls out of a single
+        // question asked of the body -- there is no state to keep in step, and
+        // every stale case repairs itself on the next sweep.
+        //
+        // Returns false when the body could not be read. The caller then stays
+        // armed and asks again, rather than dropping the request on the floor.
         bool Enforce()
         {
             auto* p = RE::PlayerCharacter::GetSingleton();
@@ -201,13 +207,13 @@ namespace FUI::DualRing
 
             const auto& worn = WornRingsCached(p);
 
-            // ★★★COUNTED OVER FORMS, NOT UNITS. The slot bit lives on the ARMO,
-            // so two plain rings of one form share ONE bit. Counting units made
-            // this pass see two holders where there was one, strip the shared
-            // form, and then see NO holder on the next sweep and hand it
-            // straight back -- a give/take oscillation twice a second, which
-            // the player sees as a ring blinking in and out. The invariant is
-            // about forms because the thing it governs is.
+            // Counted over FORMS, not units. The slot bit lives on the ARMO, so
+            // two plain rings of the same form share one bit. Counting units
+            // made this pass see two holders where there was really one, strip
+            // the shared form, then see NO holder on the next sweep and hand
+            // the bit straight back -- a give/take oscillation twice a second,
+            // which the player sees as a ring blinking in and out. The
+            // invariant is about forms because the thing it governs is.
             std::vector<RE::TESObjectARMO*> forms;
             for (const auto& w : worn) {
                 if (std::find(forms.begin(), forms.end(), w.armo) == forms.end()) {
@@ -215,9 +221,9 @@ namespace FUI::DualRing
                 }
             }
 
-            // ★The left cell's tenant is forgotten the moment it comes off, so
-            // the next ring to land there is not shown in a cell it never
-            // took. Same discipline as the bits: observed, not remembered.
+            // Forget the left cell's occupant the moment it comes off, so the
+            // next ring to land there is not drawn in a cell it never took.
+            // Same discipline as the slot bits: observed, not remembered.
             if (g_leftRing != 0 &&
                 std::none_of(forms.begin(), forms.end(),
                     [](const RE::TESObjectARMO* a) { return a->GetFormID() == g_leftRing; })) {
@@ -238,17 +244,18 @@ namespace FUI::DualRing
             const auto holders = std::count_if(forms.begin(), forms.end(),
                 [](const RE::TESObjectARMO* a) { return HoldsRingBit(a); });
 
-            // 2. Nobody holds it: the ring that did has come off. Give the bit
-            // back to a survivor -- ★one WE took it from, never a ring authored
-            // without it, which would move it onto a finger its author kept
-            // clear.
+            // 2. Nobody holds the bit, so the ring that did has come off. Give
+            // it back to one of the survivors -- but only to a ring WE took it
+            // from, never to one authored without it, which would move that
+            // ring onto a finger its author deliberately kept clear.
             if (holders == 0) {
                 for (auto* armo : forms) {
-                    // ★★NEVER TO A FORM WEARING TWO UNITS. They share the one
-                    // bit, so handing it over arms the engine against BOTH --
-                    // the next equip single-ends and takes a ring the player
-                    // never asked to remove. A doubled form stays slotless,
-                    // which is the only state it can hold honestly.
+                    // Never give the bit to a form that has two units worn.
+                    // They share the one bit, so handing it over arms the
+                    // engine against BOTH of them: the next equip single-ends
+                    // the slot and removes a ring the player never asked to
+                    // take off. A doubled form stays slotless, which is the
+                    // only state it can hold honestly.
                     const auto units = std::count_if(worn.begin(), worn.end(),
                         [&](const WornRing& w) { return w.armo == armo; });
                     if (units > 1) continue;
@@ -269,10 +276,11 @@ namespace FUI::DualRing
             for (auto* armo : forms) {
                 if (!HoldsRingBit(armo)) continue;
                 if (!kept) { kept = true; continue; }
-                // ★A ring that may not give its bit up KEEPS it, and then two
-                // hold kRing after all. That is still the better answer: the
-                // alternative strands it (see MayGiveUpRingBit), and the engine
-                // only re-reads the contest at the next equip.
+                // A ring that is not allowed to give its bit up keeps it, which
+                // leaves two forms holding kRing after all. That is still the
+                // better outcome: the alternative strands the ring with no slot
+                // (see MayGiveUpRingBit), and the engine only re-reads the
+                // contest at the next equip anyway.
                 if (MayGiveUpRingBit(armo)) TakeRingBit(armo);
             }
             return true;
@@ -298,7 +306,7 @@ namespace FUI::DualRing
         auto* em = RE::ActorEquipManager::GetSingleton();
         if (!p || !em || !a_armo) return;
 
-        // ★Read BEFORE the removal. The unequip rewrites the entry, and the
+        // Read this BEFORE the removal. The unequip rewrites the entry, and the
         // list we were handed can merge with an identical spare the moment
         // ExtraWorn comes off it.
         auto* leaving = EnchantmentOf(a_armo, a_xl);
@@ -307,11 +315,11 @@ namespace FUI::DualRing
         ForgetWorn();
         if (!leaving) return;   // nothing was dispelled, so nothing lost it
 
-        // Whatever is STILL on that shared the dispelled enchantment lost its
-        // effect as collateral. ★Copied out before touching anything: the
-        // repair below re-equips, which rebuilds the very cache this walks --
-        // and an iterator held across a container-growing call is how this file
-        // crashed once already.
+        // Anything still worn that shared the dispelled enchantment has lost
+        // its effect as collateral damage. Copy the list out before touching
+        // anything: the repair below re-equips, which rebuilds the very cache
+        // we are walking -- and holding an iterator across a call that grows a
+        // container is how this file crashed once already.
         std::vector<std::pair<RE::TESObjectARMO*, std::uint16_t>> hurt;
         for (const auto& w : WornRingsCached(p)) {
             if (EnchantmentOf(w.armo, w.xl) != leaving) continue;
@@ -319,19 +327,19 @@ namespace FUI::DualRing
         }
         if (hurt.empty()) return;
 
-        // ★★ALL OFF, THEN ALL BACK ON -- never one at a time. Unequipping the
-        // second would dispel the enchantment again and take the FIRST one's
-        // freshly restored effect with it. (One survivor is all the cap allows
-        // today; getting the order right costs nothing and the cap is not a
-        // law of nature.)
+        // All off, then all back on -- never one at a time. Unequipping the
+        // second would dispel the enchantment again and take the first one's
+        // freshly restored effect with it. (Today's cap allows only one
+        // survivor, but getting the order right costs nothing and the cap is
+        // not a law of nature.)
         for (const auto& w : WornRingsCached(p)) {
             if (EnchantmentOf(w.armo, w.xl) != leaving) continue;
             em->UnequipObject(p, w.armo, w.xl, 1, nullptr, false, false, false, true);
         }
         ForgetWorn();
         for (const auto& [armo, sig] : hurt) {
-            // ★Resolved here and not before: the list held a moment ago is not
-            // the list this unit lives in now.
+            // Resolve the list here rather than earlier: the list we held a
+            // moment ago is not the one this unit lives in now.
             auto* back = Grid::ExtraForPool(Grid::LiveEntryOf(p, armo), 0, sig);
             em->EquipObject(p, armo, back, 1, nullptr, false, false, false, true);
             SKSE::log::info("[DUALRING] '{}' put back on -- its enchantment was "
@@ -346,22 +354,25 @@ namespace FUI::DualRing
         auto* p = RE::PlayerCharacter::GetSingleton();
         if (!p || !a_incoming) return;
 
-        // 1. WHO MUST LEAVE -- two separate questions, and running them
-        //    together was a bug.
+        // 1. Who has to come off? These are two separate questions, and
+        //    running them as one was a bug.
         std::vector<WornRing> victims;
         {
             const auto& worn = WornRingsCached(p);
 
-            // ★1a. THE RING THE PLAYER POINTED AT LEAVES. Always: a drop on an
-            //    OCCUPIED cell is a swap, and a swap that keeps the occupant is
-            //    not one. This used to be conditional on being over the cap, so
-            //    it only fired when a SECOND ring happened to be on -- and with
-            //    one ring worn, dropping another on its own cell added instead
-            //    of replacing ("스왑이 아니고 밀려서 장착됨"). The cap is about
-            //    how many rings the body may hold; the aim is about which ring
-            //    the player asked to remove. Neither answers the other.
-            //    ★Matched on the UNIT (its worn list), never the form -- see
-            //    the header for the phantom that the form match produced.
+            // 1a. The ring the player pointed at always comes off. A drop onto
+            //     an occupied cell is a swap, and a swap that keeps the
+            //     occupant is not a swap. This used to be conditional on being
+            //     over the cap, so it only fired when a second ring happened to
+            //     be worn -- with just one ring on, dropping another onto its
+            //     cell added instead of replacing. (Reported in Korean as
+            //     "스왑이 아니고 밀려서 장착됨": "it didn't swap, it got pushed
+            //     aside and equipped".) The cap is about how many rings the
+            //     body may hold; the aim is about which ring the player asked
+            //     to remove. Neither question answers the other.
+            //
+            //     Matched on the UNIT via its worn list, never on the form --
+            //     see the header for the phantom ring that a form match caused.
             if (a_aimed) {
                 for (const auto& w : worn) {
                     if (w.xl != a_aimed) continue;
@@ -370,7 +381,8 @@ namespace FUI::DualRing
                 }
             }
 
-            // 1b. Then the cap, over whoever is left: room for one more.
+            // 1b. Then apply the cap to whoever is left, leaving room for one
+            //     more ring to arrive.
             int over = static_cast<int>(worn.size() - victims.size()) - 1;
             for (const auto& w : worn) {
                 if (over <= 0) break;
@@ -393,22 +405,25 @@ namespace FUI::DualRing
             }
         }
 
-        // 2. TAKE THEM OFF OURSELVES. ★Never the engine's conflict pass: it
-        //    removes every worn ring whose mask OVERLAPS the incoming one's,
-        //    and the slot bit is a FORM fact -- so it cannot be steered to one
-        //    ring, and three attempts to steer it produced three different
-        //    failures (a phantom on the cursor, a pair both coming off, a
-        //    third ring going on). The caller skips that pass for rings.
-        //    ★Through RemoveWornUnit, never a bare UnequipObject: the engine
-        //    dispels worn enchantments by ENCHANTMENT rather than by unit, so a
-        //    bare removal here would strip the magic from the identical ring
-        //    the player is KEEPING (see the header).
-        //    ★★Named by (form, signature) and RE-RESOLVED for each one, never
-        //    by the list pointers collected above: the first removal re-equips
-        //    a survivor, and that rewrites the entry the later pointers live
-        //    in. Two victims only arise past a cap of two, which nothing
-        //    reaches today -- but a stale ExtraDataList* is not a bug that
-        //    waits politely for the case that produces it.
+        // 2. Take them off ourselves, never through the engine's conflict pass.
+        //    That pass removes every worn ring whose slot mask overlaps the
+        //    incoming ring's, and the slot bit is a fact about the form, so it
+        //    cannot be aimed at one particular ring. Three attempts to steer it
+        //    produced three different failures: a phantom ring on the cursor,
+        //    both rings coming off, and a third ring going on. The caller skips
+        //    that pass entirely for rings.
+        //
+        //    Removal goes through RemoveWornUnit rather than a bare
+        //    UnequipObject, because the engine dispels worn enchantments by
+        //    enchantment rather than by unit -- a bare removal here would strip
+        //    the magic from the identical ring the player is keeping (header).
+        //
+        //    Each victim is named by (form, signature) and re-resolved as we
+        //    go, never by the list pointers collected above: the first removal
+        //    re-equips a survivor, which rewrites the entry those later
+        //    pointers live in. Two victims can only arise past a cap of two,
+        //    which nothing reaches today -- but a stale ExtraDataList* is not a
+        //    bug that waits politely for the case that produces it.
         std::vector<std::pair<RE::TESObjectARMO*, std::uint16_t>> leaving;
         leaving.reserve(victims.size());
         for (const auto& v : victims) {
@@ -427,8 +442,8 @@ namespace FUI::DualRing
             RemoveWornUnit(armo, xl);
         }
 
-        // 3. WHOEVER STAYS GIVES UP THE SLOT, so the engine has nothing to
-        //    single-end when the incoming ring goes on.
+        // 3. Whoever is staying gives up the slot, so that the engine has
+        //    nothing to single-end when the incoming ring goes on.
         bool sharesWithSurvivor = false;
         for (const auto& w : WornRingsCached(p)) {
             if (w.armo == a_incoming) sharesWithSurvivor = true;
@@ -436,9 +451,10 @@ namespace FUI::DualRing
             TakeRingBit(w.armo);
         }
 
-        // 4. ...and the incoming ring takes it, so something is drawn. ★Not
-        //    when a survivor shares its FORM: one ARMO, one bit, and handing
-        //    it over would arm the engine against the very ring we just kept.
+        // 4. ...and the incoming ring takes the slot, so something is drawn on
+        //    the hand. Except when a survivor shares its form: one ARMO has one
+        //    bit, so handing it over would arm the engine against the very ring
+        //    we just decided to keep.
         if (!sharesWithSurvivor) {
             const auto id = a_incoming->GetFormID();
             const auto it = std::find(g_stripped.begin(), g_stripped.end(), id);
@@ -448,7 +464,8 @@ namespace FUI::DualRing
             }
         }
 
-        // 5. Where the player put it. Placement, not physics -- see the header.
+        // 5. Record which cell the player put it in. Placement, not physics --
+        //    see the header.
         if (a_secondCell) NoteSecondCell(a_incoming, a_sig);
         else if (IsSecondCell(a_incoming, a_sig)) NoteSecondCell(nullptr, 0);
 
@@ -458,22 +475,23 @@ namespace FUI::DualRing
     void Tick()
     {
         ++g_frame;
-        // ★Cheap when there is nothing to do, which is nearly always: no bit
-        // is out and nobody asked. The heartbeat only runs while we owe one.
+        // Cheap when there is nothing to do, which is nearly always: no bit is
+        // out on loan and nobody has asked. The heartbeat only runs while we
+        // still owe one.
         if (!g_dirty && g_stripped.empty()) return;
         if (!g_dirty && g_frame < g_nextSweep) return;
         g_nextSweep = g_frame + kSweepGap;
-        // ★★MEASURED, NOT ASSUMED. A reporter saw the game stall for a few
-        // seconds and asked whether this was us -- and the log could not
-        // answer, because it records events and not the time between them.
-        // Idle looks exactly like frozen from outside. So the sweep times
-        // itself, and anything worth noticing says so with its own numbers.
-        // Costs one clock read on the frames that sweep at all.
+        // Measured rather than assumed. A reporter saw the game stall for a few
+        // seconds and asked whether we were the cause, and the log could not
+        // answer: it records events, not the time between them, and from the
+        // outside idle looks exactly like frozen. So the sweep times itself,
+        // and anything slow enough to matter reports its own numbers. This
+        // costs one clock read on the frames that actually sweep.
         const auto t0 = std::chrono::steady_clock::now();
-        // ★Cleared only when the sweep actually READ the body. A load reaches
-        // here before the actor has 3D, and a request dropped there would
-        // leave a loaded pair both holding kRing -- which the next equip's
-        // conflict pass would answer by taking BOTH rings off.
+        // Cleared only when the sweep actually managed to read the body. A load
+        // reaches here before the actor has its 3D, and a request dropped at
+        // that point would leave a loaded pair both holding kRing -- which the
+        // next equip's conflict pass would resolve by taking BOTH rings off.
         const bool ran = Enforce();
         if (ran) g_dirty = false;
         const auto ms = std::chrono::duration<double, std::milli>(
@@ -487,17 +505,19 @@ namespace FUI::DualRing
 
     void RevertGame()
     {
-        // ★The records are about to be re-read anyway; this is for the case
-        // where they are not -- a new game in the same session. Cheap either
-        // way, and it leaves no form of ours edited behind a save boundary.
+        // The records are about to be re-read from the plugin anyway. This is
+        // for the case where they are not -- starting a new game in the same
+        // session. It is cheap either way, and it leaves none of our forms
+        // edited across a save boundary.
         for (const auto id : g_stripped) GiveRingBitBack(id);
         g_stripped.clear();
         g_leftRing = 0;
-        // ★★ARMED, not cleared -- this runs before every load, and the save
-        // about to open may have TWO rings on. The engine hands back both slot
-        // bits with the records, so the pair arrives in contest with nothing
-        // owed and nothing to notice it: the first sweep after the body exists
-        // is what separates them again. Costs one walk on a new game.
+        // Leave the sweep ARMED rather than clearing it. This runs before every
+        // load, and the save about to open may already have two rings on. The
+        // engine hands both slot bits back along with the records, so the pair
+        // arrives in contest with no debt recorded and nothing to notice --
+        // the first sweep after the body exists is what separates them again.
+        // The cost is one extra walk when starting a new game.
         g_dirty = true;
     }
 }
