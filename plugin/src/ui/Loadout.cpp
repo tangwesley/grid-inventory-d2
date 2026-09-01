@@ -141,12 +141,14 @@ namespace FUI::Loadout
             return IsSetHandItem(a_f) || (a_f && a_f->Is(RE::FormType::Scroll));
         }
 
-        // Is this entry a ring? A ring is the one item that can occupy either
-        // of two cells, so it is the one entry EquipSet has to say a cell for.
-        [[nodiscard]] RE::TESObjectARMO* RingOf(const Entry& a_e)
+        // A ring recorded on the doll's second (left) ring cell. The engine
+        // wears exactly one ring; this one is worn by DualRing's carrier while
+        // the ring itself sits in the pack -- so it goes on and comes off
+        // through DualRing, and never through EquipObject.
+        bool IsRing2(const Entry& a_e)
         {
-            auto* armo = RE::TESForm::LookupByID<RE::TESObjectARMO>(a_e.id);
-            return (armo && Grid::IsRing(armo)) ? armo : nullptr;
+            return a_e.leftHand &&
+                   Grid::IsRing(RE::TESForm::LookupByID<RE::TESObjectARMO>(a_e.id));
         }
 
         std::vector<Entry> CaptureWorn(RE::PlayerCharacter* a_p)
@@ -196,25 +198,30 @@ namespace FUI::Loadout
                 // the preset: ReservedCount said 2, EquipSet equipped it twice,
                 // and a spare copy of the same shield vanished from the board.
                 if (seen.contains({ obj->GetFormID(), true })) continue;
-                // A second ring no longer needs a separate scan. It used to:
-                // the engine wore one ring while the doll's other cell held a
-                // carrier standing in for a ring that stayed in the pack, so
-                // this walk went straight past it and the bottom-right cell was
-                // the one slot on the doll that a preset never owned. Since
-                // 1.6.0 both rings are worn by the engine and both turn up here.
-                //
-                // What still has to be asked is WHICH CELL, because that is
-                // placement rather than a fact about the body. DualRing forgets
-                // a cell as soon as its ring comes off, and UnequipAll takes
-                // every ring off before the next set goes on.
-                if (auto* armo = obj->As<RE::TESObjectARMO>();
-                    armo && Grid::IsRing(armo)) {
-                    const std::uint16_t sig = Grid::InstanceSigOf(
-                        Grid::WornExtraOf(Grid::LiveEntryOf(a_p, obj), 0));
-                    add(obj, DualRing::IsSecondCell(armo, sig));
-                    continue;
-                }
                 add(obj, false);
+            }
+
+            // The second ring, which no scan above could have found. The engine
+            // wears one ring; the doll's other cell holds a CARRIER standing in
+            // for a ring that stays in the pack, so the worn walk goes straight
+            // past it. Without this the tab captured one ring and never the
+            // other, and the bottom-right cell kept whatever it held through
+            // every switch -- the one slot on the doll that did not belong to
+            // the preset.
+            //
+            // It has to come AFTER the armour loop, never before: that loop
+            // skips a form already seen on the left side (the shield rule), so
+            // an entry planted first would have swallowed a FIRST ring of the
+            // same form. It is also the order EquipSet needs -- see there.
+            //
+            // The signature comes from DualRing rather than from a worn list,
+            // because the ring is not worn and so has no worn list to read.
+            if (!DualRing::TakeOffPending()) {   // asked for off; do not record it
+                if (auto* second = DualRing::Second()) {
+                    if (seen.insert({ second->GetFormID(), true }).second) {
+                        out.push_back({ second->GetFormID(), true, DualRing::SecondSig() });
+                    }
+                }
             }
             return out;
         }
@@ -242,13 +249,20 @@ namespace FUI::Loadout
                     a_em->UnequipObject(a_p, b, worn(b, hand), 1, slot, false, false, true, true);
                 }
             };
-            // The second ring used to have to come off first, and through
-            // DualRing: a carrier was worn in its place, so the armour loop
-            // below would strip the carrier and leave DualRing still believing
-            // a ring was on the second cell. Since 1.6.0 both rings are
-            // ordinary worn armour, so the loop takes them off like anything
-            // else -- and the slot bits DualRing borrowed are handed back by its
-            // own sweep, which reads the body rather than trusting a flag.
+            // The second ring comes off FIRST, and through DualRing rather than
+            // as ordinary armour. The carrier is what is worn, so the armour
+            // loop below would happily unequip it and leave DualRing still
+            // believing a ring is on the second cell: the effect gone, the ring
+            // still off the board, the doll still drawing it. TakeOff is the
+            // only thing that stands the whole arrangement down together.
+            //
+            // It also withdraws any take-off the render pass has queued. That
+            // would otherwise run in DualRing::Tick -- which comes AFTER
+            // ProcessPending in the same tick -- and strip the second ring the
+            // incoming preset had just put on.
+            if (DualRing::Second()) DualRing::TakeOff();
+            DualRing::CancelTakeOff();
+
             auto* right = a_p->GetEquippedObject(false);
             auto* left = a_p->GetEquippedObject(true);
             const bool oneItem = BothHandsAreOneItem(right, left);
@@ -291,11 +305,14 @@ namespace FUI::Loadout
         void EquipSet(RE::PlayerCharacter* a_p, RE::ActorEquipManager* a_em,
                       const std::vector<Entry>& a_items)
         {
-            // One pass. This used to be two, because a second ring went on
-            // through a carrier that could only stand in beside a first ring
-            // that was already there. Both rings are worn by the engine now and
-            // both go on the ordinary way, in the order the set records them.
+            // Two passes, and the order is not a preference. DualRing fills the
+            // FIRST ring slot when it finds that one empty -- the second cannot
+            // be filled alone -- so a set carrying two rings would put its
+            // second ring on the first slot and then have the first ring
+            // displace it. The engine-worn gear goes on first; the carrier
+            // stands in afterwards, beside a first ring that is already there.
             for (const auto& e : a_items) {
+                if (IsRing2(e)) continue;
                 auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(e.id);
                 if (!obj || !StillOwned(a_p, obj)) continue;   // sold/dropped -> skip
                 const RE::BGSEquipSlot* slot = nullptr;
@@ -310,23 +327,20 @@ namespace FUI::Loadout
                 // plain unit) resolves to nullptr and the engine picks, which
                 // is right -- plain units are interchangeable.
                 auto* xl = Grid::ExtraForPool(Grid::LiveEntryOf(a_p, obj), 0, e.sig);
-                // Announce a ring before it goes on. The slot bit is a fact
-                // about the FORM, so a bare EquipObject for the second ring
-                // makes the engine single-end the kRing slot and displace the
-                // first -- a two-ring set would end up wearing one.
-                // PrepareForEquip is the single call that takes the bit off
-                // whoever is staying, hands it to the incoming ring and records
-                // the cell; every other path a ring arrives on already goes
-                // through it.
-                //
-                // No aimed list is passed, because a preset points at no
-                // occupant. Nothing is being swapped either: UnequipAll has
-                // already emptied the body, so the cap has room and takes no
-                // victim.
-                if (auto* ring = RingOf(e)) {
-                    DualRing::PrepareForEquip(ring, e.sig, nullptr, e.leftHand);
-                }
                 a_em->EquipObject(a_p, obj, xl, 1, slot, false, false, true, true);
+            }
+            for (const auto& e : a_items) {
+                if (!IsRing2(e)) continue;
+                auto* ring = RE::TESForm::LookupByID<RE::TESObjectARMO>(e.id);
+                if (!ring || !StillOwned(a_p, ring)) continue;   // sold/dropped -> skip
+                // Same unit rule as above: the signature names the copy the tab
+                // captured, and 0 lets DualRing take the engine's choice.
+                auto* xl = Grid::ExtraForPool(Grid::LiveEntryOf(a_p, ring), 0, e.sig);
+                if (!DualRing::Wear(ring, xl)) {
+                    // Wear says why in its own log line; this says whose set it
+                    // was, which is the part that would otherwise be a mystery.
+                    SKSE::log::info("[LOADOUT] second ring 0x{:08X} not restored", e.id);
+                }
             }
         }
 

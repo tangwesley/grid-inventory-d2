@@ -90,12 +90,25 @@ namespace FUI::Equip
     bool UnequipItem(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
                      std::uint16_t a_sig, int a_hand = 0, int a_count = 1);
 
+    // Does this ring belong on the SECOND slot?
+    //
+    // This is the question the slotless router has always answered inside
+    // ProcessPending, asked out loud so a click can aim with it. A right-click
+    // that aims then lands in the same targeted branch a drag onto the ring
+    // slot does -- one road for both, and the targeted one is the better of the
+    // two anyway, because it resolves the exact unit instead of handing the
+    // engine a null list. The router stays for callers with no board behind
+    // them (the quick wheel), which is why the decision lives here rather than
+    // at either call site.
+    [[nodiscard]] bool RingWantsSecondSlot(RE::TESBoundObject* a_obj);
+
     // Ring session: a cancelled carry goes back to the slot it was lifted from
     // (the origin rule). This queues through the same pending pipeline as every
-    // other equip, so the conflict pass and the srcList resolve both apply.
+    // other equip, so the router, the conflict pass and the srcList resolve all
+    // apply. a_second aims the SECOND ring slot -- the carrier route --  and
     // a_hand == 2 sends a one-hander back to the left hand.
     void RequestWear(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
-                     std::uint16_t a_sig, int a_hand, int a_count);
+                     std::uint16_t a_sig, int a_hand, int a_count, bool a_second);
 
     // Does using this take the unit off the board -- worn, drunk, eaten,
     // learnt? The board bookkeeping (vacate the cell, forget the tile, hint the

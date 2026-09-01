@@ -180,6 +180,29 @@ namespace FUI::WornLedger
         g_entries.push_back(std::move(e));
     }
 
+    // Withdraw a pending entry whose equip event will never arrive.
+    //
+    // There is exactly one caller and one shape: the second ring goes on
+    // through a CARRIER, so the engine equips our stand-in and never the ring
+    // itself. No TESEquipEvent is raised for the ring, so its pending entry has
+    // nothing to retire it and would sit in the books until the stale sweep --
+    // reported by the audit, two seconds later, as residue.
+    //
+    // It drops the OLDEST pending of the form, which is only safe because that
+    // caller queues one at a time. Do not reach for this from anywhere else: an
+    // equip that simply has not landed yet looks identical from here, and
+    // cancelling it would lose a real request.
+    void CancelPending(RE::FormID a_form)
+    {
+        if (!g_have) return;
+        for (auto it = g_entries.begin(); it != g_entries.end(); ++it) {
+            if (it->form == a_form && it->state == State::pending) {
+                g_entries.erase(it);
+                return;
+            }
+        }
+    }
+
     void OnEquip(RE::FormID a_form)
     {
         if (!g_have || !TrackedForm(a_form)) return;

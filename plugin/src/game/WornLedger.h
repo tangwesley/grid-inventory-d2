@@ -56,13 +56,15 @@ namespace FUI::WornLedger
     void NotePending(RE::FormID a_form, std::uint16_t a_uid, std::uint16_t a_sig,
                      int a_hand, int a_units);
 
-    // CancelPending has been retired. It existed for one caller and one shape:
-    // the ring carrier stood in for a second-slot ring, so the ring's own equip
-    // event never arrived and its pending entry sat there until the stale
-    // sweep. Both rings are worn by the engine now and both equip events
-    // arrive, so a ring's pending retires the same way every other pending
-    // does -- and a function that silently drops the oldest pending of a form
-    // is not something to leave lying around for the next caller to misuse.
+    // Withdraw a pending entry whose equip event will never arrive. One caller,
+    // one shape: the second ring goes on through a CARRIER, so the engine
+    // equips our stand-in and raises no TESEquipEvent for the ring itself --
+    // leaving a pending entry with nothing to retire it until the stale sweep.
+    //
+    // It drops the OLDEST pending of the form, which is safe only because that
+    // caller queues one at a time. Do not reach for this from anywhere else: an
+    // equip that simply has not landed yet is indistinguishable from here.
+    void CancelPending(RE::FormID a_form);
 
     // B4-2c: our unequip is in flight -- lifting an item off the doll starts
     // one the moment the carry begins. The matching worn entry becomes
