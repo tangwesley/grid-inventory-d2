@@ -11,15 +11,15 @@
 // A slot the player has filled is ENABLED; an empty spot is disabled. That is
 // how the museum shows a donation -- the model appears on the pedestal.
 //
-// ★MEASURED, not assumed. Probed against a live game: with nothing donated the
-// index read `0 DISPLAYED`; after donating exactly one dragon priest mask it
-// read `1 DISPLAYED`, and the increment landed in the mask section. That is the
-// whole basis for Status below.
+// This was measured rather than assumed. Probed against a live game: with
+// nothing donated the index read `0 DISPLAYED`, and after donating exactly one
+// dragon priest mask it read `1 DISPLAYED`, with the increment landing in the
+// mask section. That is the entire basis for Status below.
 //
 // Also measured, from the plugin itself: 47 sections, 2074 entries, and every
-// pair agrees on size. Two shapes have to be handled and are counted here so
-// nobody rediscovers them -- 77 nested FormLists (one slot accepting several
-// variants) and 19 slots that are not references at all.
+// pair agreeing on size. Two awkward shapes have to be handled, and are counted
+// here so nobody has to rediscover them -- 77 nested FormLists (one slot that
+// accepts several variants) and 19 slots that are not references at all.
 namespace FUI::Lotd
 {
     enum class Status : std::uint8_t
@@ -35,18 +35,18 @@ namespace FUI::Lotd
 
     // Once per inventory open. Re-reads only the slots' enabled state.
     //
-    // ★Why this is separate from Rebuild: the map is fixed for the session but
-    // donations happen DURING play, and asking IsDisabled() per tile would mean
-    // resolving a handle on every frame of every draw. Donating requires
+    // This is separate from Rebuild because the map is fixed for the session
+    // but donations happen DURING play, and asking IsDisabled() per tile would
+    // mean resolving a handle on every frame of every draw. Donating requires
     // closing the inventory, so a sweep taken as the menu opens cannot go stale
-    // while the menu is up.
+    // while the menu is still up.
     void Refresh();
 
     // O(1) lookup against the cache. This is what a tile calls.
     [[nodiscard]] Status Of(RE::FormID a_base);
 
-    // ★Session boundary. Handles from the previous game resolve to nothing at
-    // best and to another game's references at worst.
+    // Called at a session boundary. Handles from the previous game resolve to
+    // nothing at best, and to another game's references at worst.
     void Clear();
 
     // For the log line only -- how much the index is holding.

@@ -8,14 +8,15 @@
 // "the board knows", the ledger has to prove it can stay in step with the
 // engine on requests and events alone.
 //
-// ★B4-2b: ENTRIES, not counts. The first observation round ran count-level
-// and scored 30/30 -- but the takeOne ladder's worn questions ("has my equip
-// landed", "is this doll carry still on the body") turn on WINDOWS where the
-// engine flag count and the ledger count are equal while meaning different
-// things. Only identity plus a lifecycle can answer those, so the ledger now
-// carries what the REQUEST knew (uid / sig / hand -- rule 2: the request is
-// the only moment that knows the unit) through the states the takeOne clock
-// machinery currently juggles by matching worn lists:
+// B4-2b: this tracks ENTRIES, not counts. The first observation round ran at
+// count level and scored 30/30 -- but the takeOne ladder's questions about worn
+// state ("has my equip landed?", "is this doll carry still on the body?") turn
+// on windows where the engine's flag count and the ledger's count are equal
+// while meaning different things. Only identity plus a lifecycle can answer
+// those. So the ledger now carries what the REQUEST knew (uid, sig and hand --
+// rule 2: the request is the only moment that knows which unit) through the
+// states that the takeOne clock machinery currently juggles by matching worn
+// lists:
 //
 //     pending  -- our equip request is out; the engine has not applied it
 //     worn     -- the engine confirmed (TESEquipEvent), or wore it unasked
@@ -39,18 +40,19 @@ namespace FUI::WornLedger
     void NotePending(RE::FormID a_form, std::uint16_t a_uid, std::uint16_t a_sig,
                      int a_hand, int a_units);
 
-    // ★CancelPending is RETIRED. It existed for one caller and one shape: the
-    // ring CARRIER stood in for a second-slot ring, so the ring's own equip
-    // event never came and its pending would sit until the stale sweep. Both
-    // rings are engine-worn now and both equip events arrive, so a ring's
-    // pending retires the way every other pending does -- and a function that
-    // silently drops the oldest pending of a form is not something to leave
-    // lying around for the next caller to find and misuse.
+    // CancelPending has been retired. It existed for one caller and one shape:
+    // the ring carrier stood in for a second-slot ring, so the ring's own equip
+    // event never arrived and its pending entry sat there until the stale
+    // sweep. Both rings are worn by the engine now and both equip events
+    // arrive, so a ring's pending retires the same way every other pending
+    // does -- and a function that silently drops the oldest pending of a form
+    // is not something to leave lying around for the next caller to misuse.
 
-    // ★B4-2c: our UNEQUIP is out -- a doll lift starts one the moment the
-    // carry begins. The matching worn entry turns `doffing`: still on the
-    // body as far as the engine is concerned, already spoken for as far as
-    // the board is. The unequip event retires doffing entries first.
+    // B4-2c: our unequip is in flight -- lifting an item off the doll starts
+    // one the moment the carry begins. The matching worn entry becomes
+    // `doffing`: still on the body as far as the engine is concerned, but
+    // already spoken for as far as the board is. The unequip event retires
+    // doffing entries first.
     void NoteDoffing(RE::FormID a_form, int a_hand);
 
     // Any doffing entry of this form still open? THE doll-carry clock: true

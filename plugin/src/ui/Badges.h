@@ -13,11 +13,12 @@ struct ImVec2;
 //  provider returns a count and per-badge contents, and this module decides
 //  where they sit inside the tile and what a well looks like.
 //
-//  ★Placement is a TABLE, not a formula (PLAN_INSTANCE 3-A). Three attempts at
-//  deriving it from `cols = min(w, n)` disagreed with the original, because the
-//  interesting positions are HALF-cell: five badges on a 2-wide tile is a dice
-//  five, whose centre sits between the two columns. Cell-snapped maths cannot
-//  express that, so the row shape per (tile, n) is written out and looked up.
+//  Placement is a lookup TABLE rather than a formula (PLAN_INSTANCE 3-A).
+//  Three attempts at deriving it from `cols = min(w, n)` all disagreed with the
+//  original layout, because the interesting positions land on HALF-cell
+//  boundaries: five badges on a 2-wide tile form a dice five, and its centre
+//  pip sits between the two columns. Cell-snapped arithmetic cannot express
+//  that, so the row shape for each (tile, n) is written out and looked up.
 // =============================================================================
 
 namespace FUI::Badges

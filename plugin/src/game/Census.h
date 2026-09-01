@@ -2,8 +2,9 @@
 
 #include <optional>
 
-// 1.4 / B1 — kind-level audit, one step above B0. Observation-only at birth;
-// promoted to permanent wiring below (★★PROMOTED).
+// 1.4 / B1 -- a kind-level audit, one step above B0. It started as
+// observation-only and has since been promoted to permanent wiring; see the
+// note on Take below.
 //
 // B0 counted FORMS. That is enough to ask "did the engine tell us everything",
 // and the answer was yes. It is not enough to run a board: two iron daggers are
@@ -18,34 +19,38 @@
 // If they cannot, 1.4 has not removed the matching problem, only moved it into
 // the census, and §9 has a stopping rule about that.
 //
-// ★It records the RAW VALUES too, not just the signature. The pairing rule in
-// §3 is "closest value first" -- and a signature is a hash, which has no
-// distance. That rule cannot be evaluated, let alone implemented, from sigs
-// alone. Learning this is itself part of what B1 was for.
+// It records the RAW VALUES as well as the signature. The pairing rule in
+// section 3 is "closest value first", and a signature is a hash, which has no
+// notion of distance -- so that rule cannot be evaluated, let alone
+// implemented, from signatures alone. Discovering this was itself part of what
+// B1 was for.
 //
-// ★★PROMOTED: ON BY DEFAULT, and no longer observation-only. Each Take now
-// ASSIGNS the pairs it used to merely rank -- greedily, fewest changed axes
-// first, normalised distance as the tiebreak (the B1-measured rule, PLAN
-// §8-4) -- and the rebuild's relabel block consumes the assignment through
-// TakePair. Before this, N vacated pools met M arriving pools in HASH ORDER,
-// which is no order at all: two same-form blades re-tempered in one
-// grindstone session (values move, counts do not, no event fires) could come
-// back seated in each other's cells at the next menu open, the very §1(b)
-// violation the census was built to measure. The assignment only concerns
-// UNWORN units -- a worn item is off the board, so combat charge drain has
-// nothing to relabel. "!census = 0" remains as an emergency cutoff (the
-// ledger's promotion pattern).
+// PROMOTED: this is on by default now, and no longer observation-only. Each
+// Take ASSIGNS the pairs it used to merely rank -- greedily, fewest changed
+// axes first, with normalised distance as the tiebreak (the rule B1 measured,
+// PLAN section 8-4) -- and the rebuild's relabel block consumes that assignment
+// through TakePair.
+//
+// Before this, N vacated pools met M arriving pools in HASH ORDER, which is no
+// order at all. Two blades of the same form re-tempered in a single grindstone
+// session (their values move, their counts do not, and no event fires) could
+// come back seated in each other's cells at the next menu open -- the exact
+// section 1(b) violation the census was built to measure.
+//
+// The assignment concerns UNWORN units only: a worn item is off the board, so
+// charge drained in combat has nothing to relabel. "!census = 0" remains as an
+// emergency cutoff, following the ledger's promotion pattern.
 namespace FUI::Census
 {
     [[nodiscard]] bool Enabled();
     void               SetEnabled(bool a_on);
 
     // Main thread only (walks the player's inventory).
-    // ★Returns whether anything MOVED between kinds since the last take
-    // (B4-1): the menu-open rebuild is conditional now, and a value that
-    // changed without a count changing -- a grindstone, above all -- fires no
-    // engine event and so raises no rebuild flag. The census is the only
-    // witness, and its yes is the integrity gate that requests the rebuild.
+    // Returns whether anything MOVED between kinds since the last take (B4-1).
+    // The menu-open rebuild is conditional now, and a value that changes
+    // without its count changing -- a grindstone above all -- fires no engine
+    // event and so raises no rebuild flag. The census is the only witness to
+    // that, and its "yes" is the integrity gate that requests the rebuild.
     // A baseline take (or an empty snapshot) returns false.
     bool Take(const char* a_when);
 
