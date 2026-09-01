@@ -1,0 +1,26 @@
+# Normalise line endings in the repository to LF.
+#
+# Why this exists: main.cpp is stored CRLF upstream and LF here, and git
+# compares blobs byte for byte during a merge. That one difference turned every
+# sync with skypia into a whole-file conflict -- 6,065 lines the first time and
+# 6,120 the second, none of it real. With the files normalised, `git merge
+# -Xrenormalize` converts both sides before diffing and the conflict disappears.
+#
+# text=auto lets git detect binary files and leave them alone. Working copies
+# still get CRLF on Windows via core.autocrlf; this governs what is STORED.
+* text=auto
+
+# Explicit, so a machine with core.autocrlf unset still checks these out the way
+# Visual Studio expects.
+*.cpp   text eol=crlf
+*.h     text eol=crlf
+*.ini   text eol=crlf
+
+# Documentation is read on both platforms and by GitHub.
+*.md    text eol=lf
+*.txt   text eol=lf
+
+# LICENSE-GPL is deliberately NOT marked -text. It is an ordinary text file and
+# is stored LF; marking it binary made `git add --renormalize` write the working
+# copy's CRLF back into the blob, which is a 674-line diff that says nothing.
+LICENSE-GPL text eol=lf

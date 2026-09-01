@@ -38,4 +38,5 @@
 
 # --- repo files ---
 !/.gitignore
+!/.gitattributes
 !/README.md
