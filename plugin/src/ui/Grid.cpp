@@ -6081,7 +6081,26 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the trash (F2 allows trashing an empty bag), and (E4b) a
             // bag stowed by hand inside a GENERAL bag. Anything else a
             // bag ref points at (typed bag, stale key) reflows to main.
-            if (it.def.bag != 0 && it.inBag != kTrashKey && !it.inBag.empty()) {
+            // ★★(1.6) ...and except a TAB BOARD, which is not a bag
+            // reference at all. Klimmek's supplies are BOTH -- a quest object
+            // (FFI04SackAlias carries the quest-object flag) and a bag form
+            // (the record is a pouch) -- so the routing above seated the tile
+            // on the QUEST board and this rule, which knows only bag refs and
+            // so asks g_bagAcceptByForm about the key, read "__quest" as a
+            // stale bag reference and sent the tile straight back to main. It
+            // did it again on every rebuild, which is why the one quest item
+            // the board could not keep was the one shaped like a container.
+            // (Reported: supplies never reach the quest tab.)
+            //
+            // The two rules answer different questions and neither may
+            // overrule the other: a TAB is decided by what the item IS
+            // (TabBagFor, above), a bag ref by what the player DID. The
+            // capacity sim's twin of this rule already had the exemption --
+            // it drops tab tiles before NormalizeBagRefs ever sees them, with
+            // a comment naming this exact hazard -- so this was the last door
+            // of the three still disagreeing.
+            if (it.def.bag != 0 && it.inBag != kTrashKey &&
+                !IsTabKey(it.inBag) && !it.inBag.empty()) {
                 const auto ba = g_bagAcceptByForm.find(BaseKey(it.inBag));
                 if (ba == g_bagAcceptByForm.end() || !ba->second.empty()) {
                     it.inBag.clear();
