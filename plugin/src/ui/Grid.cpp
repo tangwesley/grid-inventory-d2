@@ -1400,7 +1400,7 @@ namespace FUI::Grid
                     const int moved =
                         GoldCoins::StoreToContainer(dst, it.coinValue);
                     if (moved <= 0) continue;   // refused: the tile stays home
-                    LootBarter::NoteStoredUnits(vg, moved);
+                    LootBarter::NoteStoredUnits(vg, moved, UnitRef{});   // gold has no unit
                     if (moved < it.coinValue) {
                         SetCoinRecord(it.key, it.coinValue - moved);
                     } else {
@@ -1424,8 +1424,9 @@ namespace FUI::Grid
                     if (!seen.insert(it.key).second) continue;
                     todo.push_back({ it.key, bid });
                 }
-                LootBarter::RequestStore(it.obj, it.count, it.uid, it.sig, it.fav,
-                                         it.xlIdx, it.key);
+                LootBarter::RequestStore(it.obj, it.count,
+                                         UnitRef{ it.uid, it.sig, it.xlIdx },
+                                         it.fav, it.key);
                 NotePendingRemove(it.obj, it.key, it.count, it.xlIdx);
                 // ★(1.3.2) the tile's marker bits ride along; the favourite
                 // star does NOT -- RequestStore's fav argument strips it as
@@ -3762,34 +3763,25 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // gold, so "can this be split" was false on every
                             // coin -- the one item type where splitting is the
                             // main thing you do with it.
+                            // ★★★THE UNIT, NAMED. This passed a literal 0 where it
+                            // held the signature, so the tooltip's pool answer
+                            // never ran and the unit was resolved by LIST
+                            // POSITION alone -- and a position is a hint, not a
+                            // promise (a plain unit is listless by definition,
+                            // so any index recorded for one is a leftover from
+                            // when it briefly had an ExtraWorn-only list). After
+                            // one equip/unequip of a plain dagger that index
+                            // named the TEMPERED dagger's list, and every plain
+                            // copy came back called "Fine Iron Dagger" while the
+                            // numbers beside it stayed right (user report,
+                            // 2026-09-01 -- GI61's symptom through a door GI61
+                            // did not close).
                             DrawItemTooltip(it.obj, it.count,
+                                UnitRef{ it.uid, it.sig, it.xlIdx },
+                                ExtraScope::kUnit,
                                 GoldCoins::IsPouch(fid) ? GoldCoins::PouchStoredOf(it.key)
                                                         : it.coinValue,
-                                price, false, nullptr, ExtraScope::kUnit,
-                                // ★★★it.sig, NOT 0 -- the same correction the
-                                // partner side already carries, on the road it
-                                // was never applied to. With 0 here the
-                                // tooltip's pool fallback is switched off
-                                // (`if (!scoped && a_sig != 0)`) and the unit
-                                // is resolved by LIST POSITION alone.
-                                //
-                                // A position is a hint and not a promise, and
-                                // this file says so itself: a PLAIN unit's
-                                // recorded index is a leftover from when it
-                                // had a list at all -- a worn unit carries one
-                                // holding only ExtraWorn -- and the instant
-                                // that list goes away every later index slides
-                                // down (see EnumerateUnitRefs, same lesson).
-                                // So after one equip/unequip of a plain dagger
-                                // its index named the TEMPERED dagger's list,
-                                // and the name came back "Fine Iron Dagger"
-                                // for every plain copy while the rest of the
-                                // tooltip, which knows the pool, went on
-                                // showing the right numbers (user report:
-                                // "stats differed but every name was the
-                                // tempered one" -- GI61's symptom exactly,
-                                // through a door GI61 did not close).
-                                it.uid, it.xlIdx, it.sig, 0,
+                                price, false, nullptr,
                                 TileContext{ it.key, it.def.bag != 0,
                                              it.inBag == kTrashKey, false, false,
                                              it.stolen, it.quest });
@@ -3844,7 +3836,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 // a wrong whole-cell move is undone with one
                                 // more click. Dropping scatters.
                                 LootBarter::OpenSlider(it.obj, it.count,
-                                    LootBarter::XferDir::kDrop, it.key);
+                                    LootBarter::XferDir::kDrop,
+                                    UnitRef{ it.uid, it.sig, it.xlIdx },
+                                    it.key);
                             } else {
                                 DropTileUnits(it.key, 1);
                             }
@@ -3869,7 +3863,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // G4: shift+left-click on a gold tile = VALUE split
                             // slider (1..coinValue, starts at half). The chosen
                             // amount lands on the cursor as a pinned purse.
-                            LootBarter::OpenSlider(it.obj, it.coinValue, LootBarter::XferDir::kPickup, it.key);
+                            LootBarter::OpenSlider(it.obj, it.coinValue, LootBarter::XferDir::kPickup,
+                                                   UnitRef{ it.uid, it.sig, it.xlIdx }, it.key);
                         } else if (io.KeyShift && GoldCoins::IsPouch(lfid)) {
                             // G2: shift+left-click on the pouch = withdraw
                             // window, same as right-click (user shortcut)
@@ -3882,7 +3877,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // — plain inventory too). The chosen amount lands on
                             // the cursor; drop it on the container to store, or
                             // outside every window to discard just that many.
-                            LootBarter::OpenSlider(it.obj, it.count, LootBarter::XferDir::kPickup, it.key);
+                            LootBarter::OpenSlider(it.obj, it.count, LootBarter::XferDir::kPickup,
+                                                   UnitRef{ it.uid, it.sig, it.xlIdx }, it.key);
                         } else {
                             // ★GI62c/d: the cursor takes the item by its PIVOT
                             // CELL, wherever it was clicked. Holding the clicked
@@ -4677,9 +4673,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
-                           float a_offX, float a_offY,
-                           std::uint16_t a_uid, int a_xlIdx, int a_ord, int a_rot)
+                           const UnitRef& a_unit, int a_ord, int a_rot,
+                           float a_offX, float a_offY)
     {
+        const std::uint16_t a_uid   = a_unit.uid;
+        const int           a_xlIdx = a_unit.xlIdx;
         if (!a_obj || g_held) return;
         const GridDef def = g_resolver ? g_resolver(a_obj) : GridDef{};
         // GI62: lift it as it lies on the other side, so a sword stored on its
@@ -5988,8 +5986,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (InstanceSig(xl) == it.sig) { it.xlIdx = here; break; }
                 }
             }
-            // D2: the crafted-enchant glow belongs to THIS unit
-            if (const auto* xl = ExtraForTile(a_entry, it.uid, it.xlIdx)) {
+            // D2: the crafted-enchant mark belongs to THIS unit. (★The field
+            // is still spelled `glow` and the glow itself is gone -- these bits
+            // drive the RARITY WEDGE and the poison drop in the marker tray
+            // now. Renaming it is a sweep of its own; saying so here costs
+            // nothing and stops the next reader looking for a halo.)
+            // ★★A POSITION IS A HINT, AND A HINT CAN BE CHECKED. The index was
+            // recorded a frame or more ago and the engine reorders extraLists
+            // behind us, so a stale one still resolves to a REAL list -- just
+            // somebody else's. Grid.cpp's own removal path already answers this
+            // the right way ("a stale position can cost accuracy, never
+            // correctness"): take the position's answer, then hold it against
+            // the identity we are carrying and drop it if they disagree.
+            // ★The order is NOT flipped to pool-first, deliberately: the pool
+            // resolver refuses worn lists by design, and some of these cells
+            // are worn (a corpse's armour, a doll slot). Validating keeps that
+            // reach and only removes the wrong answers.
+            const RE::ExtraDataList* glowXl = ExtraForTile(a_entry, it.uid, it.xlIdx);
+            if (glowXl && it.uid == 0 && it.sig != 0 &&
+                InstanceSig(const_cast<RE::ExtraDataList*>(glowXl)) != it.sig) {
+                glowXl = ExtraForPool(a_entry, it.uid, it.sig);
+            }
+            if (const auto* xl = glowXl) {
                 if (const auto* xe = xl->GetByType<RE::ExtraEnchantment>();
                     xe && xe->enchantment) {
                     it.glow |= 1;
@@ -8952,11 +8970,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const bool mislabel = !adopt &&
                                   (p.le.uid != p.u->uid || p.le.sig != p.u->sig);
             SKSE::log::info("[B3] ★partial add '{}' key '{}' at [{},{}]{} "
-                            "unit(u{:04X}/s{:04X}) tile(u{:04X}/s{:04X}){} "
+                            "unit(u{:04X}/s{:04X}) tile(u{:04X}/s{:04X}) {}{} "
                             "-- no rebuild",
                 obj->GetName(), p.u->key, p.le.col, p.le.row,
                 p.le.bag.empty() ? "" : " (bag)",
                 p.u->uid, p.u->sig, p.le.uid, p.le.sig,
+                // ★Says WHICH path seated this tile. Without it a run of
+                // clean logs is ambiguous: MISLABEL can be zero because the
+                // labels agree, or because the unchecked path never ran.
+                //
+                // ★★AND IT SETTLED THE QUESTION IT WAS ADDED FOR. The reading
+                // was that this path inherits the TILE's old identity instead
+                // of writing the returning unit's -- which it does; every other
+                // seat (the rebuild placer, both mints, the carry landing)
+                // writes it and this one does not. The conclusion drawn from
+                // that was wrong.
+                //
+                // Measured 2026-09-02: 25 adopted, 10 INHERITED, zero
+                // mislabels -- and one of the ten carried a real signature,
+                // `unit(s4BF1) tile(s4BF1)`, a tempered dagger returning
+                // through the unguarded path onto an entry that already
+                // matched. It matches because the key assignment pairs a unit
+                // with its OWN tile, so what is inherited is already that
+                // unit's pool. To be wrong the walk would have to hand out a
+                // key belonging to another pool.
+                //
+                // ★So this is not a defect, and the probe stays because it is
+                // the only thing holding that verdict up.
+                adopt ? "adopted" : "inherited",
                 mislabel ? " ★MISLABEL" : "");
         }
         // ★NOW it is spent -- the plan committed, so the cell the player aimed
@@ -9447,6 +9488,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             SKSE::log::info("[GOLD] +{} G -> '{}' ({} G)", add, it->key,
                 li->second.coin);
             break;   // one remainder fills; the rest arrives as fresh capfuls
+        }
+        // ★A HOMELESS REMAINDER IS NORMAL AT THE CAP -- a capful mints a
+        // fresh tile by design, and saying so every time would be noise. It is
+        // worth a line only when ROOM STOOD FREE and the income minted beside
+        // it anyway, which is exactly what the fragment bug looked like: 337 G
+        // of space on a 663 G tile and an 82 G sale minting a second partial
+        // (2026-09-02 -- a tile keyed under a legacy band form that the
+        // tier-set filter had quietly stopped recognising).
+        if (left > 0) {
+            int room = 0;
+            for (const auto& sl : CoinTilesByPosition()) {
+                room += (std::max)(0, GoldCoins::kCoinCap - sl.value);
+            }
+            if (room > 0) {
+                SKSE::log::warn("[GOLD] ★{} G minted while {} G of room stood "
+                                "free -- income is not finding the tiles",
+                                left, room);
+            }
         }
         bool minted = false;
         while (left > 0) {
@@ -10898,13 +10957,29 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     {
         // Coin tiles are keyed under whichever BAND form minted them -- a
         // shrunk pin keeps its old band key (see the partition's emitCoin
-        // note) -- so all four tier bases are live even after the one-coin
-        // migration. Filtering by base is what keeps the pouch out: it passes
-        // IsCoinForm but is its own form, not a tier.
-        std::set<std::string> bases;
-        for (int t = 0; t < 4; ++t) {
-            if (auto* f = GoldCoins::CoinForTier(t)) bases.insert(FormKey(f));
-        }
+        // note) -- so a tile can sit under any of the historical band forms.
+        //
+        // ★★★ASK WHAT THE FORM IS, NOT WHICH TIER IT MATCHES. This built a
+        // set from CoinForTier(0..3) and claimed "all four tier bases are live
+        // even after the one-coin migration". That stopped being true: the
+        // migration made all four tiers return the SAME form, so the set
+        // collapsed to one key and every tile minted under a legacy band
+        // vanished from this list.
+        //
+        // Measured 2026-09-02: a 663 G tile keyed `...|0x000803` with 337 G of
+        // room, an 82 G sale, and the income walk found ZERO coin tiles and
+        // minted a second partial beside it. The player is then holding two
+        // fragments that will not merge, and every later sale makes another.
+        //
+        // ★IsCoinForm answers the actual question; the pouch is excluded by
+        // name rather than by being absent from a tier list, which is what the
+        // old comment was really relying on.
+        const auto isCoinTile = [](const std::string& a_base) {
+            auto* obj = ObjFromBaseKey(a_base);
+            if (!obj) return false;
+            const auto id = obj->GetFormID();
+            return GoldCoins::IsCoinForm(id) && !GoldCoins::IsPouch(id);
+        };
         struct Row
         {
             CoinSlot           slot;
@@ -10913,7 +10988,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         std::vector<Row> rows;
         for (const auto& [k, le] : g_layout) {
             if (le.coin < 0) continue;
-            if (!bases.contains(BaseKey(k))) continue;
+            if (!isCoinTile(BaseKey(k))) continue;
             if (g_held && k == g_held->key) continue;   // cursor money is spoken for
             rows.push_back({ { k, le.coin }, &le });
         }
@@ -13137,12 +13212,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         }
     }
 
-    void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue,
-                         int a_price, bool a_isBuy, RE::TESObjectREFR* a_owner,
-                         ExtraScope a_scope, std::uint16_t a_uid, int a_xlIdx,
-                         std::uint16_t a_sig, int a_hand, const TileContext& a_tile)
+    void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count,
+                         const UnitRef& a_unit, ExtraScope a_scope,
+                         int a_coinValue, int a_price, bool a_isBuy,
+                         RE::TESObjectREFR* a_owner, const TileContext& a_tile)
     {
         if (!a_obj) return;
+        const std::uint16_t a_uid   = a_unit.uid;
+        const std::uint16_t a_sig   = a_unit.sig;
+        const int           a_xlIdx = a_unit.xlIdx;
+        const int           a_hand  = a_unit.hand;
 
         // The OWNER's inventory entry: poison/charge/soul/crafted-enchant extras
         // all live there, not on the base form.
@@ -13559,6 +13638,40 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             }
             ImGui::TextColored(Theme::TipVal(), "%s %d", Lang::T(Lang::Str::Damage), dmg);
             diffText(dmg);
+        } else if (auto* ammo = a_obj->As<RE::TESAmmo>()) {
+            // ★★ARROWS AND BOLTS HAVE A DAMAGE NUMBER TOO, and this card never
+            // printed it: the chain tested weapon, then armour, and ammo is
+            // neither, so a quiver's tooltip simply had no line where every
+            // other piece of gear has one (reported 2026-09-02 -- it had been
+            // missing for as long as the card has existed).
+            //
+            // ★Flat, and that is not an omission. Ammo takes no temper and no
+            // enchantment, so there is no per-unit adjustment to ask the engine
+            // for -- the record's number IS the number, which is what vanilla
+            // shows in its own inventory. Read through GetRuntimeData() rather
+            // than a hand-computed offset (원칙 3).
+            const int dmg = static_cast<int>(ammo->GetRuntimeData().data.damage);
+
+            if (wantCmp && pc) {
+                // ★Not `cur != ammo`. A bow hovered while equipped compares
+                // with itself and reads (+0); ammo doing otherwise meant a
+                // player carrying one kind of arrow saw no card at all and
+                // reasonably concluded the key was broken.
+                //
+                // ★★AND NOT GetCurrentAmmo. That answers about the ACTOR'S
+                // combat state -- what is nocked right now -- and inside a
+                // paused menu it comes back empty, so the compare never had a
+                // counterpart to draw. Equip::EquippedAmmo walks the inventory
+                // for the list the engine marked worn, which is the same
+                // question the doll's quiver slot asks and gets right.
+                if (auto* cur = Equip::EquippedAmmo(pc)) {
+                    cmpObj = cur;
+                    cmpVal = static_cast<int>(cur->GetRuntimeData().data.damage);
+                    cmpIsWeap = true;   // the card reads "vs equipped", same as a bow
+                }
+            }
+            ImGui::TextColored(Theme::TipVal(), "%s %d", Lang::T(Lang::Str::Damage), dmg);
+            diffText(dmg);
         } else if (auto* armo = a_obj->As<RE::TESObjectARMO>()) {
             int arm = static_cast<int>(armo->GetArmorRating());
             if (pc) {
@@ -13905,8 +14018,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // do not handle those keys at all.
             const bool canSplit = !a_tile.equipSlot &&
                 (a_count > 1 || isPouch || (isCoin && a_coinValue > 1));
+            // ★Ammo belongs here as much as a bow does -- arrows come in a
+            // dozen kinds and the whole question is which hits harder. The card
+            // has drawn one since the damage line was added; only this hint
+            // still said the key did nothing.
             const bool canCompare = a_obj->Is(RE::FormType::Weapon) ||
-                                    a_obj->Is(RE::FormType::Armor);
+                                    a_obj->Is(RE::FormType::Armor) ||
+                                    a_obj->Is(RE::FormType::Ammo);
             const bool sideBoard = a_tile.partner || a_tile.equipSlot;
             // ★T RECHARGES, and until now the only way to find that out was to
             // read the changelog. The same test OpenRecharge runs, minus the
@@ -15089,8 +15207,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                                    /*toPlayer=*/false);
                     if (fromBundle) {
                         LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
-                                                    sd.col, sd.row, a_held.rot,
-                                                    a_held.uid, a_held.sig);
+                                                    sd.col, sd.row,
+                                                    UnitRef{ a_held.uid, a_held.sig },
+                                                    a_held.rot);
                     } else {
                         LootBarter::MoveHeldCell(sd.col, sd.row, a_held.rot);
                     }
@@ -15144,8 +15263,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // leave that cell unclaimed, and position order then
                         // handed it to a sibling.
                         BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
-                                          -1.0f, -1.0f,
-                                          occ.occUid, occ.occXlIdx, occ.occOrd, occ.occRot);
+                                          UnitRef{ occ.occUid, 0, occ.occXlIdx },
+                                          occ.occOrd, occ.occRot);
                         LootBarter::NoteCarriedSpot(occ.occSpotKey);
                     }
                 } else if (sd.onCell) {
@@ -15221,7 +15340,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (onOwnBoard && a_held.obj->IsGold() &&
                 LootBarter::IsLootMode(LootBarter::CurrentMode())) {
                 const int take = a_held.count;
-                if (LootBarter::RequestTake(a_held.obj, take, a_held.uid, a_held.sig)) {
+                if (LootBarter::RequestTake(a_held.obj, take, UnitRef{ a_held.uid, a_held.sig })) {
                     GoldCoins::ExpectIncoming(take);
                     g_held.reset();
                     CarryWithdrawnGold(take);   // nets to zero against the above
@@ -15297,21 +15416,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // remainder stays in the container exactly as it did
                         // when the slider was clamped to the same number
                         tookNow = LootBarter::RequestTakeAll(a_held.obj, cnt,
-                                                             a_held.uid, a_held.sig);
+                                                             UnitRef{ a_held.uid, a_held.sig });
                     } else if (LootBarter::CurrentMode() ==
                                LootBarter::Mode::kPickpocket) {
                         // F6b: dragging out of a mark's pockets rolls too
                         if (cnt > 1) LootBarter::OpenSlider(a_held.obj, cnt,
-                            LootBarter::XferDir::kPickTake, {}, 0, a_held.uid, a_held.sig);
-                        else LootBarter::RequestPickTake(a_held.obj, cnt, a_held.uid, a_held.sig);
+                            LootBarter::XferDir::kPickTake,
+                            UnitRef{ a_held.uid, a_held.sig });
+                        else LootBarter::RequestPickTake(a_held.obj, cnt, UnitRef{ a_held.uid, a_held.sig });
                     } else {   // kBarter
                         if (cnt > 1) LootBarter::OpenSlider(a_held.obj, cnt,
-                            LootBarter::XferDir::kBuy, {}, a_held.partnerValue,
-                            a_held.uid, a_held.sig);
+                            LootBarter::XferDir::kBuy,
+                            UnitRef{ a_held.uid, a_held.sig }, {},
+                            a_held.partnerValue);
                         else {
                             const int total = LootBarter::BuyPrice(a_held.obj, a_held.partnerValue);
-                            LootBarter::RequestBuy(a_held.obj, 1, total, a_held.partnerValue,
-                                                   a_held.uid, a_held.sig);
+                            LootBarter::RequestBuy(a_held.obj, 1, total,
+                                                   UnitRef{ a_held.uid, a_held.sig },
+                                                   a_held.partnerValue);
                         }
                     }
                     // B2: drop-cell placement as a one-shot HINT for the
@@ -15670,14 +15792,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // tile -- it is MORE aimed, since the player already chose how many.
             const auto sd = LootBarter::QueryStoreDrop();
             LootBarter::RequestStore(a_held.obj, a_held.count,
-                                     HeldUidOf(a_held.key, a_held.uid), a_held.sig,
-                                     a_held.fav, -1, a_held.key,
+                                     UnitRef{ HeldUidOf(a_held.key, a_held.uid),
+                                              a_held.sig },
+                                     a_held.fav, a_held.key,
                                      a_held.rot);   // (3) store
             if (sd.onCell && sd.freeSpot) {
                 LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
-                                            sd.col, sd.row, a_held.rot,
-                                            HeldUidOf(a_held.key, a_held.uid),
-                                            a_held.sig);
+                                            sd.col, sd.row,
+                                            UnitRef{ HeldUidOf(a_held.key, a_held.uid),
+                                                     a_held.sig },
+                                            a_held.rot);
             }
             // fragment (empty key) = form-level pending only
             NotePendingRemove(a_held.obj, a_held.key, a_held.count, a_held.xlIdx);
@@ -15701,17 +15825,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const int total = val > 0
                     ? LootBarter::SellPriceTotal(a_held.obj, val, a_held.count) : 0;
                 if (LootBarter::AskIfMerchantShort(a_held.obj, a_held.count, total,
+                                                   UnitRef{ a_held.uid, a_held.sig,
+                                                            a_held.xlIdx },
                                                    val * a_held.count, a_held.key,
-                                                   a_held.uid, a_held.sig, a_held.fav,
-                                                   a_held.xlIdx)) {
+                                                   a_held.fav)) {
                     // a merchant who can't cover it now OFFERS their purse
                     // (vanilla parity) -- the popup owns the sale from here, so
                     // the fragment stays split off and nothing is deducted yet.
                     // A refusal (empty purse) lands the same way it always did.
                 } else {
                     LootBarter::RequestSell(a_held.obj, a_held.count,
-                        total, val * a_held.count, a_held.uid, a_held.sig, a_held.fav,
-                        a_held.xlIdx, a_held.key);
+                        total, UnitRef{ a_held.uid, a_held.sig, a_held.xlIdx },
+                        val * a_held.count, a_held.fav, a_held.key);
                     // GI25: the split fragment still belongs to a POOL, and the
                     // pending bookkeeping has to say which one -- an empty key
                     // fell back to "deduct from the plain pool", the same
@@ -16269,9 +16394,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         const auto sd = LootBarter::QueryStoreDrop();
                         if (sd.onCell && sd.freeSpot) {
                             if (auto* vg = GoldCoins::VanillaGold()) {
-                                LootBarter::NoteStoredUnits(vg, moved);
+                                LootBarter::NoteStoredUnits(vg, moved, UnitRef{});   // gold has no unit
                                 LootBarter::PlaceStoredCell(vg, moved,
-                                                            sd.col, sd.row, 0);
+                                                            sd.col, sd.row,
+                                                            // ★gold has no unit
+                                                            // identity: said, not
+                                                            // left unsaid
+                                                            UnitRef{});
                             }
                         }
                     }
@@ -16307,8 +16436,28 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // ★A pure query -- mouse position against the drawn board -- so
             // asking it earlier costs nothing and changes nothing.
             const auto sd = LootBarter::QueryStoreDrop();   // F7 (dead outside kLoot/kSteal)
+            // ★★★A MERGE DOES NOT FREE THE OCCUPANT'S SQUARE (REVIEW C-4).
+            //
+            // The room test frees it because a SWAP takes it away. A merge
+            // leaves the occupant exactly where it is, so measuring with it
+            // freed was over-generous by one cell -- and a follower's pack grew
+            // a row past its own limit on a stack that spilled (measured
+            // 2026-09-02: `x10 onto x6, cap 10`).
+            //
+            // ★AND THE COUNT STAYS WHOLE. The first attempt at this worked out
+            // the overflow here and asked for room for that instead -- which
+            // cancelled itself out, because PartnerHasRoomFor ALREADY does the
+            // same arithmetic: it answers yes when the incoming count fits in
+            // the remainder of the shelf's own stacks. Asking it about a
+            // pre-subtracted spill let it subtract the same room twice, so
+            // `x100 onto x3` came back "fits" with three arrows still homeless
+            // (measured). Hand it the whole count and let it do its own sum --
+            // it gets both cases right: absorbed whole answers yes through the
+            // stack early-out, and a spill falls through to the rectangle
+            // search that a full pack refuses.
+            const bool mergeHere = sd.occ == a_held.obj && EffectiveCap(a_held.obj) > 1;
             if (!LootBarter::PartnerHasRoomFor(a_held.obj, a_held.count, a_held.rot,
-                                               sd.occ ? sd.occSpotKey : std::string{})) {
+                    (sd.occ && !mergeHere) ? sd.occSpotKey : std::string{})) {
                 // (1.3.3) a follower's pack is 10 x 8 -- keep carrying
                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
             } else if (!(GoldCoins::IsCoinForm(fid) && !GoldCoins::IsPouch(fid))) {
@@ -16331,8 +16480,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // a home to stay in. Here they would have to come back to
                     // the cursor, which is what shift+left split is for.
                     LootBarter::RequestStore(a_held.obj, a_held.count,
-                                             HeldUidOf(a_held.key, a_held.uid), a_held.sig,
-                                             a_held.fav, a_held.xlIdx, a_held.key,
+                                             UnitRef{ HeldUidOf(a_held.key, a_held.uid),
+                                                      a_held.sig, a_held.xlIdx },
+                                             a_held.fav, a_held.key,
                                              a_held.rot);
                     NotePendingRemove(a_held.obj, a_held.key, a_held.count, a_held.xlIdx);
                     queued = true;   // O-2: this tile really is leaving
@@ -16372,14 +16522,16 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // footprint was already free, and the one that was
                             // not is the occupant now leaving.
                             LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
-                                occ.col, occ.row, a_held.rot,
-                                HeldUidOf(a_held.key, a_held.uid), HeldInstanceSig());
+                                occ.col, occ.row,
+                                UnitRef{ HeldUidOf(a_held.key, a_held.uid),
+                                         HeldInstanceSig() },
+                                a_held.rot);
                             g_held.reset();
                             // GI24: same as the rearrange swap — the occupant
                             // keeps its identity and its own cell
                             BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
-                                              -1.0f, -1.0f,
-                                              occ.occUid, occ.occXlIdx, occ.occOrd, occ.occRot);
+                                              UnitRef{ occ.occUid, 0, occ.occXlIdx },
+                                              occ.occOrd, occ.occRot);
                             LootBarter::NoteCarriedSpot(occ.occSpotKey);
                             RequestRebuild();
                             return true;
@@ -16390,8 +16542,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // them, which is what merging means.
                         if (sd.freeSpot) {
                             LootBarter::PlaceStoredCell(a_held.obj, a_held.count,
-                                sd.col, sd.row, a_held.rot,
-                                HeldUidOf(a_held.key, a_held.uid), HeldInstanceSig());
+                                sd.col, sd.row,
+                                UnitRef{ HeldUidOf(a_held.key, a_held.uid),
+                                         HeldInstanceSig() },
+                                a_held.rot);
                         }
                     }
                 }
@@ -16450,13 +16604,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 } else if (a_held.count > 1) {
                     // srcKey rides along: pending-remove fires on CONFIRM
                     LootBarter::OpenSlider(a_held.obj, a_held.count,
-                        LootBarter::XferDir::kSell, a_held.key, val, a_held.uid, a_held.sig,
-                        false, a_held.fav);
+                        LootBarter::XferDir::kSell,
+                        UnitRef{ a_held.uid, a_held.sig },
+                        a_held.key, val, a_held.fav);
                 } else {
                     const int total = val > 0 ? LootBarter::SellPrice(a_held.obj, val) : 0;
-                    if (LootBarter::AskIfMerchantShort(a_held.obj, 1, total, val,
-                                                       a_held.key, a_held.uid, a_held.sig,
-                                                       a_held.fav, a_held.xlIdx)) {
+                    if (LootBarter::AskIfMerchantShort(a_held.obj, 1, total,
+                                                       UnitRef{ a_held.uid, a_held.sig,
+                                                                a_held.xlIdx },
+                                                       val, a_held.key, a_held.fav)) {
                         // ★(1.6.1) VANILLA PARITY: the poor merchant offers what
                         // they have instead of refusing. Same shape as the star's
                         // popup below -- `queued` stays 0, so the tail leaves the
@@ -16471,12 +16627,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // and the silent one was the dangerous half. Unifying
                         // the paths is what made the difference visible; the
                         // safer answer wins.
-                        LootBarter::AskSellConfirm(a_held.obj, 1, total, val, a_held.key,
-                                                   a_held.uid, a_held.sig,
-                                                   a_held.fav, a_held.xlIdx);
+                        LootBarter::AskSellConfirm(a_held.obj, 1, total,
+                                                   UnitRef{ a_held.uid, a_held.sig,
+                                                            a_held.xlIdx },
+                                                   val, a_held.key, a_held.fav);
                     } else {
-                        LootBarter::RequestSell(a_held.obj, 1, total, val, a_held.uid, a_held.sig,
-                                                a_held.fav, a_held.xlIdx, a_held.key);
+                        LootBarter::RequestSell(a_held.obj, 1, total,
+                                                UnitRef{ a_held.uid, a_held.sig,
+                                                         a_held.xlIdx },
+                                                val, a_held.fav, a_held.key);
                         NotePendingRemove(a_held.obj, a_held.key, 1, a_held.xlIdx);
                         queued = 1;   // O-3: one unit really is leaving
                         if (a_held.isBag) {   // contents reflow to main on sale (E4)
@@ -16528,8 +16687,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // Pending-remove is noted on the WIN inside the Tick.
                 if (a_held.count > 1) {
                     LootBarter::OpenSlider(a_held.obj, a_held.count,
-                        LootBarter::XferDir::kPickStore, a_held.key, 0, a_held.uid, a_held.sig,
-                        false, a_held.fav);
+                        LootBarter::XferDir::kPickStore,
+                        UnitRef{ a_held.uid, a_held.sig },
+                        a_held.key, 0, a_held.fav);
                 } else {
                     LootBarter::RequestPickStore(a_held.obj, 1, a_held.uid, a_held.sig, a_held.key,
                                                  a_held.fav, a_held.xlIdx);
@@ -17663,8 +17823,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // GRID comes through, one step earlier.
         if (g_held->isBag) StoreBagContents(g_held->key, obj);
         LootBarter::RequestStore(obj, g_held->count,
-            HeldUidOf(g_held->key, g_held->uid), g_held->sig, g_held->fav,
-            -1, g_held->key);
+            UnitRef{ HeldUidOf(g_held->key, g_held->uid), g_held->sig },
+            g_held->fav, g_held->key);
         NotePendingRemove(obj, g_held->key, g_held->count, g_held->xlIdx);
         if (g_sound) g_sound(obj, false);
         g_held.reset();

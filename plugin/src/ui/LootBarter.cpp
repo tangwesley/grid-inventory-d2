@@ -430,6 +430,17 @@ namespace FUI::LootBarter
             // locked, the other is not), so worn-ness partitions the match
             // rather than merely scoring it.
             bool worn = false;
+
+            // ★THE WHOLE IDENTITY, so a caller cannot take half of it by
+            // accident. Hand-assembling `UnitRef{ x.uid, x.sig, ... }` is how a
+            // field goes missing: measured 2026-09-02, one source type was
+            // being written out FIVE different ways across the file, and the
+            // take-all lost `worn` that way -- the item came off a follower and
+            // the resolver was told it had not.
+            // ★A subset is still allowed where it is meant; it just has to be
+            // written on purpose now, next to a reason, instead of looking
+            // exactly like the complete answer.
+            [[nodiscard]] UnitRef unit() const { return { uid, sig, xlIdx, worn }; }
         };
         struct ContLayout
         {
@@ -599,7 +610,7 @@ namespace FUI::LootBarter
                         b.count = take;
                         if (take > 0) GoldCoins::ExpectIncoming(take);
                     }
-                    if (take > 0) RequestTake(obj, take, 0, b.sig, false);
+                    if (take > 0) RequestTake(obj, take, UnitRef{ 0, b.sig });
                 }
             }
             SKSE::log::info("[LOOT] nested bag leaves with {} entr(ies)",
@@ -857,7 +868,7 @@ namespace FUI::LootBarter
                             if (take > 0) GoldCoins::ExpectIncoming(take);
                         }
                         if (take <= 0) continue;
-                        RequestTake(obj, take, 0, b.sig, false);
+                        RequestTake(obj, take, UnitRef{ 0, b.sig });
                     }
                 }
                 SKSE::log::info("[LOOT] bag taken back, {} bundled kind(s) follow",
@@ -1183,10 +1194,13 @@ namespace FUI::LootBarter
     bool SliderActive() { return g_slider.active; }
 
     void OpenSlider(RE::TESBoundObject* a_obj, int a_max, XferDir a_dir,
-                    const std::string& a_srcKey, int a_unitValue,
-                    std::uint16_t a_uid, std::uint16_t a_sig, bool a_worn, bool a_fav,
-                    int a_xlIdx)
+                    const UnitRef& a_unit, const std::string& a_srcKey,
+                    int a_unitValue, bool a_fav)
     {
+        const std::uint16_t a_uid   = a_unit.uid;
+        const std::uint16_t a_sig   = a_unit.sig;
+        const int           a_xlIdx = a_unit.xlIdx;
+        const bool          a_worn  = a_unit.worn;
         if (!a_obj || a_max <= 1) return;
         // player-receiving dirs: cap the slider at what the boards (main +
         // open bags + partial stacks) can actually accept, so a stack buy/take
@@ -1323,9 +1337,11 @@ namespace FUI::LootBarter
     }
 
     bool RequestTake(RE::TESBoundObject* a_obj, int a_count,
-                     std::uint16_t a_uid, std::uint16_t a_sig, bool a_fromWorn,
-                     bool a_useAfter)
+                     const UnitRef& a_unit, bool a_useAfter)
     {
+        const std::uint16_t a_uid      = a_unit.uid;
+        const std::uint16_t a_sig      = a_unit.sig;
+        const bool          a_fromWorn = a_unit.worn;
         if (a_obj && a_count > 0) {
             // GI42: refuse BEFORE arming any suppression -- a transfer that will
             // not run must not leave the board and the engine disagreeing.
@@ -1352,8 +1368,11 @@ namespace FUI::LootBarter
     }
 
     int RequestTakeAll(RE::TESBoundObject* a_obj, int a_count,
-                       std::uint16_t a_uid, std::uint16_t a_sig, bool a_fromWorn)
+                       const UnitRef& a_unit)
     {
+        const std::uint16_t a_uid      = a_unit.uid;
+        const std::uint16_t a_sig      = a_unit.sig;
+        const bool          a_fromWorn = a_unit.worn;
         if (!a_obj || a_count <= 0) return 0;
         // ★GOLD IS EXEMPT FROM THE CLAMP, not from the rule. Coins are a
         // mirror of the ledger and occupy no cells, so "how many fit" has no
@@ -1367,7 +1386,7 @@ namespace FUI::LootBarter
                 return 0;
             }
         }
-        if (!RequestTake(a_obj, want, a_uid, a_sig, a_fromWorn)) return 0;
+        if (!RequestTake(a_obj, want, a_unit)) return 0;
         // ★Partial is a RESULT, not a refusal: what fit is already on its way,
         // and the note explains the units still sitting in the container so
         // the shortfall is never read as the click having missed.
@@ -1380,9 +1399,12 @@ namespace FUI::LootBarter
     }
 
     void RequestStore(RE::TESBoundObject* a_obj, int a_count,
-                      std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
-                      int a_xlIdx, const std::string& a_srcKey, int a_rot)
+                      const UnitRef& a_unit, bool a_fav,
+                      const std::string& a_srcKey, int a_rot)
     {
+        const std::uint16_t a_uid   = a_unit.uid;
+        const std::uint16_t a_sig   = a_unit.sig;
+        const int           a_xlIdx = a_unit.xlIdx;
         if (a_obj && a_count > 0) {
             g_xfer.push_back({ XferReq::kStore, a_obj, a_count, 0, 0, a_srcKey,
                                a_uid, a_sig, false, a_fav, a_xlIdx });
@@ -1402,9 +1424,11 @@ namespace FUI::LootBarter
         }
     }
 
-    void RequestBuy(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
-                    std::uint16_t a_uid, std::uint16_t a_sig)
+    void RequestBuy(RE::TESBoundObject* a_obj, int a_count, int a_price, const UnitRef& a_unit,
+                    int a_baseTotal)
     {
+        const std::uint16_t a_uid = a_unit.uid;
+        const std::uint16_t a_sig = a_unit.sig;
         // (the guard had no braces: a rejected buy still consumed the acting
         // spot, so the next purchase landed on a cell it was not given)
         if (a_obj && a_count > 0) {
@@ -1420,10 +1444,13 @@ namespace FUI::LootBarter
         }
     }
 
-    void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
-                     std::uint16_t a_uid, std::uint16_t a_sig, bool a_fav,
-                     int a_xlIdx, const std::string& a_srcKey)
+    void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price,
+                     const UnitRef& a_unit, int a_baseTotal, bool a_fav,
+                     const std::string& a_srcKey)
     {
+        const std::uint16_t a_uid   = a_unit.uid;
+        const std::uint16_t a_sig   = a_unit.sig;
+        const int           a_xlIdx = a_unit.xlIdx;
         if (a_obj && a_count > 0) {
             g_xfer.push_back({ XferReq::kSell, a_obj, a_count, a_price, a_baseTotal,
                                a_srcKey, a_uid, a_sig, false, a_fav, a_xlIdx });
@@ -1434,8 +1461,11 @@ namespace FUI::LootBarter
     }
 
     void RequestPickTake(RE::TESBoundObject* a_obj, int a_count,
-                         std::uint16_t a_uid, std::uint16_t a_sig, bool a_fromWorn)
+                         const UnitRef& a_unit)
     {
+        const std::uint16_t a_uid      = a_unit.uid;
+        const std::uint16_t a_sig      = a_unit.sig;
+        const bool          a_fromWorn = a_unit.worn;
         // (the guard had no braces, so the spot was consumed even when nothing
         // was queued -- a rejected request stole the next cell's placement)
         if (a_obj && a_count > 0) {
@@ -2637,14 +2667,16 @@ namespace FUI::LootBarter
                 if (!nk.empty()) {
                     g_actingSpot = nk;   // the carry names its own cell
                     Grid::BeginPartnerCarry(g_slider.obj, g_slider.value,
-                                            g_slider.unitValue, -1.0f, -1.0f,
-                                            g_slider.uid, g_slider.xlIdx, 0, 0);
+                                            g_slider.unitValue,
+                                            Grid::UnitRef{ g_slider.uid, 0,
+                                                           g_slider.xlIdx });
                 }
                 break;
             }
             case XferDir::kPickTake:
-                RequestPickTake(g_slider.obj, g_slider.value, g_slider.uid, g_slider.sig,
-                                g_slider.worn);
+                RequestPickTake(g_slider.obj, g_slider.value,
+                                UnitRef{ g_slider.uid, g_slider.sig, -1,
+                                         g_slider.worn });
                 break;
             case XferDir::kPickStore:
                 // pending-remove is noted on the WIN inside the Tick (a lost
@@ -2668,25 +2700,26 @@ namespace FUI::LootBarter
                     Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
                 } else {
                     RequestBuy(g_slider.obj, g_slider.value, total,
-                        g_slider.unitValue * g_slider.value,
-                        g_slider.uid, g_slider.sig);
+                        UnitRef{ g_slider.uid, g_slider.sig },
+                        g_slider.unitValue * g_slider.value);
                 }
                 break;
             }
             case XferDir::kSell: {
                 const int total = SellPriceTotal(g_slider.obj, g_slider.unitValue, g_slider.value);
                 if (AskIfMerchantShort(g_slider.obj, g_slider.value, total,
+                                       UnitRef{ g_slider.uid, g_slider.sig,
+                                                g_slider.xlIdx },
                                        g_slider.unitValue * g_slider.value,
-                                       g_slider.srcKey, g_slider.uid, g_slider.sig,
-                                       g_slider.fav, g_slider.xlIdx)) {
+                                       g_slider.srcKey, g_slider.fav)) {
                     // the popup inherited the sale (or the purse was empty):
                     // the slider closes below either way and the board is
                     // untouched, so the pending-remove waits for the answer
                 } else {
                     RequestSell(g_slider.obj, g_slider.value, total,
+                        UnitRef{ g_slider.uid, g_slider.sig, g_slider.xlIdx },
                         g_slider.unitValue * g_slider.value,
-                        g_slider.uid, g_slider.sig, g_slider.fav, g_slider.xlIdx,
-                        g_slider.srcKey);
+                        g_slider.fav, g_slider.srcKey);
                     Grid::NotePendingRemove(g_slider.obj, g_slider.srcKey, g_slider.value,
                                             g_slider.xlIdx);
                 }
@@ -2701,10 +2734,14 @@ namespace FUI::LootBarter
         ImGui::End();
     }
 
-    void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal,
-                        const std::string& a_srcKey, std::uint16_t a_uid, std::uint16_t a_sig,
-                        bool a_fav, int a_xlIdx, bool a_shortGold, int a_fullPrice)
+    void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price,
+                        const UnitRef& a_unit, int a_baseTotal,
+                        const std::string& a_srcKey, bool a_fav,
+                        bool a_shortGold, int a_fullPrice)
     {
+        const std::uint16_t a_uid   = a_unit.uid;
+        const std::uint16_t a_sig   = a_unit.sig;
+        const int           a_xlIdx = a_unit.xlIdx;
         if (a_obj && a_count > 0) {
             g_confirm = { true, a_obj, a_count, a_price, a_baseTotal, a_srcKey, a_uid, a_sig,
                           a_fav, a_xlIdx, a_shortGold,
@@ -2726,9 +2763,8 @@ namespace FUI::LootBarter
     // purse, or the popup now holding the offer. Either way nothing left the
     // player's pack, so the caller must not sell and must not touch the board.
     bool AskIfMerchantShort(RE::TESBoundObject* a_obj, int a_count, int a_price,
-                            int a_baseTotal, const std::string& a_srcKey,
-                            std::uint16_t a_uid, std::uint16_t a_sig,
-                            bool a_fav, int a_xlIdx)
+                            const UnitRef& a_unit, int a_baseTotal,
+                            const std::string& a_srcKey, bool a_fav)
     {
         // A free sale (price 0) has nothing for the merchant to be short OF --
         // it is the valueless-goods case, not the poor-merchant one.
@@ -2742,8 +2778,8 @@ namespace FUI::LootBarter
             Sfx::FailNote(Lang::T(Lang::Str::MerchantNoGold));
             return true;
         }
-        AskSellConfirm(a_obj, a_count, purse, a_baseTotal, a_srcKey, a_uid, a_sig,
-                       a_fav, a_xlIdx, /*shortGold=*/true, /*fullPrice=*/a_price);
+        AskSellConfirm(a_obj, a_count, purse, a_unit, a_baseTotal, a_srcKey,
+                       a_fav, /*shortGold=*/true, /*fullPrice=*/a_price);
         return true;
     }
 
@@ -2842,10 +2878,10 @@ namespace FUI::LootBarter
                              ImGui::IsKeyPressed(ImGuiKey_Escape, false)) && !fresh;
         const bool ok = !cancel && (okClick || keyOk);
         if (ok) {
-            // ★★RE-READ THE PURSE AT THE ANSWER, not at the question. The offer
+            // Re-read the purse at the ANSWER, not at the question. The offer
             // was "all the gold they have", and how much that is was measured a
-            // frame or a hundred ago -- a merchant who has since been paid (a
-            // buy settling out of the same window) must not hand over a figure
+            // frame or a hundred ago. A merchant who has since been paid -- a
+            // buy settling out of the same window -- must not hand over a figure
             // they no longer hold, and one who has since been emptied must not
             // be robbed of goods for nothing.
             int price = g_confirm.price;
@@ -2858,9 +2894,9 @@ namespace FUI::LootBarter
                     return;
                 }
             }
-            RequestSell(g_confirm.obj, g_confirm.count, price, g_confirm.base,
-                        g_confirm.uid, g_confirm.sig, g_confirm.fav, g_confirm.xlIdx,
-                        g_confirm.srcKey);
+            RequestSell(g_confirm.obj, g_confirm.count, price,
+                        UnitRef{ g_confirm.uid, g_confirm.sig, g_confirm.xlIdx },
+                        g_confirm.base, g_confirm.fav, g_confirm.srcKey);
             Grid::NotePendingRemove(g_confirm.obj, g_confirm.srcKey, g_confirm.count,
                                     g_confirm.xlIdx);
             g_confirm.active = false;
@@ -3398,9 +3434,9 @@ namespace
                     // the same "N / cap G" line the shelf pouch cell shows
                     const int tipGold = GoldCoins::IsPouch(b.form)
                                             ? (std::max)(0, b.gold) : -1;
-                    Grid::DrawItemTooltip(s.obj, b.count, tipGold, -1, false,
-                                          SourceRef(), Grid::ExtraScope::kAny,
-                                          0, -1, 0, 0,
+                    Grid::DrawItemTooltip(s.obj, b.count, Grid::UnitRef{},
+                                          Grid::ExtraScope::kAny,
+                                          tipGold, -1, false, SourceRef(),
                                           Grid::TileContext{ {}, false, false, true, false });
                     if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
                         // lift it: the bundle keeps the entry until the carry
@@ -3411,7 +3447,7 @@ namespace
                         g_carryGlow = b.glow;   // (1.3.2)
                         g_carryStolen = b.stolen;
                         Grid::BeginPartnerCarry(s.obj, b.count, 0,
-                                                -1.0f, -1.0f, 0, -1, 0, s.rot);
+                                                Grid::UnitRef{}, 0, s.rot);
                     } else if (ImGui::IsItemClicked(ImGuiMouseButton_Right) &&
                                GoldCoins::IsPouch(b.form)) {
                         // ★(1.5.x) a bundled POUCH manages on right-click,
@@ -3509,7 +3545,7 @@ namespace
             std::erase_if(bundle,
                 [&](const BundleItem& b) { return b.id == takeId; });
             g_actingSpot.clear();
-            RequestTake(takeObj, takeCount, 0, takeSig);
+            RequestTake(takeObj, takeCount, UnitRef{ 0, takeSig });
         }
 
         // ★(1.3.2) drop ghost, the same one both boards draw: green = the
@@ -3934,8 +3970,7 @@ namespace
                             g_carryGlow = lifted.glow;   // (1.3.2)
                             g_carryStolen = lifted.stolen;
                             Grid::BeginPartnerCarry(liftedObj, lifted.count, 0,
-                                                    -1.0f, -1.0f, 0, -1, 0,
-                                                    lifted.rot);
+                                                    Grid::UnitRef{}, 0, lifted.rot);
                         }
                     }
                 }
@@ -4157,7 +4192,7 @@ namespace
             return;
         }
         g_actingSpot = req.spot;   // GI20: the read cell is the one that leaves
-        RequestTake(obj, 1, req.uid, req.sig, false);
+        RequestTake(obj, 1, UnitRef{ req.uid, req.sig });
         SKSE::log::info("[LOOT] book taken from the page (E)");
     }
 
@@ -4574,6 +4609,17 @@ namespace
                 if (((rot ^ a_rot) & 1) != 0) std::swap(w, h);
                 rot = a_rot & 3;
             }
+
+            // ★THE WHOLE IDENTITY, so a caller cannot take half of it by
+            // accident. Hand-assembling `UnitRef{ x.uid, x.sig, ... }` is how a
+            // field goes missing: measured 2026-09-02, one source type was
+            // being written out FIVE different ways across the file, and the
+            // take-all lost `worn` that way -- the item came off a follower and
+            // the resolver was told it had not.
+            // ★A subset is still allowed where it is meant; it just has to be
+            // written on purpose now, next to a reason, instead of looking
+            // exactly like the complete answer.
+            [[nodiscard]] UnitRef unit() const { return { uid, sig, xlIdx, worn }; }
         };
 
         // F7: this frame's partner-grid geometry for drop-cell math — set by
@@ -4709,6 +4755,17 @@ namespace
             int                 w = 1;
             int                 h = 1;
             int                 rot = 0;
+
+            // ★THE WHOLE IDENTITY, so a caller cannot take half of it by
+            // accident. Hand-assembling `UnitRef{ x.uid, x.sig, ... }` is how a
+            // field goes missing: measured 2026-09-02, one source type was
+            // being written out FIVE different ways across the file, and the
+            // take-all lost `worn` that way -- the item came off a follower and
+            // the resolver was told it had not.
+            // ★A subset is still allowed where it is meant; it just has to be
+            // written on purpose now, next to a reason, instead of looking
+            // exactly like the complete answer.
+            [[nodiscard]] UnitRef unit() const { return { uid, sig, xlIdx, worn }; }
         };
 
         void ReconcileContainer(ContLayout& a_cl, RE::TESObjectREFR* a_source,
@@ -5066,7 +5123,14 @@ namespace
                 }
                 const auto def = Grid::ResolveDef(obj);
                 const bool perUnit = Grid::StackCap(obj) <= 1;
-                // ★★★POSITION, VERIFIED, THEN THE POOL. See ExtraForUnit.
+                // POSITION, VERIFIED, THEN THE POOL. See ExtraForUnit, which
+                // does all three steps in one place. Upstream fixed the same
+                // fault inline here (resolve by position, then drop the answer
+                // when its signature disagrees); the shared resolver already
+                // does that and then goes one step further, allowing a WORN
+                // list as a last resort -- which these cells need, because a
+                // corpse's armour and a pickpocket mark's gear are worn on
+                // purpose and would otherwise lose their temper and enchantment.
                 //
                 // A list is found by uid, or failing that by its recorded
                 // position, or failing THAT by signature. Both of the later two
@@ -5515,16 +5579,11 @@ namespace
                         const int tipGold =
                             GoldCoins::IsPouch(it.obj->GetFormID())
                                 ? ShelfGoldOf(it.spotKey) : -1;
-                        Grid::DrawItemTooltip(it.obj, it.count, tipGold, price, true,
-                                              SourceRef(),
+                        Grid::DrawItemTooltip(it.obj, it.count,
+                                              Grid::UnitRef{ it.uid, it.sig, it.xlIdx },
                                               it.perUnit ? Grid::ExtraScope::kUnit
                                                          : Grid::ExtraScope::kAny,
-                                              // ★it.sig, not 0. The partner
-                                              // side has no uid and no list
-                                              // position to offer, so the
-                                              // signature is the only handle
-                                              // the tooltip can resolve with.
-                                              it.uid, it.xlIdx, it.sig, 0,
+                                              tipGold, price, true, SourceRef(),
                                               // ★(1.5.0 audit) the SPOT KEY
                                               // rides along so the bag verb
                                               // can ask whether its window is
@@ -5593,7 +5652,7 @@ namespace
                             g_carryGlow = it.glow;       // (1.3.2) markers ride along
                             g_carryStolen = it.stolen;   // ★including this one
                             Grid::BeginPartnerCarry(it.obj, it.count, it.value,
-                                -1.0f, -1.0f, it.uid, it.xlIdx, it.ord, it.rot);
+                                Grid::UnitRef{ it.uid, 0, it.xlIdx }, it.ord, it.rot);
                         }
                     }
                     // TAKE trigger: right-click (whole move) OR shift+left-click
@@ -5716,7 +5775,8 @@ namespace
                                 // so passing through it is the only road there
                                 // is, not a shortcut.
                                 g_actingSpot = it.spotKey;   // GI20
-                                RequestTake(it.obj, 1, it.uid, it.sig, it.worn,
+                                RequestTake(it.obj, 1,
+                                            it.unit(),
                                             /*useAfter=*/true);
                             }
                         } else if (rc || splitLc) {
@@ -5731,8 +5791,8 @@ namespace
                                 // the whole cell home.
                                 g_actingSpot = it.spotKey;   // GI20
                                 OpenSlider(it.obj, it.count, XferDir::kShelfSplit,
-                                           it.spotKey, it.value, it.uid, it.sig,
-                                           it.worn, false, it.xlIdx);
+                                           it.unit(),
+                                           it.spotKey, it.value);
                             } else if (it.obj->IsGold()) {
                                 // ★(PLAN_SPACE_AUTHORITY §7, user rule) a
                                 // right-click on a GOLD cell hauls THAT cell's
@@ -5745,7 +5805,8 @@ namespace
                                 // occupies no cells (mirror), same exemption
                                 // the pickpocket branch states.
                                 g_actingSpot = it.spotKey;   // GI20
-                                RequestTake(it.obj, it.count, it.uid, it.sig, it.worn);
+                                RequestTake(it.obj, it.count,
+                                            it.unit());
                             } else {
                                 // ★(1.5.x stack flow) THE WHOLE CELL, exactly
                                 // as the gold branch above hauls its whole
@@ -5758,7 +5819,8 @@ namespace
                                 // amount never stopped being possible -- it
                                 // stopped being compulsory.
                                 g_actingSpot = it.spotKey;   // GI20
-                                RequestTakeAll(it.obj, it.count, it.uid, it.sig, it.worn);
+                                RequestTakeAll(it.obj, it.count,
+                                               it.unit());
                             }
                         }
                     } else if (g_mode == Mode::kPickpocket) {
@@ -5775,10 +5837,12 @@ namespace
                             } else if (!(it.obj->IsGold() || Grid::CanFitNewItem(it.obj))) {
                                 Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
                             } else if (it.count > 1) {
-                                OpenSlider(it.obj, it.count, XferDir::kPickTake, {}, 0, it.uid, it.sig, it.worn);
+                                OpenSlider(it.obj, it.count, XferDir::kPickTake,
+                                           UnitRef{ it.uid, it.sig, -1, it.worn });
                             } else {
                                 g_actingSpot = it.spotKey;
-                                RequestPickTake(it.obj, 1, it.uid, it.sig, it.worn);
+                                RequestPickTake(it.obj, 1,
+                                                it.unit());
                             }
                         }
                     } else if (g_mode == Mode::kBarter) {
@@ -5791,7 +5855,8 @@ namespace
                             } else {
                             g_actingSpot = it.spotKey;   // GI20
                             if (it.count > 1) {
-                                OpenSlider(it.obj, it.count, XferDir::kBuy, {}, it.value, it.uid, it.sig);
+                                OpenSlider(it.obj, it.count, XferDir::kBuy,
+                                           UnitRef{ it.uid, it.sig }, {}, it.value);
                             } else {
                                 const int total = BuyPrice(it.obj, it.value);
                                 if (Grid::GoldAmount() < total) {
@@ -5799,7 +5864,7 @@ namespace
                                 } else if (!Grid::CanFitNewItem(it.obj)) {
                                     Sfx::FailNote(Lang::T(Lang::Str::InventoryFull));
                                 } else {
-                                    RequestBuy(it.obj, 1, total, it.value, it.uid, it.sig);
+                                    RequestBuy(it.obj, 1, total, UnitRef{ it.uid, it.sig }, it.value);
                                 }
                             }
                             }
@@ -6179,9 +6244,31 @@ namespace
                 // total/used already span the bags (open or closed) — adding
                 // bag room on top of that double-counted it and over-took
                 int free = Grid::SpaceTotal() - Grid::SpaceUsed();
+                // ★★★TAKE-ALL LEAVES A LIVING FOLLOWER DRESSED.
+                //
+                // Strip an NPC of every outfit item and the engine puts the
+                // whole outfit back -- HasOutfitItems goes false and
+                // AddWornOutfit MINTS fresh copies (RE/A/Actor.h). An outfit is
+                // a template, not an inventory, so the player ends up holding
+                // the gear AND the follower wearing it again. Measured
+                // 2026-09-02: taking everything but the shield was fine; the
+                // shield tipped it, and the whole default outfit came back.
+                //
+                // ★This is the engine's rule and it is NOT overridden here:
+                // right-click still takes a worn piece, corpses still strip
+                // bare, and a follower handed a replacement outfit first can
+                // still be emptied. What changes is the scope of R, which is
+                // OUR key -- vanilla has no take-all at all, so what it reaches
+                // for is ours to decide. It reaches for the pack, not the body.
+                //
+                // ★★Living followers only. A dead one is a corpse and loots
+                // like any other container (CompanionPartner says so), and a
+                // chest has no body to undress.
+                const bool dressedPartner = CompanionPartner();
                 for (auto& c : cells) {
+                    if (dressedPartner && c.worn) continue;
                     if (c.obj->IsGold()) {
-                        RequestTake(c.obj, c.count);   // gold bypasses space
+                        RequestTake(c.obj, c.count, UnitRef{});   // gold bypasses space
                         continue;
                     }
                     // ★(1.6) a KEY bypasses the budget for the same reason
@@ -6193,7 +6280,11 @@ namespace
                     // the chest with a whole empty board to put them on.
                     if (c.obj->Is(RE::FormType::KeyMaster)) {
                         g_actingSpot = c.spotKey;
-                        RequestTake(c.obj, c.count);
+                        // The cell's identity rides here too, for the same
+                        // reason the budgeted take below says so: a key can be
+                        // one of several on a shelf, and a bundled value only
+                        // helps if it is filled.
+                        RequestTake(c.obj, c.count, c.unit());
                         continue;
                     }
                     const int span = Grid::CellSpanOf(c.obj);
@@ -6202,7 +6293,12 @@ namespace
                         // pouch gold and bag bundles ride the slot, and the
                         // pool-prune fallback only ran for vanished pools.
                         g_actingSpot = c.spotKey;
-                        RequestTake(c.obj, c.count);
+                        // ★c.worn RIDES TOO. The cell knows whether the unit
+                        // is on the body, and this dropped it when the four
+                        // loose arguments became one -- a bundled value only
+                        // helps if it is FILLED.
+                        RequestTake(c.obj, c.count,
+                                    c.unit());
                         free -= span;
                     }
                 }
@@ -6712,15 +6808,17 @@ namespace
     }
 
     void NoteStoredUnits(RE::TESBoundObject* a_obj, int a_count,
-                         std::uint16_t a_uid, std::uint16_t a_sig)
+                         const UnitRef& a_unit)
     {
-        NoteIn(a_obj, a_uid, a_sig, a_count);
+        NoteIn(a_obj, a_unit.uid, a_unit.sig, a_count);
     }
 
     void PlaceStoredCell(RE::TESBoundObject* a_obj, int a_count,
-                         int a_col, int a_row, int a_rot,
-                         std::uint16_t a_uid, std::uint16_t a_sig)
+                         int a_col, int a_row, const UnitRef& a_unit,
+                         int a_rot)
     {
+        const std::uint16_t a_uid = a_unit.uid;
+        const std::uint16_t a_sig = a_unit.sig;
         auto* cl = BoardFor();
         if (!cl || !a_obj || a_count <= 0) return;
         const auto def = Grid::ResolveDef(a_obj);

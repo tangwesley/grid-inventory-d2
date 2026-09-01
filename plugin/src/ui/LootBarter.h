@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include "ui/UnitRef.h"
 #include <string>
 
 // PLAN_LOOT_BARTER — the partner window (container / merchant) that opens
@@ -87,8 +88,8 @@ namespace FUI::LootBarter
     // ExpectIncoming): a promise made for a transfer that was refused up front
     // is a lie, and the refusal is invisible from outside without this.
     bool RequestTake(RE::TESBoundObject* a_obj, int a_count,
-                     std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                     bool a_fromWorn = false, bool a_useAfter = false);
+                     const UnitRef& a_unit,   // .worn = it came off the body
+                     bool a_useAfter = false);
     // ★(1.5.x stack flow) THE WHOLE CELL, clamped to what the boards can hold.
     //
     // Right-clicking a stack used to open the quantity window; it hauls the
@@ -102,8 +103,7 @@ namespace FUI::LootBarter
     // question. Returns the units requested (0 = none fit; the note has
     // already played, and the caller must not queue anything else).
     int RequestTakeAll(RE::TESBoundObject* a_obj, int a_count,
-                       std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                       bool a_fromWorn = false);
+                       const UnitRef& a_unit);
     // a_xlIdx: where the outgoing unit sits, so the sink removes THAT one
     // (see XferReq::xlIdx). -1 = unknown, historical behaviour.
     // a_srcKey: the tile the units leave (B3-b) -- rides the ledger request so
@@ -117,25 +117,23 @@ namespace FUI::LootBarter
     // stored itself standing, and the turn the player made was thrown away
     // somewhere between the drop and the shelf.
     void RequestStore(RE::TESBoundObject* a_obj, int a_count,
-                      std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                      bool a_fav = false, int a_xlIdx = -1,
+                      const UnitRef& a_unit, bool a_fav = false,
                       const std::string& a_srcKey = {},
                       int a_rot = 0);   // player -> partner (GI36: a_fav)
     // barter (Phase 5): item move + gold settlement + speech xp, all on Tick.
     // a_baseTotal = total BASE value of the goods — vanilla speech XP points
     // (the haggled price doesn't matter for XP).
-    void RequestBuy(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal = 0,
-                    std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);   // merchant -> player
-    void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal = 0,
-                     std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                     bool a_fav = false, int a_xlIdx = -1,
+    void RequestBuy(RE::TESBoundObject* a_obj, int a_count, int a_price, const UnitRef& a_unit,
+                    int a_baseTotal = 0);            // merchant -> player
+    void RequestSell(RE::TESBoundObject* a_obj, int a_count, int a_price,
+                     const UnitRef& a_unit, int a_baseTotal = 0,
+                     bool a_fav = false,
                      const std::string& a_srcKey = {});  // player -> merchant (GI36: a_fav)
     // F6b: pickpocket moves — each rolls PlayerCharacter::AttemptPickpocket
     // on the Tick (crime / XP / detection handled by the engine); a failed
     // roll force-closes the menu, already-succeeded moves stay.
     void RequestPickTake(RE::TESBoundObject* a_obj, int a_count,                      // target -> player
-                         std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                         bool a_fromWorn = false);
+                         const UnitRef& a_unit);
     void RequestPickStore(RE::TESBoundObject* a_obj, int a_count,                       // player -> target
                           std::uint16_t a_uid, std::uint16_t a_sig,
                           const std::string& a_srcKey = {},
@@ -330,36 +328,37 @@ namespace FUI::LootBarter
     // GI25: a_uid/a_sig name the POOL the units come from, so the deferred
     // confirm still moves the right sub-stack.
     void OpenSlider(RE::TESBoundObject* a_obj, int a_max, XferDir a_dir,
+                    const UnitRef& a_unit,  // uid/sig/xlIdx/worn, in one piece
                     const std::string& a_srcKey = {}, int a_unitValue = 0,
-                    std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                    bool a_worn = false,    // a_worn: the cell came off the body
-                    bool a_fav = false,     // GI36: the cell wore a star
-                    int a_xlIdx = -1);      // (1.3.3) which unit leaves
+                    bool a_fav = false);    // GI36: the cell wore a star
     void DrawSlider();   // UIRoot::Render (top level)
     [[nodiscard]] bool SliderActive();
 
     // Phase 5: favorite-sale confirm popup. a_baseTotal = speech XP points.
-    // (1.6.1) a_shortGold turns it into the POOR-MERCHANT offer instead:
-    // a_price is then the merchant's whole purse and a_fullPrice the sum the
-    // sale fell short of. Prefer AskIfMerchantShort below -- it decides which
+    // (1.6.1) a_shortGold turns this into the POOR-MERCHANT offer instead:
+    // a_price is then the merchant's whole purse, and a_fullPrice the sum the
+    // sale fell short of. Prefer AskIfMerchantShort below, which decides which
     // of the two (or neither) applies.
-    void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price, int a_baseTotal = 0,
+    //
+    // The identity is a UnitRef ahead of the optional parameters, like every
+    // other call in this header. The two poor-merchant arguments stay at the
+    // tail because they describe the POPUP rather than the unit -- and they are
+    // the pair a caller genuinely omits, which is what a default is for.
+    void AskSellConfirm(RE::TESBoundObject* a_obj, int a_count, int a_price,
+                        const UnitRef& a_unit, int a_baseTotal = 0,
                         const std::string& a_srcKey = {},
-                        std::uint16_t a_uid = 0, std::uint16_t a_sig = 0,
-                        bool a_fav = true,
-                        int a_xlIdx = -1,   // GI25 / GI36
+                        bool a_fav = true,   // GI25 / GI36 (this popup only fires for a star)
                         bool a_shortGold = false, int a_fullPrice = 0);
 
-    // ★(1.6.1) VANILLA PARITY, restored: a merchant who cannot cover the price
-    // OFFERS what they have rather than refusing the sale. Every sell road
-    // calls this before it commits and stands down when it returns true --
-    // either the buzz already sounded (an empty purse buys nothing) or the
-    // popup now owns the offer, and in both cases nothing has left the pack.
-    // a_price is the full asking price; a_fav only decorates the popup.
+    // (1.6.1) Vanilla parity, restored: a merchant who cannot cover the price
+    // OFFERS what they have rather than refusing the sale outright. Every sell
+    // road calls this before it commits, and stands down when it returns true
+    // -- either the buzz has already sounded (an empty purse buys nothing) or
+    // the popup now owns the offer, and in both cases nothing has left the
+    // pack. a_price is the full asking price; a_fav only decorates the popup.
     [[nodiscard]] bool AskIfMerchantShort(RE::TESBoundObject* a_obj, int a_count, int a_price,
-                                          int a_baseTotal, const std::string& a_srcKey,
-                                          std::uint16_t a_uid, std::uint16_t a_sig,
-                                          bool a_fav, int a_xlIdx);
+                                          const UnitRef& a_unit, int a_baseTotal,
+                                          const std::string& a_srcKey, bool a_fav);
     void DrawConfirm();   // UIRoot::Render (top level)
     [[nodiscard]] bool ConfirmActive();
 
@@ -474,15 +473,15 @@ namespace FUI::LootBarter
     // and is swept away on the very next pass -- the aimed square would be lost
     // for exactly the items most worth aiming (a named weapon, a tempered one).
     void PlaceStoredCell(RE::TESBoundObject* a_obj, int a_count,
-                         int a_col, int a_row, int a_rot = 0,
-                         std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);
+                         int a_col, int a_row, const UnitRef& a_unit,
+                         int a_rot = 0);
 
     // A store with no aimed square (right-click, take-all, a slider the player
     // opened from the list): no cell is placed, but the units still have to
     // count as present until the engine catches up, or the reconcile would show
     // them arriving twice.
     void NoteStoredUnits(RE::TESBoundObject* a_obj, int a_count,
-                         std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);
+                         const UnitRef& a_unit);
 
     // ⛔AimStoreAt is gone (1.5.x stack flow). It held the square a stack was
     //  dropped on ACROSS the store quantity popup, because the drop happened
