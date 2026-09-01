@@ -25,11 +25,11 @@ namespace FUI::Loadout
             // field and no cosave bump: armour has always ignored the LeftHand
             // equip slot on the way back out, so the flag was free to mean
             // "which of the two slots" for the one item type that has two.
-            // ★(1.6) Both rings are engine-worn now, so this is PLACEMENT and
-            // nothing more -- which cell the tile is drawn in. It has to be
-            // recorded because DualRing forgets a cell the moment its ring
-            // leaves the body, and UnequipAll takes both off before the new
-            // set goes on.
+            // (1.6) Both rings are worn by the engine now, so for a ring this
+            // flag means PLACEMENT and nothing more: which cell the tile is
+            // drawn in. It has to be recorded here because DualRing forgets a
+            // cell the moment its ring leaves the body, and UnequipAll takes
+            // both rings off before the new set goes on.
             bool          leftHand = false;
             // D4-b: WHICH unit, not just which form. A preset that remembers
             // only the FormID cannot tell the tempered dagger from the plain
@@ -77,16 +77,19 @@ namespace FUI::Loadout
             return nameOf(n);
         }
 
-        // ★THE FIRST PRESET IS A GIFT, not a purchase. A player who has never
-        // spent gold still has somewhere to put a second set, so the feature
-        // shows what it is on a new character instead of being a priced-out
-        // row. Written as an INVARIANT rather than a one-off at new-game: it
-        // also tops up saves made before the gift existed, and it survives the
-        // player deleting the tab -- deleting the only preset empties it
-        // instead of taking the feature away (and instead of leaving
-        // NextCost with zero presets to price against).
-        // ★NextCost counts PURCHASED presets, so the gift does not push the
-        // first real purchase up a tier: buying still starts at 5000.
+        // The first preset is a gift rather than a purchase. A player who has
+        // never spent any gold still has somewhere to put a second set, so the
+        // feature can show what it does on a new character instead of being a
+        // priced-out row.
+        //
+        // This is written as an invariant rather than as a one-off at new-game,
+        // which buys two things: it also tops up saves made before the gift
+        // existed, and it survives the player deleting the tab. Deleting the
+        // only preset empties it instead of removing the feature -- and instead
+        // of leaving NextCost with zero presets to price against.
+        //
+        // NextCost counts PURCHASED presets, so the gift does not push the
+        // first real purchase up a tier. Buying still starts at 5000.
         void EnsureFreePreset()
         {
             if (g_loadouts.size() >= 2) return;
@@ -117,12 +120,13 @@ namespace FUI::Loadout
             return true;   // not a weapon and reported in both hands
         }
 
-        // What a SET carries in a hand: gear, and only gear. ★A SCROLL IS NOT
-        // GEAR -- it is a consumable, and a tab holding one would reserve a
-        // unit off the board for a tab that is not being worn and then try to
-        // re-equip a copy the player has since spent. Presets carry the
-        // weapon and the torch; what is readied in a hand is the player's
-        // business each time.
+        // What a SET carries in a hand: gear, and only gear.
+        //
+        // A scroll is not gear -- it is a consumable. A tab holding one would
+        // reserve a unit off the board for a tab that is not currently being
+        // worn, and would then try to re-equip a copy the player has since
+        // spent. Presets carry the weapon and the torch; what is readied in a
+        // hand beyond that is the player's business each time.
         bool IsSetHandItem(RE::TESForm* a_f)
         {
             return a_f && (a_f->Is(RE::FormType::Weapon) || a_f->Is(RE::FormType::Light));
@@ -181,27 +185,28 @@ namespace FUI::Loadout
                 [](RE::TESBoundObject& o) { return o.Is(RE::FormType::Armor); });
             for (auto& [obj, data] : inv) {
                 if (data.first <= 0 || !data.second || !data.second->IsWorn()) continue;
-                // ★The costume anchor is worn but is not the player's gear -- it
-                // is a placeholder this plugin equips to give a bare slot an
-                // appearance list. Capturing it would write a phantom helmet
-                // into the preset, and activating that preset would then try to
-                // equip a form the player is not supposed to own.
+                // A costume anchor is worn but is not the player's gear -- it is
+                // a placeholder this plugin equips so that a bare slot has an
+                // appearance list to lend. Capturing it would write a phantom
+                // helmet into the preset, and activating that preset would then
+                // try to equip a form the player is not supposed to own.
                 if (Costume::IsAnchor(obj)) continue;
                 // GI53: a worn SHIELD was already captured by the left-hand
                 // path above -- a second (form, right) entry duplicated it in
                 // the preset: ReservedCount said 2, EquipSet equipped it twice,
                 // and a spare copy of the same shield vanished from the board.
                 if (seen.contains({ obj->GetFormID(), true })) continue;
-                // ★★A SECOND RING NEEDS NO SEPARATE SCAN ANY MORE. It used to:
-                // the engine wore one ring and the doll's other cell held a
-                // CARRIER standing in for a ring that stayed in the pack, so
-                // this walk went straight past it and the bottom-right cell
-                // was the one slot on the doll a preset never owned. Since
-                // 1.6.0 both rings are engine-worn and both arrive here.
+                // A second ring no longer needs a separate scan. It used to:
+                // the engine wore one ring while the doll's other cell held a
+                // carrier standing in for a ring that stayed in the pack, so
+                // this walk went straight past it and the bottom-right cell was
+                // the one slot on the doll that a preset never owned. Since
+                // 1.6.0 both rings are worn by the engine and both turn up here.
+                //
                 // What still has to be asked is WHICH CELL, because that is
-                // placement rather than a fact about the body -- and DualRing
-                // forgets a cell as soon as its ring comes off, which
-                // UnequipAll does to every ring before the next set goes on.
+                // placement rather than a fact about the body. DualRing forgets
+                // a cell as soon as its ring comes off, and UnequipAll takes
+                // every ring off before the next set goes on.
                 if (auto* armo = obj->As<RE::TESObjectARMO>();
                     armo && Grid::IsRing(armo)) {
                     const std::uint16_t sig = Grid::InstanceSigOf(
@@ -237,13 +242,13 @@ namespace FUI::Loadout
                     a_em->UnequipObject(a_p, b, worn(b, hand), 1, slot, false, false, true, true);
                 }
             };
-            // ★★The second ring used to have to come off FIRST and through
+            // The second ring used to have to come off first, and through
             // DualRing: a carrier was worn in its place, so the armour loop
             // below would strip the carrier and leave DualRing still believing
-            // a ring was on the second cell. Both rings are ordinary worn
-            // armour since 1.6.0, so the loop takes them off like anything
-            // else -- and the slot bits DualRing borrowed are handed back by
-            // its own sweep, which asks the body rather than trusting a flag.
+            // a ring was on the second cell. Since 1.6.0 both rings are
+            // ordinary worn armour, so the loop takes them off like anything
+            // else -- and the slot bits DualRing borrowed are handed back by its
+            // own sweep, which reads the body rather than trusting a flag.
             auto* right = a_p->GetEquippedObject(false);
             auto* left = a_p->GetEquippedObject(true);
             const bool oneItem = BothHandsAreOneItem(right, left);
@@ -286,10 +291,10 @@ namespace FUI::Loadout
         void EquipSet(RE::PlayerCharacter* a_p, RE::ActorEquipManager* a_em,
                       const std::vector<Entry>& a_items)
         {
-            // ★★ONE PASS. This used to be two, because a second ring went on
-            // through a carrier that could only stand in next to a first ring
-            // already there. Both rings are engine-worn now and both go on the
-            // ordinary way, in the order the set records them.
+            // One pass. This used to be two, because a second ring went on
+            // through a carrier that could only stand in beside a first ring
+            // that was already there. Both rings are worn by the engine now and
+            // both go on the ordinary way, in the order the set records them.
             for (const auto& e : a_items) {
                 auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(e.id);
                 if (!obj || !StillOwned(a_p, obj)) continue;   // sold/dropped -> skip
@@ -305,16 +310,19 @@ namespace FUI::Loadout
                 // plain unit) resolves to nullptr and the engine picks, which
                 // is right -- plain units are interchangeable.
                 auto* xl = Grid::ExtraForPool(Grid::LiveEntryOf(a_p, obj), 0, e.sig);
-                // ★★A RING IS ANNOUNCED BEFORE IT GOES ON. The slot bit is a
-                // FORM fact, so a bare EquipObject for the second ring makes
-                // the engine single-end the kRing slot and displace the first
-                // -- a two-ring set would end up wearing one. PrepareForEquip
-                // is the one call that takes the bit off whoever is staying,
-                // hands it to the incoming ring and records the cell; every
-                // other road a ring arrives on already goes through it.
-                // ★No aimed list: a preset points at no occupant. Nothing is
-                // being swapped, because UnequipAll has already emptied the
-                // body -- so the cap has room and takes no victim.
+                // Announce a ring before it goes on. The slot bit is a fact
+                // about the FORM, so a bare EquipObject for the second ring
+                // makes the engine single-end the kRing slot and displace the
+                // first -- a two-ring set would end up wearing one.
+                // PrepareForEquip is the single call that takes the bit off
+                // whoever is staying, hands it to the incoming ring and records
+                // the cell; every other path a ring arrives on already goes
+                // through it.
+                //
+                // No aimed list is passed, because a preset points at no
+                // occupant. Nothing is being swapped either: UnequipAll has
+                // already emptied the body, so the cap has room and takes no
+                // victim.
                 if (auto* ring = RingOf(e)) {
                     DualRing::PrepareForEquip(ring, e.sig, nullptr, e.leftHand);
                 }
@@ -331,11 +339,11 @@ namespace FUI::Loadout
             if (a_target < 0 || a_target >= static_cast<int>(g_loadouts.size())) return;
             if (a_target == g_active) return;
 
-            // ★The guard is not politeness -- it is the difference between a
-            // working switch and a wiped tab. Stripping and re-dressing fires
-            // a storm of equip events, and a re-read that landed between the
-            // strip and the re-dress would write "wearing nothing" over the
-            // tab being built.
+            // This guard is not a nicety -- it is the difference between a
+            // working switch and a wiped tab. Stripping and re-dressing fires a
+            // storm of equip events, and a re-read landing between the strip
+            // and the re-dress would write "wearing nothing" over the tab
+            // currently being built.
             g_switching = true;
             g_loadouts[g_active].items = CaptureWorn(p);   // snapshot leaving tab
             UnequipAll(p, em);                             // strip
@@ -395,14 +403,15 @@ namespace FUI::Loadout
             }
             g_loadouts.erase(g_loadouts.begin() + a_idx);
             if (g_active > a_idx) --g_active;
-            // ★The costume points at a tab by INDEX, so a deletion either kills
-            // it or shifts it. Left alone it would silently dress the player as
-            // whichever tab slid into the gap.
+            // The costume points at a tab by INDEX, so a deletion either
+            // destroys that reference or shifts it. Left alone, the costume
+            // would silently dress the player as whichever tab slid into the
+            // gap.
             Costume::OnTabRemoved(a_idx);
-            // ★...and so does the quick wheel's arrangement, for the same
-            // reason. It rebuilds itself on every open and needs no other
-            // notice -- but a deletion is invisible to a rebuild, because the
-            // number it freed is immediately occupied by the tab above.
+            // The quick wheel's arrangement needs the same notice, for the same
+            // reason. It rebuilds itself every time it opens and needs no other
+            // notification -- but a deletion is invisible to a rebuild, because
+            // the index it frees is immediately taken by the tab above it.
             Wheeler::OnTabRemoved(a_idx);
             EnsureFreePreset();   // the free tab always comes back: delete = empty it
             Grid::RequestRebuild();
@@ -474,32 +483,33 @@ namespace FUI::Loadout
     int ReservedCount(RE::FormID a_id)
     {
         EnsureInit();
-        // ★★★A STACKABLE HAS NO "THIS ONE" TO HOLD BACK, AND RESERVING FROM ONE
-        // IS A UNIT THAT SIMPLY STOPS EXISTING ON SCREEN.
+        // A stackable has no particular "this one" to hold back, so reserving
+        // from a stack just makes one unit stop existing on screen.
         //
-        // The reservation earns its keep for GEAR: a tab holding an iron sword
-        // means one iron sword must not be sold out from under it, and hiding
-        // that one from the board says so. "One entry equips one item" is true
-        // there.
+        // The reservation does earn its keep for GEAR. A tab holding an iron
+        // sword means one iron sword must not be sold out from under it, and
+        // hiding that one from the board is how we say so. "One entry equips
+        // one item" is true there.
         //
-        // It is not true of arrows. A tab that wears a bow and a quiver holds
-        // "the quiver", not one arrow -- and one arrow is exactly what this
-        // used to subtract, from a pool of hundreds, forever. The board draws
-        // count minus this (Grid.cpp, the stackable branch), so the arrow was
-        // gone from the grid while the engine still had it:
+        // It is not true of arrows. A tab wearing a bow and a quiver holds "the
+        // quiver", not one arrow -- and one arrow is exactly what this used to
+        // subtract, out of a pool of hundreds, permanently. The board draws
+        // (count minus this), see the stackable branch in Grid.cpp, so that
+        // arrow was gone from the grid while the engine still had it:
         //
         //   240 in our UI / 241 in player.getitemcount   -- one tab with arrows
         //   258 in our UI / 260                          -- two tabs
         //   everything dropped: UI empty / getitemcount 1
         //
-        // ★Reported as arrows leaking, and it is not ammo-only: every stackable
-        // a preset ever wore -- torches above all -- was doing the same thing
-        // quietly. (2026-08-31, confirmed by the player: presets held arrows.)
+        // It was reported as arrows leaking, but it was never ammo-specific:
+        // every stackable a preset ever wore was doing the same thing quietly,
+        // torches most of all. (2026-08-31, confirmed by the player, whose
+        // presets held arrows.)
         //
-        // ★Nothing is left unprotected by this. A stackable in an inactive tab
-        // that the player spends is simply not there when the tab is next worn,
-        // and EquipSet already skips what is missing -- which is the honest
-        // outcome, and the one vanilla gives.
+        // Nothing is left unprotected by returning 0 here. A stackable held by
+        // an inactive tab that the player then spends is simply not there when
+        // that tab is next worn, and EquipSet already skips whatever is
+        // missing. That is the honest outcome, and the one vanilla gives.
         if (auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_id);
             obj && Grid::StackCap(obj) > 1) {
             return 0;
@@ -548,14 +558,16 @@ namespace FUI::Loadout
             }
         }
 
-        // ★★Re-read HERE, on the game thread, and not inside FormsOf. FormsOf
-        // is called from the render pass -- the quick menu draws ten slots a
-        // frame through it -- and a re-read is an inventory scan. Scanning the
-        // player's inventory from the render thread while the game thread is
-        // free to change it is a crash waiting for a busy frame. This runs
-        // every tick, so "stale" never outlives one.
-        // ★Once per change, not once per event: a full set change fires an
-        // equip event per piece, and they collapse into this single scan.
+        // Re-read here, on the game thread, and not inside FormsOf. FormsOf is
+        // called from the render pass -- the quick menu draws ten slots a frame
+        // through it -- and a re-read means an inventory scan. Scanning the
+        // player's inventory from the render thread, while the game thread is
+        // free to change it, is a crash waiting for a busy frame. This runs
+        // every tick, so a stale reading never survives longer than one.
+        //
+        // It also collapses a change into a single scan rather than one per
+        // event: switching a whole set fires an equip event per piece, and they
+        // all fold into this one re-read.
         if (g_activeStale && !g_switching) {
             auto* p = RE::PlayerCharacter::GetSingleton();
             // Main menu / mid-load: no player, or no body to read gear off.

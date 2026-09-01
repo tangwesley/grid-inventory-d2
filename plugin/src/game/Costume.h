@@ -22,10 +22,10 @@ namespace SKSE
 //      list it can see right now
 //   4. put every list back
 //
-// ★Step 4 is not optional and not deferrable. armorAddons lives on the shared
-// form: every actor wearing that armour reads the same array, so the window in
-// which it is wrong has to close inside the same call. It does, because
-// DoReset3D is synchronous (measured).
+// Step 4 is neither optional nor deferrable. armorAddons lives on the shared
+// form, so every actor wearing that armour reads the same array -- the window
+// during which it holds the wrong value has to close inside the same call. It
+// does, because DoReset3D is synchronous (measured).
 //
 // A costume piece's model reaches the body by borrowing the equipped item's
 // addon list, so a slot with nothing equipped has no list to borrow. Empty slots
@@ -63,21 +63,23 @@ namespace FUI::Costume
     // 0 rating, 0 weight, 0 value, NO keywords and NO model, equipped into the
     // empty slot purely so there is a list to borrow.
     //
-    // ★Eight carriers, one shared addon. Several slots can be bare at once
-    // (helmet AND amulet AND ring AND cape) and one carrier cannot serve them:
-    // armorAddons is overwritten per-ARMO, so two pieces sharing a carrier would
-    // have to share an appearance. The ARMA is shared freely -- it is never
-    // rendered, only replaced. Anchors are assigned per costume PIECE, not per
-    // slot, so a Hair+Circlet helmet takes one and not two.
+    // There are many anchors but they share one addon. Several slots can be
+    // bare at once (helmet AND amulet AND ring AND cape) and a single anchor
+    // cannot serve them all, because armorAddons is overwritten per-ARMO -- two
+    // pieces sharing an anchor would have to share an appearance. The ARMA
+    // itself is shared freely, since it is never rendered, only replaced.
+    // Anchors are assigned per costume PIECE rather than per slot, so a
+    // hair-plus-circlet helmet takes one anchor and not two.
     //
-    // ★Keyword-free is the whole safety argument. Every vanilla condition that
-    // asks "is this actor wearing armour" goes through WornHasKeyword against
-    // ArmorHeavy / ArmorLight / ArmorClothing (verified by scanning every CTDA
-    // in Skyrim.esm) -- carrying none of them makes the anchor invisible to
-    // unarmoured builds, Mage Armor perks and the like.
+    // Carrying no keywords is the whole safety argument. Every vanilla
+    // condition that asks "is this actor wearing armour" goes through
+    // WornHasKeyword against ArmorHeavy, ArmorLight or ArmorClothing (verified
+    // by scanning every CTDA in Skyrim.esm), so an anchor with none of them is
+    // invisible to unarmoured builds, Mage Armor perks and the like.
     //
-    // ★It is not the player's property. Hide it everywhere the player's own
-    // items are shown: grid, doll, capacity, tooltips, transfers.
+    // An anchor is not the player's property, so hide it everywhere the
+    // player's own items appear: the grid, the doll, the capacity count,
+    // tooltips and transfers.
     [[nodiscard]] bool IsAnchor(const RE::TESForm* a_form);
 
     // ---- applying -------------------------------------------------------
@@ -92,36 +94,41 @@ namespace FUI::Costume
     void MarkDirty();
     void Tick();   // game thread; performs a pending Apply
 
-    // ★A save has just finished loading. The costume is re-applied several
-    // times over the next few seconds rather than once: the engine keeps
-    // rebuilding the actor after a load, each rebuild reads the addon lists we
-    // have already put back, and the result is the plain body -- with the
-    // anchors still worn, which is a bald head. There is no event for "the
-    // engine is done", and the obvious probe does not work either (it reuses
-    // the biped pointer, so a rebuild cannot be seen from outside), so the
-    // window is covered instead of watched.
+    // A save has just finished loading. The costume is re-applied several times
+    // over the next few seconds rather than once, because the engine keeps
+    // rebuilding the actor after a load. Each of those rebuilds reads the addon
+    // lists we have already put back, so the result is the plain body -- with
+    // the anchors still worn, which shows up as a bald head. There is no event
+    // for "the engine has finished", and the obvious probe does not work either
+    // (the biped pointer is reused, so a rebuild cannot be detected from
+    // outside), so we cover the window rather than watching for the end of it.
     void NoteGameLoaded();
 
-    // ★★1.6.0 MIGRATION: take off the retired second-ring carrier.
+    // 1.6.0 migration: take off the retired second-ring carrier.
     //
     // Anchor 32 (0x84A) was the second ring's stand-in until 1.6.0 -- it wore
     // the ring's enchantment while the ring itself stayed in the pack. The
-    // feature is gone, but THE EQUIP SURVIVES IN OLD SAVES, and nothing owns
-    // it any more. Left alone it is worse than untidy: the carrier is a clone
-    // of the anchors and its record carries a circlet's whole wardrobe (BOD2
-    // on the HAIR and circlet slots, a circlet ARMA on its armature). The
-    // strip and the slot rewrite that made it harmless lived in the retired
-    // code and ran on every load, because THE ENGINE RE-READS THE RECORD FROM
-    // THE PLUGIN each time -- so from the first load after the update the
-    // carrier is worn wearing its authored circlet again: a bald head under an
-    // invisible helmet. And IsAnchor hides it from the grid, the doll and
-    // every transfer, so the player cannot take it off.
+    // feature is gone, but the EQUIP survives in old saves and nothing owns it
+    // any more.
     //
-    // Runs once per load, from a task (it equips, so not inside a render
-    // pass). A save that never had a carrier pays one inventory walk.
-    // ★The form mutations themselves need no undoing: they were never
-    // serialised -- the same plugin re-read that puts the circlet back is what
-    // reverts them.
+    // Leaving it there is worse than untidy. The carrier is a clone of the
+    // anchors, and its record carries a circlet's entire wardrobe: BOD2 on the
+    // hair and circlet slots, and a circlet ARMA on its armature. The code that
+    // stripped those and rewrote the slot -- the thing that made it harmless --
+    // lived in the retired feature and ran on every load, because the engine
+    // re-reads the record from the plugin each time. So from the first load
+    // after the update, the carrier is worn with its authored circlet back in
+    // place: a bald head under an invisible helmet. IsAnchor also hides it from
+    // the grid, the doll and every transfer, so the player has no way to take
+    // it off themselves.
+    //
+    // Runs once per load, from a task rather than inline, because it equips and
+    // so must not run inside a render pass. A save that never had a carrier
+    // pays for one inventory walk.
+    //
+    // The form mutations themselves need no undoing: they were never
+    // serialised, and the same plugin re-read that puts the circlet back is
+    // what reverts them.
     void SweepRetiredCarrier();
 
     // ---- persistence ----------------------------------------------------

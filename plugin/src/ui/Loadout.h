@@ -2,21 +2,27 @@
 
 #include <vector>
 
-// Loadout tabs (UI label "프리셋"): each tab is an independent equipment set.
-// The ACTIVE tab's set is what the character actually wears. Switching snapshots
-// the leaving tab's worn gear, unequips all, then re-equips the target set. Gear
-// held by an inactive tab is hidden from the grid (see IsReserved). Real equip —
-// stats follow the set, no fragile hooks.
+// Loadout tabs (labelled "프리셋" -- "preset" -- in the UI): each tab is an
+// independent equipment set. The ACTIVE tab's set is what the character
+// actually wears. Switching snapshots the leaving tab's worn gear, unequips
+// everything, then re-equips the target set. Gear held by an inactive tab is
+// hidden from the grid (see IsReserved). These are real equips, so stats follow
+// the set and no fragile hooks are involved.
 //
-// Internal name "Loadout" avoids clashing with the pre-existing editor "preset"
-// (icon/category config sharing).
+// The internal name "Loadout" avoids clashing with the pre-existing editor
+// sense of "preset" (shared icon and category configuration).
 //
-// ★A SET IS EVERY SLOT ON THE DOLL, including the ones the engine does not
-// wear itself. The second ring is worn by DualRing's carrier with the ring in
-// the pack, so the worn scan cannot see it and an ordinary unequip cannot take
-// it off -- it has to be snapshotted, stood down and re-worn through DualRing,
-// or the doll's bottom-right slot keeps its ring through every switch while
-// every other slot changes.
+// A set covers every slot on the doll, both ring cells included.
+//
+// This used to need a special case. Before 1.6.0 the second ring was worn by a
+// stand-in carrier while the ring itself stayed in the pack, so the worn scan
+// could not see it and an ordinary unequip could not take it off -- it had to
+// be snapshotted, stood down and re-worn through DualRing, or the doll's
+// bottom-right slot kept its ring through every switch while every other slot
+// changed. Both rings are worn by the engine now, so the ordinary worn scan
+// finds them. What a set still records for a ring is which CELL it sat in,
+// because that is placement rather than a fact about the body: see the
+// leftHand field in Loadout.cpp.
 
 namespace FUI::Loadout
 {
@@ -28,24 +34,27 @@ namespace FUI::Loadout
     // purchase economics (L2): cost = 5000 * (PURCHASED preset tabs + 1) —
     // deleting a tab restores the tier. No refunds.
     //
-    // ★THE FIRST PRESET IS FREE and always exists: a new character has EQUIP
-    // and one empty preset, and deleting that preset empties it rather than
-    // removing it. It is not counted by NextCost, so the first tab the player
-    // actually buys still costs 5000. It IS counted by AtCap, since the wheel
-    // has to show it like any other tab.
+    // The first preset is free and always exists: a new character has EQUIP
+    // plus one empty preset, and deleting that preset empties it rather than
+    // removing it. NextCost does not count it, so the first tab the player
+    // actually buys still costs 5000. AtCap DOES count it, because the quick
+    // wheel has to show it like any other tab.
     //
-    // ★★NINE, because the quick wheel has ten places and EQUIP takes one of
-    // them. The cap used to be 20, which the inventory strip could show and the
-    // wheel could not: tab eleven onward simply never appeared there, with
-    // nothing said about it. A limit the player cannot see is worse than a
+    // The cap is nine because the quick wheel has ten places and EQUIP takes
+    // one of them. It used to be 20, which the inventory strip could display
+    // and the wheel could not: tab eleven onwards simply never appeared there,
+    // with nothing said about it. A limit the player cannot see is worse than a
     // lower one they can, and "buy a tab that half the mod ignores" is not a
     // purchase anyone would make knowingly.
-    // ★This counts PRESETS, not tabs -- EQUIP is not a preset and is not sold.
-    // Wheeler.cpp static_asserts that the two still agree, so raising this
-    // without widening the wheel fails the build rather than the player.
-    // ★Saves made under the old cap keep every tab they have: nothing is
+    //
+    // This counts PRESETS rather than tabs, since EQUIP is not a preset and is
+    // never sold. Wheeler.cpp static_asserts that the two numbers still agree,
+    // so raising this without widening the wheel breaks the build rather than
+    // the player.
+    //
+    // Saves made under the old cap keep every tab they have -- nothing is
     // deleted, only further purchases stop. Those extra tabs still work in the
-    // inventory; they are the ones the wheel could never show anyway.
+    // inventory; they are just the ones the wheel could never show anyway.
     inline constexpr int kMaxPresets = 9;
     [[nodiscard]] int  NextCost();
     [[nodiscard]] int  PlayerGold();
@@ -56,14 +65,16 @@ namespace FUI::Loadout
     void RequestRemove(int a_index);     // delete a preset (deferred; index>=1)
     void ProcessPending();               // Tick: perform deferred purchase/remove/switch
 
-    // ★★THIS LIST HAS NO REARRANGE, and that is a decision rather than a gap.
-    // A tab's index is its identity everywhere it is referred to -- the costume
-    // points at one, the cosave writes them, EQUIP is 0 because it is not a
-    // preset -- so moving tabs about means renumbering all of that for a
-    // preference about where a thing appears.
-    // The quick wheel wanted exactly that preference and keeps it itself, as an
-    // arrangement of slots over these indices (see Wheeler's g_setOrder). What
-    // exists is this list's business; where it sits on screen is the wheel's.
+    // There is deliberately no way to reorder this list. A tab's index is its
+    // identity everywhere it is referred to -- the costume points at one, the
+    // cosave writes them, and EQUIP is 0 because it is not a preset -- so
+    // moving tabs around would mean renumbering all of that to satisfy a
+    // preference about where something appears.
+    //
+    // The quick wheel wanted exactly that preference, and keeps it itself as an
+    // arrangement of slots laid over these indices (see g_setOrder in
+    // Wheeler.cpp). What exists is this list's business; where it appears on
+    // screen is the wheel's.
 
     // True if a_id belongs to an INACTIVE loadout tab: that gear is held by the
     // tab, so it must be hidden from the grid (character is undressed for it but
@@ -82,19 +93,21 @@ namespace FUI::Loadout
 
     // The forms a tab is holding, for the costume system to read an outfit out
     // of a tab without equipping it, and for the quick menu to draw it.
-    // ★★Answers for the ACTIVE tab too, and answers CURRENTLY. It used to hand
-    // back a snapshot taken when the tab was last switched to -- correct for
-    // every tab except the one being worn, which is the one that changes. The
-    // rule was "do not ask about the active tab", the costume system obeyed it
-    // by excluding that tab, and the quick menu did not: it drew the weapon a
-    // preset held at the last switch, so equipping a sword changed nothing
-    // until the player switched away and back. A getter with a caveat is a
-    // getter that will be called wrongly, so the caveat is gone instead: the
-    // active tab is brought back in step with the worn gear every tick.
-    // ★It is a plain read, safe from the render pass. The re-read itself is an
-    // inventory scan and lives in ProcessPending, on the game thread -- so the
-    // list can be at most one tick behind, and never scanned from under the
-    // thread that is allowed to change it.
+    // This answers for the ACTIVE tab as well, and answers with what is worn
+    // right now. It used to return a snapshot taken when the tab was last
+    // switched to, which is correct for every tab except the one being worn --
+    // the only one that changes. The rule was "do not ask about the active
+    // tab": the costume system obeyed it by excluding that tab, and the quick
+    // menu did not, so it drew the weapon a preset held at the last switch and
+    // equipping a sword changed nothing until the player switched away and
+    // back. A getter with a caveat is a getter that will eventually be called
+    // wrongly, so the caveat was removed instead -- the active tab is brought
+    // back in step with the worn gear every tick.
+    //
+    // This is a plain read and safe to call from the render pass. The re-read
+    // itself is an inventory scan and lives in ProcessPending on the game
+    // thread, so the list can be at most one tick behind and is never scanned
+    // out from under the thread that is allowed to change it.
     [[nodiscard]] std::vector<RE::FormID> FormsOf(int a_index);
 
     // "The worn gear moved" -- the active tab is re-read on the next tick.
