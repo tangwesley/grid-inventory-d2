@@ -100,7 +100,9 @@ namespace FUI::Equip
     // engine a null list. The router stays for callers with no board behind
     // them (the quick wheel), which is why the decision lives here rather than
     // at either call site.
-    [[nodiscard]] bool RingWantsSecondSlot(RE::TESBoundObject* a_obj);
+    [[nodiscard]] bool RingWantsSecondSlot(RE::TESBoundObject* a_obj,
+                                          std::uint16_t a_uid = 0,
+                                          std::uint16_t a_sig = 0);
 
     // Ring session: a cancelled carry goes back to the slot it was lifted from
     // (the origin rule). This queues through the same pending pipeline as every

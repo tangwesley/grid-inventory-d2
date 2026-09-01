@@ -2268,6 +2268,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 OffBoardUnit r;
                 r.base = a_base;
                 r.sig  = DualRing::SecondSig();   // 0 for every vanilla ring
+                // ★The uid too. This exclusion is matched against the pool the
+                // unit really belongs to, and a uid unit is the sole member of
+                // its own ("@uid") -- naming it by signature alone pointed the
+                // exclusion at a pool this unit was never in.
+                r.uid  = DualRing::SecondUid();
                 r.why  = "ring2";
                 out.push_back(std::move(r));
             }
@@ -16379,7 +16384,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the two. A refusal there falls through to the first slot, so
             // nothing is lost by aiming.
             const bool queued =
-                Equip::RingWantsSecondSlot(a_held.obj)
+                Equip::RingWantsSecondSlot(a_held.obj, a_held.uid, a_held.sig)
                     ? Equip::EquipItem(a_held.obj, "ringL", a_held.uid,
                                        a_held.xlIdx, a_held.sig, a_held.key,
                                        a_held.count)

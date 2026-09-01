@@ -364,9 +364,26 @@ namespace FUI::DualRing
         return second && ShareAnEffect(second, a_ring, { g_ringUid, g_ringSig });
     }
 
-    bool SharesEffect(RE::TESObjectARMO* a_x, RE::TESObjectARMO* a_y)
+    bool SharesEffect(RE::TESObjectARMO* a_x, RE::TESObjectARMO* a_y,
+                      std::uint16_t a_yUid, std::uint16_t a_ySig)
     {
-        return ShareAnEffect(a_x, a_y);
+        // ★★NAME THE INCOMING UNIT, or a same-form pair always answers "yes".
+        //
+        // RingEnch resolves in order: the FORM's enchantment, then the unit
+        // named by (uid, sig), then the WORN list, then any unit at all. With
+        // no name for a_y, a ring whose affix lives on its own unit falls
+        // through the pool step and lands on the worn list -- which belongs to
+        // a_x. The question "do these two share an effect?" then compares the
+        // first ring against ITSELF and is true by construction.
+        //
+        // That is what refused every same-form pair: the router asked this,
+        // got "shares", and sent the ring to the first slot to replace the one
+        // already there (measured 2026-09-01, `toSecond=0` on every attempt
+        // where the two rings were the same base).
+        //
+        // a_x needs no name: it is the ENGINE-worn ring, so the worn-list step
+        // resolves it exactly. Only the pack unit is ambiguous.
+        return ShareAnEffect(a_x, a_y, {}, { a_yUid, a_ySig });
     }
 
     bool IsCarrier(const RE::TESForm* a_form)
@@ -375,7 +392,7 @@ namespace FUI::DualRing
         return c && a_form && a_form->GetFormID() == c->GetFormID();
     }
 
-    Verdict CanWear(RE::TESObjectARMO* a_ring)
+    Verdict CanWear(RE::TESObjectARMO* a_ring, std::uint16_t a_uid, std::uint16_t a_sig)
     {
         if (!a_ring || !Grid::IsRing(a_ring)) return Verdict::kNotARing;
         if (!Carrier()) return Verdict::kNoCarrier;
@@ -413,7 +430,13 @@ namespace FUI::DualRing
             }
             if (owned <= 1) return Verdict::kAlreadyWorn;
         }
-        if (ShareAnEffect(other, a_ring, otherName)) return Verdict::kSameEffect;
+        // The incoming unit is named here for the reason SharesEffect gives:
+        // unnamed, a same-form pair resolves a_ring through the WORN list --
+        // which is `other` -- so the test compares one ring with itself and
+        // refuses every same-base pair as a duplicate effect.
+        if (ShareAnEffect(other, a_ring, otherName, { a_uid, a_sig })) {
+            return Verdict::kSameEffect;
+        }
         if (FreeSlot(p) < 0) return Verdict::kNoFreeSlot;
         // ★An empty first slot is no longer a refusal. Where the ring lands is
         // Wear's decision -- it fills the first slot, or trades places with the
@@ -436,7 +459,18 @@ namespace FUI::DualRing
 
     bool Wear(RE::TESObjectARMO* a_ring, RE::ExtraDataList* a_xl)
     {
-        const auto v = CanWear(a_ring);
+        // ★The unit's name is read BEFORE the gate, not after it. CanWear's
+        // duplicate-effect test has to know which unit is arriving: unnamed, a
+        // same-form pair resolves the incoming ring through the WORN list --
+        // the other ring's -- and every such pair is refused as a duplicate.
+        // The same pair is used again below for the lend.
+        const std::uint16_t sig = Grid::InstanceSigOf(a_xl);   // nullptr -> 0 (plain)
+        std::uint16_t uid = 0;
+        if (a_xl) {
+            if (const auto* xu = a_xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
+        }
+
+        const auto v = CanWear(a_ring, uid, sig);
         if (v != Verdict::kOk) {
             SKSE::log::info("[DUALRING] refused '{}': {}", NameOf(a_ring), VerdictText(v));
             return false;
@@ -487,14 +521,10 @@ namespace FUI::DualRing
         // ring it actually clicked.
         auto* ench = a_ring->formEnchanting ? a_ring->formEnchanting
                                             : EnchOn(a_xl);
-        const std::uint16_t sig = Grid::InstanceSigOf(a_xl);   // nullptr -> 0 (plain)
-        // ★The uid comes off the list too. Recording the signature alone left
-        // every later lookup asking a question ExtraForPool cannot answer for a
-        // uid-bearing unit -- see SecondUid.
-        std::uint16_t uid = 0;
-        if (a_xl) {
-            if (const auto* xu = a_xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
-        }
+        // uid and sig were read at the top of this function, before the gate.
+        // The uid matters as much as the signature: recording only the latter
+        // left every later lookup asking a question ExtraForPool cannot answer
+        // for a uid-bearing unit -- see SecondUid.
         if (!ench) ench = RingEnch(a_ring, uid, sig);
 
         Lend(c, ench, mask);
