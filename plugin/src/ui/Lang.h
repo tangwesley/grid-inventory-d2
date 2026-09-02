@@ -94,6 +94,7 @@ namespace FUI::Lang
         X(WeapCrossbow, "Crossbow")                                                                         \
         X(WeapStaff, "Staff")                                                                               \
         X(InventoryFull, "Inventory is full - no room for this item")   /* capacity: pickup blocked */      \
+        X(PartialPickup, "Took what fit - the rest stays on the ground")   /* capacity: split pickup */ \
         X(BuyPresetTab, "Buy Preset Tab")   /* L2 popups */                                                 \
         X(CostLabel, "Cost")                                                                                \
         X(NotEnoughGold, "Not enough gold")                                                                 \

@@ -592,6 +592,153 @@ namespace
         return a_ref && a_ref->extraList.HasQuestObjectAlias();
     }
 
+    int OwnedUnits(RE::PlayerCharacter* a_player, RE::TESBoundObject* a_obj)
+    {
+        if (!a_player || !a_obj) return 0;
+        int n = 0;
+        auto inv = a_player->GetInventory(
+            [&](RE::TESBoundObject& o) { return &o == a_obj; });
+        for (auto& [o, d] : inv) n = d.first;
+        return n;
+    }
+
+    // ★★★A PILE THE PACK CAN HALF HOLD IS HALF TAKEN.
+    //
+    // The capacity gates below are yes/no doors, and a stack is not a yes/no
+    // thing. Twenty-five ingots on the floor with room for eleven used to be
+    // answered "yes" -- so all twenty-five came in, the fourteen with nowhere
+    // to go landed in the growth rows, and the player collected the
+    // encumbrance debuff for a pack they never chose to overfill. Answering
+    // "no" instead is no better: it strands eleven ingots the pack could have
+    // carried. The pile divides, so it is divided.
+    //
+    //   room, and enough of it     the pickup goes through untouched
+    //   no room at all             refused exactly as before -- and this is
+    //                              still the case a full pack is meant to
+    //                              give the player
+    //   room, but not enough       the pack fills and the remainder goes
+    //                              straight back on the ground
+    //
+    // ★THE QUIVER IS THE SAME RULE, not a second one. Worn ammo's spare room
+    // lives inside MaxAcceptUnits (Grid.cpp, WornQuiverRoom), because the doll
+    // draws min(stock, cap) and the board draws the rest -- so while that
+    // stock is under the cap an arriving arrow never asks the board for a cell
+    // at all. Arrows therefore split against the back and the board together,
+    // through this one path, with nothing here that knows they are arrows.
+    //
+    // ★WHY THE PUT-BACK IS A TASK. We are standing inside the engine's own
+    // activation when we decide this, and the units are not in the inventory
+    // yet -- there is nothing to remove until the call below us has returned
+    // and the transfer has happened. Every other main.cpp consumer of an
+    // in-flight engine change marshals for the same reason; this one also gets
+    // the vanilla drop path (RemoveItem/kDropping) rather than DropObject,
+    // which is a known CTD from task context (see the world-drop callback).
+
+    // ★★★THE PUT-BACK COUNTS WHAT ARRIVED, NOT WHAT WE EXPECTED TO ARRIVE.
+    //
+    // The obvious version of this takes the surplus the split planned and
+    // removes exactly that many. It is also the version that can eat the
+    // player's own property, and the arithmetic says so plainly: the plan is
+    // `pile - keep`, and `pile` came from the world reference's ExtraCount. If
+    // that count ever reads high -- a form of ref this has not been measured
+    // against, a mod that keeps its own tally there -- then `pile` is too big,
+    // the surplus is too big, and the extra comes out of the hundred ingots
+    // already in the pack. A pickup is not allowed to cost the player things
+    // they were carrying before it.
+    //
+    // So the plan's number is never removed. The stock is measured BEFORE the
+    // engine's transfer and again here; the difference is what actually
+    // arrived, and only what arrived over the keep goes back on the ground. A
+    // pile smaller than its ref claimed simply drops nothing, which is the old
+    // whole-pile behaviour and the right thing to fall back to.
+    void PutSurplusBack(RE::FormID a_form, int a_ownedBefore, int a_keep)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_form);
+        if (!player || !obj) return;
+        const int owned = OwnedUnits(player, obj);
+        const int arrived = (std::max)(0, owned - a_ownedBefore);
+        const int n = (std::min)((std::max)(0, arrived - a_keep), owned);
+        if (n <= 0) return;
+        SKSE::log::info("[PICKUP] '{}' ({:08X}) -- pack took what it could, "
+                        "{} unit(s) back on the ground", obj->GetName(), a_form, n);
+        // 1.4/B0: registered, like every other drop of ours -- an unregistered
+        // delta reads as an outside one and inflates the echo figure.
+        FUI::Ledger::Submit(a_form, -n, "pickup-surplus");
+        player->RemoveItem(obj, n, RE::ITEM_REMOVE_REASON::kDropping,
+                           nullptr, nullptr);
+        // ★Notify, not FailNote: nothing was refused. The player asked for a
+        // pile and got as many as there was anywhere to put -- a silent
+        // partial take would read as the mod eating the rest.
+        FUI::Sfx::Notify(FUI::Lang::T(FUI::Lang::Str::PartialPickup));
+    }
+
+    // ★★THE SPLIT REPLACES THE BOARD GATE; IT DOES NOT SIT BEHIND ONE.
+    //
+    // CanFitNewItem asks whether ONE unit fits, and it answers yes for exactly
+    // the pickups that need splitting -- ask it first and it waves the whole
+    // pile through, growth rows and debuff and all, which is the behaviour
+    // being replaced. So a stackable is decided HERE, whole, and
+    // kPassThrough means "not my case, go and ask CanFitNewItem as you always
+    // did" -- gear, bags and the coin pouch, none of which divide.
+    enum class PickupGate
+    {
+        kPassThrough,   // stack cap 1: nothing to divide
+        kRefuse,        // not one unit of it fits anywhere
+        kTake           // let it in; any surplus is already queued to go back
+    };
+
+    PickupGate JudgePickup(RE::TESBoundObject* a_base, int a_want)
+    {
+        const auto plan = FUI::Grid::PlanPickup(a_base, a_want);
+        if (!plan.applies) return PickupGate::kPassThrough;
+        if (plan.keep <= 0) return PickupGate::kRefuse;
+        if (plan.surplus > 0) {
+            // ★The stock BEFORE the engine moves anything -- the put-back
+            // subtracts it to learn what the pickup really delivered. Read
+            // here because here is the only place it can still be read; one
+            // line further down the transfer has happened.
+            const RE::FormID fid = a_base->GetFormID();
+            const int before = OwnedUnits(RE::PlayerCharacter::GetSingleton(), a_base);
+            const int keep = plan.keep;
+            SKSE::GetTaskInterface()->AddTask([fid, before, keep]() {
+                PutSurplusBack(fid, before, keep);
+            });
+        }
+        return PickupGate::kTake;
+    }
+
+    // How many units the reference in front of the player is worth. A world
+    // stack carries its size on its own list (ExtraCount); no list means one.
+    //
+    // ★This number only ever sizes the PLAN, and nothing is removed on its
+    // authority -- PutSurplusBack re-derives the amount from the stock either
+    // side of the transfer, precisely so a ref that miscounts cannot cost the
+    // player anything. An under-count degrades to the old whole-pile
+    // behaviour; an over-count is caught there.
+    int WorldRefUnits(RE::TESObjectREFR* a_ref)
+    {
+        if (!a_ref) return 1;
+        return (std::max)(1, static_cast<int>(a_ref->extraList.GetCount()));
+    }
+
+    // ★★ONE PICKUP, ONE RULING. The Activate gate calls THROUGH to the engine,
+    // and the engine calls PickUpObject -- which PickUpHook is sitting on. Two
+    // gates asking the same yes/no question was free; two gates each queueing
+    // a put-back is not, and it would drop the surplus twice. So the outer one
+    // says it has already ruled on this form and the inner one steps aside.
+    // Main thread throughout (this is an activation), but scoped anyway: a
+    // guard that leaks on an early return is a gate that stays open.
+    RE::FormID g_pickupRuled = 0;   // the form the outer gate is mid-ruling on
+
+    struct PickupRuling
+    {
+        RE::FormID prev = 0;
+        explicit PickupRuling(RE::FormID a_form) :
+            prev(g_pickupRuled) { g_pickupRuled = a_form; }
+        ~PickupRuling() { g_pickupRuled = prev; }
+    };
+
     struct PickUpHook
     {
         static void thunk(RE::Actor* a_this, RE::TESObjectREFR* a_object, std::int32_t a_count,
@@ -605,20 +752,37 @@ namespace
                 }
                 if (auto* base = a_object->GetBaseObject();
                     base && !RefIsQuestObject(a_object) &&
-                    !FUI::Grid::CanFitNewItem(base)) {
-                    // ⓖ PROBE. A refusal used to leave no trace at all, so a
-                    // report of "gold would not pick up" could not be told
-                    // apart from "the torch next to it would not". Gold is
-                    // supposed to be exempt (MaxAcceptUnits returns early on
-                    // IsGold), and this line is what proves whether it was.
-                    logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
-                                 "gold={} coin={} -- board full (PickUpObject)",
-                        base->GetName(), base->GetFormID(),
-                        static_cast<int>(base->GetFormType()),
-                        base->IsGold(),
-                        FUI::GoldCoins::IsCoinForm(base->GetFormID()));
-                    FUI::Sfx::FailNote(FUI::Lang::T(FUI::Lang::Str::InventoryFull));
-                    return;   // blocked: the reference stays in the world
+                    g_pickupRuled != base->GetFormID()) {
+                    // ★A stackable is split here rather than judged yes/no.
+                    // a_count is what the engine is about to add; the
+                    // reference's own list is what it is worth when the caller
+                    // named no number.
+                    const int want = a_count > 0 ? static_cast<int>(a_count)
+                                                 : WorldRefUnits(a_object);
+                    const auto q = JudgePickup(base, want);
+                    if (q == PickupGate::kTake) {
+                        PickupRuling ruled(base->GetFormID());
+                        func(a_this, a_object, a_count, a_arg3, a_playSound);
+                        return;
+                    }
+                    if (q == PickupGate::kRefuse ||
+                        !FUI::Grid::CanFitNewItem(base)) {
+                        // ⓖ PROBE. A refusal used to leave no trace at all, so a
+                        // report of "gold would not pick up" could not be told
+                        // apart from "the torch next to it would not". Gold is
+                        // supposed to be exempt (MaxAcceptUnits returns early on
+                        // IsGold), and this line is what proves whether it was.
+                        logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
+                                     "gold={} coin={} -- {} (PickUpObject)",
+                            base->GetName(), base->GetFormID(),
+                            static_cast<int>(base->GetFormType()),
+                            base->IsGold(),
+                            FUI::GoldCoins::IsCoinForm(base->GetFormID()),
+                            q == PickupGate::kRefuse ? "no room for one unit of it"
+                                                     : "board full");
+                        FUI::Sfx::FailNote(FUI::Lang::T(FUI::Lang::Str::InventoryFull));
+                        return;   // blocked: the reference stays in the world
+                    }
                 }
             }
             func(a_this, a_object, a_count, a_arg3, a_playSound);
@@ -654,17 +818,32 @@ namespace
                 // capacity gate for plain MISC items, at the SAME pre-TrueHUD
                 // level as CapacityActivateHook (the sack conversion above
                 // must run first: gold ignores grid space)
-                if (!RefIsQuestObject(a_targetRef) &&
-                    !FUI::Grid::CanFitNewItem(a_this)) {
-                    // ⓖ probe: the same question at the MISC door, which is the
-                    // one gold actually walks through (Gold001 is a MISC record)
-                    logger::info("[PICKUP] refused '{}' ({:08X}) gold={} coin={} "
-                                 "-- board full (MISC activate)",
-                        a_this->GetName(), a_this->GetFormID(),
-                        a_this->IsGold(),
-                        FUI::GoldCoins::IsCoinForm(a_this->GetFormID()));
-                    NotifyInventoryFull();
-                    return false;   // blocked: the reference stays in the world
+                if (!RefIsQuestObject(a_targetRef)) {
+                    // ★And the SAME split, because this is the door the
+                    // stackables the player finds by the dozen come through:
+                    // ore, ingots, gems, hides, bones. Gold walks through here
+                    // too (Gold001 is a MISC record) and is untouched by it --
+                    // MaxAcceptUnits returns early on IsGold, so its split is
+                    // the whole pile with nothing left over.
+                    const auto q = JudgePickup(a_this, WorldRefUnits(a_targetRef));
+                    if (q == PickupGate::kTake) {
+                        PickupRuling ruled(a_this->GetFormID());
+                        return func(a_this, a_targetRef, a_activatorRef, a_arg3,
+                                    a_object, a_targetCount);
+                    }
+                    if (q == PickupGate::kRefuse || !FUI::Grid::CanFitNewItem(a_this)) {
+                        // ⓖ probe: the same question at the MISC door, which is the
+                        // one gold actually walks through (Gold001 is a MISC record)
+                        logger::info("[PICKUP] refused '{}' ({:08X}) gold={} coin={} "
+                                     "-- {} (MISC activate)",
+                            a_this->GetName(), a_this->GetFormID(),
+                            a_this->IsGold(),
+                            FUI::GoldCoins::IsCoinForm(a_this->GetFormID()),
+                            q == PickupGate::kRefuse ? "no room for one unit of it"
+                                                     : "board full");
+                        NotifyInventoryFull();
+                        return false;   // blocked: the reference stays in the world
+                    }
                 }
             }
             return func(a_this, a_targetRef, a_activatorRef, a_arg3, a_object, a_targetCount);
@@ -870,15 +1049,34 @@ namespace
                           RE::TESBoundObject* a_object, std::int32_t a_targetCount)
         {
             if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
-                !RefIsQuestObject(a_targetRef) &&
-                !FUI::Grid::CanFitNewItem(a_this)) {
-                // ⓖ probe: the last of the four gates to get a voice
-                logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
-                             "-- board full (activate)",
-                    a_this->GetName(), a_this->GetFormID(),
-                    static_cast<int>(a_this->GetFormType()));
-                NotifyInventoryFull();
-                return false;   // blocked: the reference stays in the world
+                !RefIsQuestObject(a_targetRef)) {
+                // ★THIS is the door most world piles come through -- arrows,
+                // potions, ingredients, soul gems, scrolls. The split answers
+                // FIRST and it answers alone; see JudgePickup for why it
+                // cannot sit behind CanFitNewItem.
+                //
+                // ★The count comes off the REFERENCE, not a_targetCount. A
+                // pile in the world carries its size on its own list, and that
+                // is the number the whole pile is worth; the surplus we plan
+                // has to be measured against the same one the engine is about
+                // to hand over.
+                const auto q = JudgePickup(a_this, WorldRefUnits(a_targetRef));
+                if (q == PickupGate::kTake) {
+                    PickupRuling ruled(a_this->GetFormID());
+                    return func(a_this, a_targetRef, a_activatorRef, a_arg3,
+                                a_object, a_targetCount);
+                }
+                if (q == PickupGate::kRefuse || !FUI::Grid::CanFitNewItem(a_this)) {
+                    // ⓖ probe: the last of the four gates to get a voice
+                    logger::info("[PICKUP] refused '{}' ({:08X}) type={} -- {} "
+                                 "(activate)",
+                        a_this->GetName(), a_this->GetFormID(),
+                        static_cast<int>(a_this->GetFormType()),
+                        q == PickupGate::kRefuse ? "no room for one unit of it"
+                                                 : "board full");
+                    NotifyInventoryFull();
+                    return false;   // blocked: the reference stays in the world
+                }
             }
             return func(a_this, a_targetRef, a_activatorRef, a_arg3, a_object, a_targetCount);
         }

@@ -399,7 +399,46 @@ namespace FUI::Grid
     // Phase 7: how many units (<= a_want) the inventory can accept right now —
     // partial-stack room + new tiles on the hard board + new tiles in open
     // bags. Stack buy/take sliders clamp their max to this.
+    // ★...and the room left in the quiver on the player's back, which
+    // is room of the same kind: arrows arriving into it never ask the board
+    // for a cell. See WornQuiverRoom in Grid.cpp for the whole of it.
     [[nodiscard]] int MaxAcceptUnits(RE::TESBoundObject* a_obj, int a_want);
+
+    // ★★★A PILE IS NOT ONE THING, AND A PICKUP GATE THAT SAYS YES OR NO IS
+    // ANSWERING THE WRONG QUESTION ABOUT IT.
+    //
+    // Twenty-five iron ingots on the floor and room for eleven is not a yes
+    // and it is not a no. The old gate had to pick one of the two, and picked
+    // yes -- so the whole pile came in, the fourteen that had nowhere to go
+    // landed in the growth rows, and the player got the encumbrance debuff for
+    // arriving at a full pack they never chose to overfill. A stack CAN be
+    // divided, so it is: the pack fills to what it will hold and the remainder
+    // stays where it was.
+    //
+    // The arithmetic is entirely MaxAcceptUnits'. This adds no rule of its own
+    // -- it reads that one answer as a SPLIT, because a pickup can be
+    // part-taken and a bool cannot say so. Which also means the quiver comes
+    // along for free: worn ammo's room is inside MaxAcceptUnits already, so
+    // arrows split against the back and the board together.
+    //
+    // `applies` is false for anything whose stack cap is 1 -- gear, bags, the
+    // coin pouch -- and the caller then asks CanFitNewItem exactly as before.
+    // Those arrive as single units anyway, so there is nothing there to
+    // divide.
+    //
+    //   keep == 0             refuse the pickup outright — the old behaviour,
+    //                         intact, and still what a genuinely full pack
+    //                         gives the player
+    //   surplus > 0           let it through, then put that many straight back
+    //                         into the world; what the pack could not hold
+    //                         never was the player's
+    struct PickupSplit
+    {
+        bool applies = false;
+        int  keep    = 0;
+        int  surplus = 0;
+    };
+    [[nodiscard]] PickupSplit PlanPickup(RE::TESBoundObject* a_obj, int a_want);
 
     // Post-add capacity check (container-take bounce): the item is ALREADY in
     // the inventory — place everything on the hard board and report whether

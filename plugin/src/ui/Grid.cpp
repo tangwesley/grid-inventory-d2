@@ -10448,6 +10448,48 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 Rebuild();
             }
         }
+
+        // ★★★A QUIVER WITH HOLES IN IT IS ROOM THE BOARD DOES NOT PAY
+        // FOR.
+        //
+        // The doll draws min(stock, cap) and the board draws the rest
+        // (Equip.cpp's CollectEquipment and the ammo line in Rebuild's unit
+        // walk are the two halves of that one rule). So while the stock is
+        // BELOW the cap, arrows can arrive and never become a tile at all --
+        // they land on the player's back, in space that is already spoken for.
+        // Every gate here was answering "is there a free cell" about units
+        // that were never going to ask for one, which is how a full pack
+        // refused to top up a half-empty quiver.
+        //
+        // ★NOT AmmoMergeRoom, the rule 1.6.1 removed (the note is in Equip.h).
+        // That one decided how many arrows the ENGINE should be wearing -- an
+        // invisible number, undone by the next delta. This one decides
+        // nothing: it reads the same min() the doll draws and reports what is
+        // left of it.
+        //
+        // Zero for ammo the player is not wearing. Nothing worn is not a
+        // quiver of zero, it is no quiver at all, and every unit of it belongs
+        // to the board (the same sentence the unit walk turns on).
+        int WornQuiverRoom(RE::TESBoundObject* a_obj, int a_cap)
+        {
+            if (!a_obj || a_cap <= 0 || !a_obj->Is(RE::FormType::Ammo)) return 0;
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player) return 0;
+            auto* worn = Equip::EquippedAmmo(player);
+            if (!worn || static_cast<RE::TESBoundObject*>(worn) != a_obj) {
+                return 0;   // a different quiver on the back, or none
+            }
+            // ★STOCK, not the worn list's count -- for the reason Equip.cpp
+            // spells out at length: same-kind arrows are ONE pooled quiver and
+            // the engine's idea of how many of them are "worn" moves on its
+            // own. The quiver the player SEES is min(stock, cap), so the room
+            // in it is what that min() has not used.
+            int stock = 0;
+            auto inv = player->GetInventory(
+                [&](RE::TESBoundObject& o) { return &o == a_obj; });
+            for (auto& [o, d] : inv) stock = d.first;
+            return (std::max)(0, a_cap - stock);
+        }
     }
 
     int MaxAcceptUnits(RE::TESBoundObject* a_obj, int a_want)
@@ -10511,6 +10553,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
         }
+        // ★...and the quiver on the player's back, which is room of
+        // exactly the same kind: units that arrive into it never ask the board
+        // for a cell. It cannot double-count against the loop above -- a stock
+        // below the cap is drawn entirely as the quiver, so it has no tile for
+        // that loop to find (Rebuild's unit walk: units = count - min(count,
+        // cap) = 0).
+        room += WornQuiverRoom(a_obj, aCap);
         if (room >= a_want) return a_want;
         const int tilesNeeded = (a_want - room + aCap - 1) / aCap;
 
@@ -10656,6 +10705,36 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // first-fits on the hard board / an open bag (delegates to the
         // generalized counter so both gates share identical rules).
         return MaxAcceptUnits(a_obj, 1) >= 1;
+    }
+
+    PickupSplit PlanPickup(RE::TESBoundObject* a_obj, int a_want)
+    {
+        PickupSplit t;
+        if (!a_obj || a_want <= 0) return t;
+        if (!RE::PlayerCharacter::GetSingleton()) return t;
+        // ★A STACK IS THE ONLY THING THERE IS ANYTHING TO DIVIDE. EffectiveCap
+        // is the whole test and it is the right one: it already answers 1 for
+        // gear, for a bag (its tile IS the container) and for the coin pouch,
+        // and it already honours the editor's per-item `stack:N` override -- so
+        // a form the player has told us stacks by twos splits by twos.
+        if (EffectiveCap(a_obj) <= 1) return t;
+
+        // ★ONE question, asked of the ONE counter. MaxAcceptUnits knows every
+        // rule that decides where a unit can land -- partial tiles, the hard
+        // board, the typed-bag spill, and the room left in a worn quiver (see
+        // WornQuiverRoom) -- so this is not a second opinion about capacity. It
+        // is the same answer, read as a split instead of as a yes/no. Two gates
+        // that measure separately are two gates that disagree, which is the
+        // mistake the spill sim's note in MaxAcceptUnits is about.
+        //
+        // ★Its EXEMPTIONS come along too, and that is what keeps this safe at
+        // this width: gold, a leveled list and a key all return a_want up
+        // front, so they split into keep == a_want with nothing left over and
+        // walk through exactly as they did before.
+        t.applies = true;
+        t.keep = (std::max)(0, (std::min)(a_want, MaxAcceptUnits(a_obj, a_want)));
+        t.surplus = a_want - t.keep;
+        return t;
     }
 
     bool WouldOverflow(RE::TESBoundObject* a_obj)
