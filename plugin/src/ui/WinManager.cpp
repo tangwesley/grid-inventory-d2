@@ -1,7 +1,7 @@
 ﻿#include "ui/IconCache.h"
 #include "ui/Grid.h"
 #include "ui/Equip.h"
-#include "ui/GridMenu.h"   // NoPause/SetNoPause -- the "!nopause" test switch
+#include "ui/GridMenu.h"   // NoPause/SetNoPause -- the "!nopause" setting
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
 #include "ui/Theme.h"
@@ -1030,10 +1030,11 @@ namespace FUI
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
         if (BagFilter::DumpsEnabled()) out << "!bagdump = 1\n";
         if (UIRoot::MovementWatch()) out << "!movewatch = 1\n";
-        // ★A measurement mode, not a setting -- written only while ON so an
-        // ordinary install never carries the line, and preserved across a save
-        // so a tester who rearranges a window mid-experiment does not silently
-        // fall back to a paused board halfway through the A/B.
+        // ★The unpaused-board setting (GridMenu.h). Written only while ON: the
+        // code default is paused, so a file without the line already says
+        // what an absent line means, and a shipped ui.ini that carries
+        // "!nopause = 1" keeps it across every rewrite. A player who sets it
+        // to 0 sees the line drop out, which is the same default again.
         if (GridInventoryMenu::NoPause()) out << "!nopause = 1\n";
         // ★Inverted since their promotions: ON is the default, so the line is
         // written only while OFF -- the escape hatch survives a restart, and

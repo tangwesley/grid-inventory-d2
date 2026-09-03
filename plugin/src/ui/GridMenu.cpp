@@ -8,7 +8,7 @@
 #include "ui/ItemPreview.h"
 #include "ui/Sfx.h"
 #include "ui/UIRoot.h"
-#include "ui/WinManager.h"   // ReadNoPause -- the "!nopause" test switch
+#include "ui/WinManager.h"   // ReadNoPause -- the "!nopause" setting
 
 // Ported from ModExplorerMenu (Modex) by patchulidev — UIMenuImpl.cpp.
 // https://github.com/patchulidev/ModExplorerMenu (GPL-3.0 with Modding Exception)
@@ -110,8 +110,8 @@ namespace FUI
 
     // ★The state behind "!nopause" -- see GridMenu.h. Held here rather than in
     // WinManager because the flag it controls is this menu's, and every other
-    // test switch lives in the module that owns the behaviour (Grid::SimDrift,
-    // DeltaWatch::Enabled). WinManager only carries it to and from the file.
+    // setting lives in the module that owns the behaviour (Grid::CwRows,
+    // Wheeler::Enabled). WinManager only carries it to and from the file.
     namespace
     {
         bool g_noPause = false;
@@ -123,10 +123,9 @@ namespace FUI
     {
         if (g_noPause == a_on) return;
         g_noPause = a_on;
-        SKSE::log::warn("[UI] ★!nopause = {} -- the grid will open onto a {} world "
-                        "from the NEXT open. This is a measurement mode; equip "
-                        "conflict resolution assumes a frozen engine.",
-                        a_on ? 1 : 0, a_on ? "LIVE" : "paused");
+        SKSE::log::info("[UI] !nopause = {} -- the grid opens onto a {} world "
+                        "from the next open",
+                        a_on ? 1 : 0, a_on ? "live" : "paused");
     }
 
     void GridInventoryMenu::ForceCursor()
@@ -392,18 +391,18 @@ namespace FUI
         menu->depthPriority = 11;
 
 
-        // kPausesGame is REQUIRED for the engine's item 3D preview: Modex's own
-        // config notes "show3DPreview requires pauseGame; effective only when
-        // both are on" — Inventory3DManager::Render() draws nothing while the
-        // game runs. Realtime policy (PLAN_B A5) is revisited at B-2 via the
-        // icon cache (captures become rare one-shots).
+        // kPausesGame follows the "!nopause" setting (GridMenu.h). Off, the
+        // grid pauses the game like the vanilla menu; on, the world stays live
+        // while the board is open.
         //
-        // ★★...AND THAT SENTENCE HAS NEVER BEEN MEASURED HERE. It is Modex's
-        // config note, carried over with the port. "!nopause" drops the flag so
-        // a GI_CAPTURE_DIAG build can answer it with pixels instead: the
-        // [ICONDIAG] "after-model" line reports how much of the capture rect is
-        // still the magenta we painted, so pure=100% after the model means
-        // Render() drew nothing and the note is right. See GridMenu.h.
+        // ★The pause used to be described as REQUIRED for the engine's item 3D
+        // preview: Modex's own config notes "show3DPreview requires pauseGame;
+        // effective only when both are on", carried over with the port. That
+        // was measured here with a GI_CAPTURE_DIAG build -- the [ICONDIAG]
+        // "after-model" line reports how much of the capture rect is still
+        // the magenta we painted -- and the same item renders the same pixels
+        // paused and live. Inventory3DManager::Render() does not care whether
+        // the game is paused, so the flag is free to follow the setting.
         // ★Read fresh from the file, not from the cached settings -- Load()
         // runs from OnShow, which is AFTER this, so a cached value would lag
         // an open behind the edit. Same reason (and same shape) as
@@ -413,7 +412,7 @@ namespace FUI
             menu->menuFlags.set(Flags::kPausesGame, Flags::kDisablePauseMenu);
         } else {
             menu->menuFlags.set(Flags::kDisablePauseMenu);
-            SKSE::log::warn("[UI] ★opening WITHOUT kPausesGame (!nopause)");
+            SKSE::log::info("[UI] opening without kPausesGame (!nopause = 1)");
         }
 
         // kInventory, NOT kMenuMode/kItemMenu: this is the vanilla

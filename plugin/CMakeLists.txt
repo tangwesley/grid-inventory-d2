@@ -9,7 +9,7 @@ set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(GridInventory VERSION 0.1.0 LANGUAGES CXX)
+project(GridInventory VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -150,7 +150,7 @@ endif()
 # Point MOD_ROOT at your own mod folder (-DMOD_ROOT=...). The copy step is
 # skipped entirely when the folder does not exist, so a plain clone builds
 # without any local setup.
-set(MOD_ROOT "C:/Modding/MO2/mods/Diablo In Skyrim" CACHE PATH
+set(MOD_ROOT "C:/Modding/MO2/mods/Grid Inventory - DiabloRim" CACHE PATH
     "MO2 mod folder the built DLL is copied into (skipped if absent)")
 if(EXISTS "${MOD_ROOT}")
     set(DLL_DEPLOY "${MOD_ROOT}/SKSE/Plugins")

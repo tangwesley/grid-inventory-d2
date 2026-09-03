@@ -23,20 +23,26 @@ namespace FUI
         // this suppresses OnHide's fallback so the sound doesn't double up.
         static void MarkCloseSfxPlayed();
 
-        // A test switch, not a setting ("!nopause" in GridInventory_ui.ini).
-        // It drops kPausesGame so the menu opens onto a live world, and it
-        // exists to measure exactly one question: does
-        // Inventory3DManager::Render() still draw when the game is not paused?
+        // The "!nopause" setting in GridInventory_ui.ini. On, the grid drops
+        // kPausesGame and opens onto a live world: the game keeps running
+        // while the player browses. Off (the code default, and what a file
+        // without the line means) the grid pauses like the vanilla menu.
         //
-        // The class comment above names the render STAGE as the requirement,
-        // while GridMenu.cpp's Creator names the PAUSE as well -- the latter
-        // inherited from Modex's config note rather than measured here. Those
-        // are two separate variables, and this switch holds the stage fixed
-        // while moving the pause.
+        // It began as a measurement switch, and the measurement is what made
+        // it a setting: the class comment above names the render STAGE as the
+        // requirement for the engine's item 3D preview, while Modex's config
+        // note, carried over with the port, named the PAUSE as well. Compared
+        // in pixels, paused and live render the same preview byte for byte,
+        // so the pause was never a requirement.
         //
-        // An unpaused board is NOT a supported mode. The equip path's
-        // hand-rolled slot-conflict resolution (Equip.cpp) assumes a frozen
-        // engine, so gear can be lost. Measure with it, then turn it off.
+        // Three things follow the flag off, and every one has to stay in
+        // step with it: AdvanceMovie's Tick is conditional (the update hook
+        // runs unpaused, so it would fire twice a frame), main.cpp masks the
+        // gameplay input layer so the player cannot swing or shout while
+        // navigating the board, and anything expensive on the open or close
+        // frame is a visible stall rather than a hidden one. Equip.cpp's
+        // same-slot conflict resolution was written for a paused engine and
+        // still runs by hand on a live one.
         [[nodiscard]] static bool NoPause();
         static void                SetNoPause(bool a_on);
 

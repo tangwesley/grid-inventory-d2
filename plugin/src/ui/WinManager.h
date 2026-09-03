@@ -71,8 +71,8 @@ namespace FUI
         // still: the grid's menu object is BUILT before Load() runs (Creator,
         // then OnShow), so a cached value would always describe the previous
         // open. Reading straight from the file means an ini edit lands on the
-        // very next open, which is what makes a paused/unpaused A/B comparison
-        // possible within one session. See GridInventoryMenu::NoPause.
+        // very next open, with no restart and no reload in between. See
+        // GridInventoryMenu::NoPause.
         [[nodiscard]] static bool ReadNoPause(bool a_default);
         // The wheel's own key, and the reason it needs to be able to have one.
         //

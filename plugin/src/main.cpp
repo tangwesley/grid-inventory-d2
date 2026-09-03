@@ -3245,9 +3245,10 @@ namespace
                 // off: measured under "!nopause", the player could still swing,
                 // shout and activate while navigating the board, and any grid
                 // key sharing a button with a gameplay binding did both things
-                // at once (user report). Masked only in that mode -- the paused
-                // path is exactly as A3 left it, and an ordinary install never
-                // reaches this call. See SetGameplayInput.
+                // at once (user report). Masked only while unpaused -- the
+                // paused path is exactly as A3 left it, because kPausesGame
+                // already keeps those bindings from the gameplay layer. See
+                // SetGameplayInput.
                 if (FUI::GridInventoryMenu::NoPause()) SetGameplayInput(false);
             },
             []() {   // menu hidden
@@ -3466,7 +3467,7 @@ namespace
 
 
 SKSEPluginInfo(
-    .Version              = { 1, 6, 0, 0 },
+    .Version              = { 1, 0, 0, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
