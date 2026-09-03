@@ -8,25 +8,42 @@
 // "the board knows", the ledger has to prove it can stay in step with the
 // engine on requests and events alone.
 //
-// ★B4-2b: ENTRIES, not counts. The first observation round ran count-level
-// and scored 30/30 -- but the takeOne ladder's worn questions ("has my equip
-// landed", "is this doll carry still on the body") turn on WINDOWS where the
-// engine flag count and the ledger count are equal while meaning different
-// things. Only identity plus a lifecycle can answer those, so the ledger now
-// carries what the REQUEST knew (uid / sig / hand -- rule 2: the request is
-// the only moment that knows the unit) through the states the takeOne clock
-// machinery currently juggles by matching worn lists:
+// B4-2b: this tracks ENTRIES, not counts. The first observation round ran at
+// count level and scored 30/30 -- but the takeOne ladder's questions about worn
+// state ("has my equip landed?", "is this doll carry still on the body?") turn
+// on windows where the engine's flag count and the ledger's count are equal
+// while meaning different things. Only identity plus a lifecycle can answer
+// those. So the ledger now carries what the REQUEST knew (uid, sig and hand --
+// rule 2: the request is the only moment that knows which unit) through the
+// states that the takeOne clock machinery currently juggles by matching worn
+// lists:
 //
 //     pending  -- our equip request is out; the engine has not applied it
 //     worn     -- the engine confirmed (TESEquipEvent), or wore it unasked
 //                 (slot-conflict removal's counterpart, loadout, script)
 //
-// An unequip event retires one worn entry. (A `doffing` state -- our unequip
-// request in flight -- joins in B4-2c, where the doll-carry question needs
-// it; nothing consumes the ledger until then.)
+// An unequip event retires one worn entry. A `doffing` state -- our unequip
+// request in flight -- joined in B4-2c for the doll-carry question, and
+// ★that question CONSUMES the ledger now: Doffing() is the carry clock (see
+// Grid.cpp's off-board walk). The sentence here used to end "nothing consumes
+// the ledger until then" and stayed after B4-2c landed. The audit is still
+// observation-only -- the engine remains the authority for the counts -- but
+// "nothing" has not been true for a while.
 //
-// One entry = one WORN LIST (a quiver equips as one list however many arrows
-// ride in it, and the event fires once) -- the unit both sides agree on.
+// One entry = one WORN LIST -- the unit both sides agree on.
+//
+// ★★EXCEPT AMMO, and this note used to claim ammo was the EXAMPLE ("a quiver
+// equips as one list however many arrows ride in it, and the event fires
+// once"). It is the counterexample. The engine POOLS arrows on its own terms:
+// measured 2026-09-02 in one session, the same quiver appeared as one worn
+// list of 200 and as three of 99/49/52, and an unequip logged
+// `Steel Arrow x199 (3 worn list(s))`. Counting entries against a number that
+// moves by itself produced "ledger 9 vs engine 0" for four sessions running.
+//
+// ★So an ammo form keeps ONE entry with its units summed, and the audit asks
+// whether the quiver is ON THE BACK rather than how many lists said so. The
+// count stays the engine's -- the doll already reads it there.
+//
 // Rebaselined wholesale at every load (rule 3). Every menu open and close
 // audits entry counts against a fresh ExtraWorn walk AND reports lifecycle
 // residue (a pending that never landed), bending to the engine on mismatch
@@ -39,18 +56,21 @@ namespace FUI::WornLedger
     void NotePending(RE::FormID a_form, std::uint16_t a_uid, std::uint16_t a_sig,
                      int a_hand, int a_units);
 
-    // Our request was fulfilled by something the engine never wears -- the
-    // ring CARRIER stands in for a second-slot ring, so the ring's own equip
-    // event never comes and its pending would sit until the stale sweep
-    // (measured: two ring pendings, first state-machine round). Drops the
-    // oldest pending of the form. (B4-2c gives the carried ring a state of
-    // its own; until then the ledger tracks engine-worn only.)
+    // Withdraw a pending entry whose equip event will never arrive. One caller,
+    // one shape: the second ring goes on through a CARRIER, so the engine
+    // equips our stand-in and raises no TESEquipEvent for the ring itself --
+    // leaving a pending entry with nothing to retire it until the stale sweep.
+    //
+    // It drops the OLDEST pending of the form, which is safe only because that
+    // caller queues one at a time. Do not reach for this from anywhere else: an
+    // equip that simply has not landed yet is indistinguishable from here.
     void CancelPending(RE::FormID a_form);
 
-    // ★B4-2c: our UNEQUIP is out -- a doll lift starts one the moment the
-    // carry begins. The matching worn entry turns `doffing`: still on the
-    // body as far as the engine is concerned, already spoken for as far as
-    // the board is. The unequip event retires doffing entries first.
+    // B4-2c: our unequip is in flight -- lifting an item off the doll starts
+    // one the moment the carry begins. The matching worn entry becomes
+    // `doffing`: still on the body as far as the engine is concerned, but
+    // already spoken for as far as the board is. The unequip event retires
+    // doffing entries first.
     void NoteDoffing(RE::FormID a_form, int a_hand);
 
     // Any doffing entry of this form still open? THE doll-carry clock: true

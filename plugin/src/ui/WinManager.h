@@ -35,9 +35,9 @@ namespace FUI
             std::string parent;            // "" = root; "main" or another key
             bool        posKnown = false;  // has a position (loaded or defaulted)
             int         lastSeen = -1;     // ImGui frame the window was last drawn
-            // ★GI72: the size we last ASKED ImGui for. `size` is what ImGui
+            // GI72: the size we last ASKED ImGui for. `size` is what ImGui
             // hands back, and it floors to whole pixels -- so "did the layout
-            // change?" has to be answered against the request, never against
+            // change?" has to be answered against the request and never against
             // the readback, or a fractional request looks like a change on
             // every single frame.
             ImVec2      reqSize = ImVec2(0.0f, 0.0f);
@@ -51,27 +51,51 @@ namespace FUI
         void Load();         // read the ui ini once (call again to hot-reload)
         void Save() const;
 
-        // ★★Read ONE switch out of the ui ini, without the rest of Load.
+        // Read ONE switch out of the ui ini, without doing the rest of Load.
         //
         // Load runs when the inventory is first drawn, because that is when the
-        // things it configures (skins, scale, window boxes) first matter. The
-        // quick wheel is not one of those: it answers a key during ordinary
-        // play, so a player who turns it off and restarts had it back until
-        // they happened to open their bag -- the wheel would open and suppress
-        // the vanilla menu it was supposed to have handed back.
+        // things it configures -- skins, scale, window boxes -- first matter.
+        // The quick wheel is not one of those: it answers a key during ordinary
+        // play. So a player who turned it off and restarted got it back again
+        // until they happened to open their bag, and in the meantime the wheel
+        // would open and suppress the vanilla menu it was supposed to have
+        // handed back.
         //
-        // ★Not a second copy of the value: Save() still writes it in one place
-        // and Load() still reads it with everything else. This is the same key
-        // read earlier, for the one setting that is needed before any menu
-        // exists. Returns the default when the file or key is absent.
+        // This is not a second copy of the value. Save() still writes it in one
+        // place and Load() still reads it along with everything else; this is
+        // the same key read earlier, for the one setting that is needed before
+        // any menu exists. Returns the default when the file or the key is
+        // absent.
         [[nodiscard]] static bool ReadWheelEnabled(bool a_default);
-        // ★Same shape, same reason, one stage earlier still: the grid's menu
-        // object is BUILT before Load() runs (Creator, then OnShow), so the
-        // cached value would always describe the previous open. Read straight
-        // from the file so an ini edit lands on the very next open -- which is
-        // what makes a paused/unpaused A/B possible inside one session.
-        // See GridInventoryMenu::NoPause.
+        // Same shape and same reason as ReadWheelEnabled, but one stage earlier
+        // still: the grid's menu object is BUILT before Load() runs (Creator,
+        // then OnShow), so a cached value would always describe the previous
+        // open. Reading straight from the file means an ini edit lands on the
+        // very next open, with no restart and no reload in between. See
+        // GridInventoryMenu::NoPause.
         [[nodiscard]] static bool ReadNoPause(bool a_default);
+        // The wheel's own key, and the reason it needs to be able to have one.
+        //
+        // The wheel follows the game's Favourites binding, and for a long time
+        // that was the whole story: one source, no setting to own. Then a
+        // player rebound Inventory onto that same key, and the wheel's pre-menu
+        // blanking (Wheeler's MenuLock) erased it before the engine could open
+        // anything. The vanilla InventoryMenu never opened, so our intercept
+        // never fired, so the inventory could not be opened at all. Reported.
+        //
+        // This is an OVERRIDE rather than a copy of the live value. A copy is
+        // what the old ini key was, and why it had to go: Save() wrote whatever
+        // the wheel was currently using, and the next open read that stale
+        // number back over the player's rebind. Here 0 means "follow the game",
+        // and re-reading 0 a hundred times cannot fight anything.
+        //
+        // a_pad: false = keyboard scan code, true = gamepad button.
+        [[nodiscard]] static std::uint32_t ReadWheelKey(bool a_pad);
+        // How long a press has to last to count as a HOLD rather than a tap, in
+        // milliseconds. Same early-read reason as the two above: the wheel
+        // answers a key during ordinary play, long before any window exists. A
+        // value of 0, or an unparseable one, returns the caller's default.
+        [[nodiscard]] static int ReadWheelTapMs(int a_default);
         // GI46-48: NAMED share files. "Default" -> GridInventory_Default.ini,
         // "P1" -> GridInventory_P1.ini ... each beside its icon bundle
         // (GridInventory_<name>_icons.pak). One ini carries the style subset
@@ -94,16 +118,18 @@ namespace FUI
                                                    const std::string&)> a_apply,
                                 std::function<void()> a_done);
 
-        // ★Which corner stays put when a window's CODE-DEFINED size changes
-        //  while it is open. Sizes are not user-editable, but they do change:
-        //  the main window drops its whole equipment column in loot/barter mode
-        //  (~412px). Holding the top-LEFT fixed there slid the item grid
-        //  sideways by that width and stranded — or swallowed — whatever the
-        //  user had docked to the edge that moved (user report).
-        //  The main window pins its RIGHT edge because the grid is the part
-        //  that survives both modes and it is right-aligned in the frame; the
-        //  left column then appears and disappears leftwards, into the space
-        //  the partner window uses anyway.
+        // Which corner stays put when a window's CODE-DEFINED size changes
+        // while it is open. Sizes are not user-editable, but they do change:
+        // the main window drops its entire equipment column (about 412px) in
+        // loot and barter mode. Holding the top-LEFT corner fixed there slid
+        // the item grid sideways by that width, and stranded -- or swallowed --
+        // whatever the user had docked against the edge that moved (user
+        // report).
+        //
+        // The main window pins its RIGHT edge instead, because the grid is the
+        // part that survives both modes and it is right-aligned in the frame.
+        // The left column then appears and disappears leftwards, into the space
+        // the partner window occupies anyway.
         enum class Anchor : std::uint8_t
         {
             kTopLeft = 0,   // default — position IS the top-left corner
@@ -111,13 +137,15 @@ namespace FUI
         };
 
         // Call BEFORE ImGui::Begin: applies the stored position.
-        // ★★a_topPad: clearance ABOVE the title (Theme::TitleTopPad). It is taken
-        // HERE, not at TitleBar, because this is the one call that owns the SIZE
-        // and still runs before Begin -- so the height grows by exactly what the
-        // title is offset by, out of one argument, and the two cannot drift.
-        // A window that does not pass it gets neither, which is the opt-in the
-        // old separate TitleBar parameter was for; the difference is that it can
-        // no longer be passed to one and forgotten at the other.
+        // a_topPad is the clearance ABOVE the title (Theme::TitleTopPad). It is
+        // taken here rather than at TitleBar because this is the one call that
+        // owns the SIZE and still runs before Begin -- so the height grows by
+        // exactly the amount the title is offset by, from a single argument,
+        // and the two cannot drift apart.
+        //
+        // A window that does not pass it gets neither, which is the same opt-in
+        // the old separate TitleBar parameter provided. The difference is that
+        // it can no longer be passed to one call and forgotten at the other.
         void ApplyNext(const std::string& a_key, ImVec2 a_defaultPos, ImVec2 a_defaultSize,
                        Anchor a_anchor = Anchor::kTopLeft, float a_topPad = 0.0f);
 
@@ -128,10 +156,10 @@ namespace FUI
         // otherwise claim ActiveId first and eat them.
         // a_centerTitle: force a centred title regardless of the skin (small
         // confirm dialogs — loadout buy/delete — look lopsided left-anchored).
-        // ★The title's top pad is NOT a parameter here any more -- it is read
-        // back from what ApplyNext recorded for this key. It used to be passed
-        // to both, and the comment describing which windows opted out went stale
-        // the same day four of them opted in.
+        // The title's top pad is no longer a parameter here -- it is read back
+        // from whatever ApplyNext recorded for this key. It used to be passed
+        // to both calls, and the comment describing which windows opted out
+        // went stale the same day four of them opted in.
         // Paint a window's GROUND -- the skin's own sheet (torn paper, ink
         // photograph, flat panel) plus its frame. Split out of TitleBar so a
         // panel with NO title bar can still have a background; the accessory
@@ -141,15 +169,17 @@ namespace FUI
         // a_topPad/a_barH describe the title strip above this ground, for the
         // one gradient that needs it. Pass 0/0 when there is no title.
         //
-        // ★★a_clipMin/a_clipMax FENCE THE PAINT IN. This routine deliberately
-        // overrides the window's clip (chrome has to reach the edge pixels,
-        // and torn/ink sheets bleed past them), which is right for a window
-        // painting itself and wrong for anything painting a rect BIGGER than
-        // what may be seen. The drawer is that case: its sheet belongs to the
-        // whole sliding box, but only the part outside the inventory window is
-        // allowed on screen — without a fence the sheet drew straight over the
-        // inventory (reported on the ink and parchment skins, which are the
-        // ones that paint a sheet at all). Leave them equal to opt out.
+        // a_clipMin and a_clipMax fence the paint in. This routine deliberately
+        // overrides the window's clip rectangle, because chrome has to reach
+        // the edge pixels and the torn and ink sheets bleed past them. That is
+        // right for a window painting itself, and wrong for anything painting a
+        // rectangle BIGGER than what is allowed to be seen.
+        //
+        // The accessory drawer is that second case: its sheet belongs to the
+        // whole sliding box, but only the part outside the inventory window may
+        // appear on screen. Without a fence the sheet drew straight over the
+        // inventory -- reported on the ink and parchment skins, which are the
+        // ones that paint a sheet at all. Leave the two equal to opt out.
         void PaintGround(ImDrawList* a_dl, ImVec2 a_min, ImVec2 a_max,
                          const std::string& a_key, float a_topPad, float a_barH,
                          ImVec2 a_clipMin = ImVec2(0.0f, 0.0f),
@@ -164,22 +194,27 @@ namespace FUI
         // controls drifted off the title's line.
         [[nodiscard]] static float TitleBarH();
 
-        // ★★Where a glyph of this height sits on the title's LINE, for the
-        // window named by a_key. Three call sites derived it by hand -- the
-        // title itself, the main window's EDIT / SETTINGS / x, and a bag's
-        // COLLECT -- and the third took the frame inset WHOLE where the other
-        // two take half, so it sat 12px low on every torn skin and 3px low on
-        // every translucent one. Two terms, both easy to get wrong: HALF the
-        // frame inset (the title belongs to the bar, not under the frame) and
-        // ALL of the top pad (the window's height already paid for it).
+        // Where a glyph of this height sits on the title's LINE, for the window
+        // named by a_key.
+        //
+        // Three call sites used to derive this by hand: the title itself, the
+        // main window's EDIT / SETTINGS / close buttons, and a bag's COLLECT.
+        // The third took the frame inset WHOLE where the other two took half,
+        // so it sat 12px low on every torn skin and 3px low on every
+        // translucent one.
+        //
+        // There are two terms and both are easy to get wrong: HALF the frame
+        // inset (the title belongs to the bar rather than sitting under the
+        // frame), and ALL of the top pad (the window's height has already paid
+        // for it).
         [[nodiscard]] static float TitleTextY(const std::string& a_key, float a_glyphH);
 
         // Phase 2: shared chrome for the centred confirm-style popups
         // (quantity slider / sell-confirm / loadout buy / delete):
-        // ★Opens AT THE CURSOR (clamped so the whole popup stays on screen),
-        // re-placed on every open -- a popup is answered and dismissed, so it
+        // Opens at the cursor, clamped so the whole popup stays on screen, and
+        // is re-placed on every open. A popup is answered and dismissed, so it
         // has no position worth remembering and no reason to make the player
-        // travel to the middle of the display.
+        // travel to the middle of the display to reach it.
         // ApplyNext + Begin(kManagedWinFlags) + overlay-rect
         // registration (hover-through prevention can't be forgotten any more)
         // + centred TitleBar. Returns TRUE when an outside click cancelled
@@ -212,26 +247,28 @@ namespace FUI
         // everything docked to it along the edge it was docked to.
         void Reanchor(const std::string& a_key, ImVec2 a_newSize, Anchor a_anchor);
 
-        // ★★SAVED POSITIONS ARE PIXELS AT A PARTICULAR UI SCALE. Sizes are
-        // not persisted at all -- ApplyNext recomputes them every frame from
-        // the current scale -- so a layout carried to a different scale keeps
-        // its old coordinates while every window around them grows: nothing
-        // leaves the screen (the titlebar clamp sees to that), they simply
-        // bunch up and overlap in the top-left.
-        // ★Normalised against the SCALE and not against the display: the whole
-        // layout is built in scale-multiplied units, so scaling positions by
-        // the same factor moves flush edges together and docked windows stay
-        // docked. Dividing by the display size would grow the gaps faster than
-        // the windows and pull them apart.
-        // ★The file carries the scale it was written at (`!uiscale`), so an
-        // existing ini -- every one of which was written at 1.00 -- needs no
+        // Saved positions are pixels at one particular UI scale. Sizes are not
+        // persisted at all -- ApplyNext recomputes them every frame from the
+        // current scale -- so a layout carried to a different scale keeps its
+        // old coordinates while every window around it grows. Nothing leaves
+        // the screen, because the titlebar clamp sees to that; the windows
+        // simply bunch up and overlap in the top-left.
+        //
+        // Positions are normalised against the SCALE rather than the display
+        // size. The whole layout is built in scale-multiplied units, so scaling
+        // positions by the same factor keeps flush edges flush and docked
+        // windows docked. Dividing by the display size would grow the gaps
+        // faster than the windows and pull the layout apart.
+        //
+        // The file records the scale it was written at (`!uiscale`), so an
+        // existing ini -- all of which were written at 1.00 -- needs no
         // conversion, and the numbers in it stay real pixels a human can read.
         void RescalePositions(float a_ratio);
 
         float m_fileScale  = 1.0f;    // !uiscale from the file; 1.0 when absent
-        // ★Deferred, because Load() runs before there is a swapchain: the
-        // display size the scale is derived from is not known until the first
-        // frame. Applied once, there.
+        // Deferred, because Load() runs before there is a swapchain: the
+        // display size that the scale is derived from is not known until the
+        // first frame. It is applied once, there.
         bool  m_scaleFixed = false;
 
         // length of the shared (flush) edge between two rects; 0 = not touching
@@ -261,13 +298,16 @@ namespace FUI
         DragState        m_drag;
         bool             m_dragLock = false;
         bool             m_loaded = false;
-        // ★The last bytes we successfully put on disk, and the timestamp they
+        // The last bytes we successfully wrote to disk, and the timestamp they
         // landed with. Save() compares against the first to decide whether the
-        // write is needed at all; Load() compares against the second to decide
-        // whether the read is. Both are "has anything actually changed?", asked
-        // on the two frames the player can feel -- the close and the open.
-        // ★mutable because Save() is const and always has been; what it caches
-        // is a fact about the DISK, not about this object's settings.
+        // write is needed at all, and Load() compares against the second to
+        // decide whether the read is. Both are asking "has anything actually
+        // changed?" on the two frames the player can feel: the close and the
+        // open.
+        //
+        // These are mutable because Save() is const and always has been, and
+        // what it caches is a fact about the DISK rather than about this
+        // object's settings.
         mutable std::string                   m_lastWritten;
         mutable std::filesystem::file_time_type m_iniStamp{};
     };

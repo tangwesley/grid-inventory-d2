@@ -187,6 +187,68 @@ namespace FUI
         // The retired stylized derivative is swept here too (GI60).
         void ResetDiskCache();
 
+        // ★★COUNT THE ARMOURS WHOSE PICTURE DEPENDS ON WHO IS WEARING IT.
+        //
+        // An icon key folds BOTH ground models of an armour together
+        // (ModelSlot32), so a record gets exactly ONE icon -- and the engine
+        // renders whichever sex the character capturing it happens to be. For
+        // the ~99% of armours whose two ground models are the same file that
+        // is invisible and correct. For the rest -- underwear, some bard and
+        // mage clothing -- the shipped pak hands every player the sex it was
+        // captured on. Reported against a male character seeing female models.
+        //
+        // The fix under consideration is to leave those records OUT of the
+        // shipped pak, so each install captures them on its own character.
+        // That is only sane if the number is small: every excluded record is a
+        // live capture the player waits for once. So it is measured before it
+        // is decided, and the count lands in every log we are ever sent.
+        // Main/game thread, after kDataLoaded (walks the form arrays).
+        void ReportSexSpecificArmour();
+
+        // ★★DOES THE ENGINE ALREADY KEEP A PICTURE FOR EACH SPELL?
+        //
+        // Reported: the wheel's magic side has no per-spell icon, so picking
+        // one means reading names, which gets slow as a spell list grows. Our
+        // icons are captures of a MODEL, and a spell has none -- but MDOB
+        // (BGSMenuDisplayObject) is a TESBoundObject the vanilla magic menu
+        // renders for that spell, and BOTH SpellItem and EffectSetting carry
+        // one. That is the same type this cache already captures, so if the
+        // coverage is there the whole feature is a resolution change rather
+        // than a new asset pipeline.
+        //
+        // Measured before it is built, the way the armour count was: a feature
+        // that works for a fifth of the spell list is worse than none, because
+        // the fifth that works teaches the player to expect it.
+        // Main/game thread, after kDataLoaded.
+        void ReportSpellDisplayObjects();
+
+        // ★★★AND SOMETHING HAS TO ASK FOR THEM, or the resolution above is
+        // machinery nobody ever starts.
+        //
+        // The capture engine runs inside the GRID's render pass -- taking a
+        // picture means standing a model in a 3D scene, and the wheel has no
+        // such scene (Wheeler's own comment says so where it queues). Items
+        // reach the queue because they are IN the bag being drawn. A spell
+        // never is: it is not inventory at all, so opening the bag would never
+        // meet one, and a spell icon would be queued by nobody and captured
+        // never.
+        //
+        // So the bag's opening is where the magic favourites are handed over:
+        // the exact set the wheel's magic group is built from (the engine's
+        // MagicFavorites), photographed in the one place that can, while the
+        // player is doing something else. Cheap and idempotent -- QueueCapture
+        // already drops anything cached or queued.
+        void QueueFavouriteSpells();
+
+        // ★Write the pak that goes to OTHER PEOPLE: this player's capture pak
+        // minus every icon whose picture depends on who was wearing it. Those
+        // records are then captured by each install on its own character,
+        // where the engine picks the right model for free -- one capture per
+        // record the player actually meets, appended to their own pak.
+        // Author tooling: drop GridInventory_makeshippingpak.txt beside the
+        // plugin and the next menu open writes it. Never called in play.
+        bool ExportShippingPak(const char* a_path);
+
         // GI47: preset icon bundle. Export copies our capture pak next to the
         // preset ini; import APPENDS the bundle's records behind our own --
         // the scanner's last-one-wins rule then gives the preset every shared
@@ -390,6 +452,13 @@ namespace FUI
         // grid re-queues them every frame and the caching spinner never ends
         std::unordered_set<std::uint64_t>      m_failed;
         bool                                   m_failLoaded = false;
+        // ★Named a nif that is not installed. Deliberately NOT m_failed and
+        // deliberately NOT persisted: the archive probe is instant and the item
+        // heals itself the moment the mesh arrives, so re-deciding it next
+        // session costs nothing. But it has to be remembered for THIS one --
+        // the probe used to run in PreRender and leave no trace, so a visible
+        // tile re-queued itself every single frame and the queue never reached
+        // zero: a precache stuck at "1 left" with the spinner turning for ever.
         // GI68: ran out of window while the engine was STILL LOADING. Not a
         // failure -- a candidate for a later, unhurried pass. Kept apart from
         // m_failed so a retry can target exactly these and nothing else.

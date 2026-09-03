@@ -95,13 +95,13 @@ namespace FUI::Sfx
     inline void Focus()     { if (!PlayCustom(kSndFocus))     PlayUI("UIMenuFocus"); }
     // rejection blip (quest-locked / not enough gold / inventory full ...)
     inline void Fail()      { if (!PlayCustom(kSndFail))      PlayUI("UIActivateFail"); }
-    // ★★THE CORNER NOTIFICATION, made here rather than called for.
+    // The corner notification, called directly rather than through a wrapper.
     //
-    // CommonLibSSE-NG used to expose this as RE::DebugNotification. The NG
-    // line we build against for Skyrim 1.7.99 dropped it, so the same engine
-    // function is reached the same way it always was -- through the address
-    // library, by the id CommonLib itself used -- rather than by hand-rolling
-    // a HUD message and hoping it lands the same.
+    // CommonLibSSE-NG used to expose this as RE::DebugNotification, but the NG
+    // line we build against for Skyrim 1.7.99 dropped it. So we reach the same
+    // engine function the same way it was always reached -- through the address
+    // library, by the id CommonLib itself used -- rather than hand-rolling a
+    // HUD message and hoping it behaves identically.
     inline void Notify(const char* a_msg, const char* a_sound = nullptr)
     {
         if (!a_msg || !*a_msg) return;
@@ -144,14 +144,16 @@ namespace FUI::Sfx
     }
 
     // ---- click-wired button (hover Focus + SelectOn / SelectOff) ----------
-    // ★★A ROUNDED frame cannot contain its own fill. ImGui fills across the
-    // whole rect and then strokes half a pixel INSIDE it, so the two arcs are
-    // struck from centres 0.5px apart and the fill reaches ~0.71px past the
-    // stroke at 45°. On a square frame nothing shows; on a rounded one a bright
-    // face bleeds out of all four corners. Thickening the stroke covers it and
-    // makes every button heavier — so instead: suppress ImGui's fill, and paint
-    // our own INSET by the stroke on a channel BEHIND the widget. ImGui still
-    // draws the label, on top, exactly where it always was.
+    // A rounded frame cannot contain its own fill. ImGui fills across the whole
+    // rectangle and then strokes half a pixel inside it, so the two arcs are
+    // struck from centres 0.5px apart and at 45 degrees the fill reaches about
+    // 0.71px past the stroke. On a square frame nothing shows; on a rounded one
+    // a bright face bleeds out of all four corners.
+    //
+    // Thickening the stroke would cover it, but makes every button look
+    // heavier. So instead we suppress ImGui's fill and paint our own, inset by
+    // the stroke width, on a channel behind the widget. ImGui still draws the
+    // label on top, exactly where it always was.
     inline bool Button(const char* a_label, const ImVec2& a_size = ImVec2(0, 0),
                        bool a_cancel = false)
     {
@@ -162,14 +164,15 @@ namespace FUI::Sfx
         const bool inset = Theme::S().lightPanel && st.FrameBorderSize > 0.0f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        // ★★The label is drawn BY HAND, so it can be centred on its ink
-        // rather than on its line box (Theme::TextInkCentered). ImGui centres
-        // the box, which reserves descender room every string does not use —
-        // "EDIT" then rides high and "+" sits low, each by its own amount, so
-        // there is no single nudge that fixes them together.
+        // The label is drawn by hand so it can be centred on its INK rather
+        // than on its line box (see Theme::TextInkCentered). ImGui centres the
+        // box, which reserves descender room that not every string uses -- so
+        // "EDIT" rides high and "+" sits low, each by a different amount, and
+        // no single nudge can fix both.
+        //
         // The frame is still ImGui's: pass it an empty label at an explicit
-        // size (the same size it would have computed) and it draws everything
-        // but the text.
+        // size (the same size it would have computed itself) and it draws
+        // everything except the text.
         char vis[128];
         {
             const char* hash = std::strstr(a_label, "##");
@@ -191,13 +194,14 @@ namespace FUI::Sfx
             dl->ChannelsSplit(2);
             dl->ChannelsSetCurrent(1);
         }
-        // ★★THE ID COMES FROM THE LABEL, so a label carrying a live number
-        // gets a NEW id every frame: the press and the release land on two
-        // different widgets and the click never completes. That is not a
-        // button that is hard to hit, it is one that CANNOT be hit -- which
-        // is what the precache CANCEL was, its label counting down as the
-        // queue drained. "##" marks the part that must not move, exactly as
-        // ImGui intends it; the visible half above already respects it.
+        // ImGui derives a widget's id from its label, so a label carrying a
+        // live number gets a NEW id every frame: the press and the release land
+        // on two different widgets and the click never completes. That is not a
+        // button that is merely hard to hit, it is one that CANNOT be hit --
+        // which is what the precache CANCEL button was, its label counting down
+        // as the queue drained. "##" marks the part of the label that must not
+        // change, exactly as ImGui intends; the visible half above already
+        // respects it.
         const char* idPart = std::strstr(a_label, "##");
         ImGui::PushID(idPart ? idPart : a_label);
         const bool pressed = ImGui::Button("##b", sz);
@@ -216,13 +220,14 @@ namespace FUI::Sfx
                                   ImGui::GetColorU32(face),
                                   (st.FrameRounding > b) ? st.FrameRounding - b : 0.0f);
             }
-            // ★BEVEL — light along the top and left, dark along the bottom and
-            // right, one pixel inside the border. Pressed, the two swap and the
-            // control actually reads as pushed in.
-            // ★Runs even when the face is TRANSPARENT: an off button shows the
-            // panel through it, and a gradient would have nothing to sit on,
-            // but these are lines drawn on the frame itself. That is why this
-            // treatment works here and a gradient does not.
+            // Bevel: light along the top and left, dark along the bottom and
+            // right, one pixel inside the border. When pressed the two swap,
+            // which is what makes the control read as pushed in.
+            //
+            // This runs even when the face is TRANSPARENT. An "off" button
+            // shows the panel through it, so a gradient would have nothing to
+            // sit on -- but these are lines drawn on the frame itself, which is
+            // why the bevel treatment works here where a gradient does not.
             // The runs stop short of the corner radius — a straight line cannot
             // follow the arc, and at 3px nobody reads the gap as missing.
             const float r  = (st.FrameRounding > b) ? st.FrameRounding - b : 0.0f;
@@ -253,5 +258,41 @@ namespace FUI::Sfx
             else          SelectOn();
         }
         return pressed;
+    }
+
+    // A confirm popup answers one key, and the pointer decides which button
+    // hears it.
+    //
+    // While any of these windows is up, the gamepad's A button arrives as
+    // ImGuiKey_Enter (see UIRoot::TranslatePadButtons). It is a KEY and never a
+    // mouse click, so it cannot press a Cancel button that the player has
+    // deliberately pointed at. Every popup read Enter as "confirm"
+    // unconditionally, so pointing at Cancel and pressing A deleted the preset
+    // anyway (user report): the button being looked at did the opposite of what
+    // it said, on the one gesture meant to undo the whole dialog.
+    //
+    // So the key is read once per popup, and a cancel button under the pointer
+    // claims it first. Mouse play is unaffected, since a click was always a
+    // click, and with the pointer anywhere else A still confirms -- which is
+    // what the prompt bar promises.
+    inline bool ConfirmKey()
+    {
+        // GI52: stands down while a text field (the tab rename) has the keyboard
+        return !ImGui::GetIO().WantTextInput &&
+               (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                ImGui::IsKeyPressed(ImGuiKey_Space, false));
+    }
+
+    // The cancel half of a confirm popup: the quiet button, true when clicked
+    // OR when the confirm key lands while the pointer is on it. Draw it in
+    // layout order (after the confirm button) but TEST IT FIRST -- it is the
+    // half that has to win a tie.
+    inline bool CancelButton(const char* a_label, const ImVec2& a_size, bool a_confirmKey)
+    {
+        const bool clicked = Button(a_label, a_size, true);
+        const bool claimed = a_confirmKey && ImGui::IsItemHovered();
+        if (claimed && !clicked) SelectOff();
+        return clicked || claimed;
     }
 }

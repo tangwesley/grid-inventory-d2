@@ -64,19 +64,29 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
 ## Features
 
 ### The grid
-- **9×4 = 36 squares by default, and the size is yours to set** — GRID SIZE in
-  SETTINGS, or `!basegrid = cols, rows` in `GridInventory_ui.ini`. Columns
-  4–24, rows 1–40; the container and merchant boards follow your column count
-  so items drag straight across. Real footprints per item (1×1 rings to 2×4
-  greatbows), free shapes (L-pieces) supported. **Rotate 90° with `A`/`D` while
-  carrying.** No auto-sort and no search — organising it yourself is the point.
+- **10×8 = 80 squares by default, and the size is yours to set** —
+  `!basegrid = cols, rows` in `GridInventory_ui.ini`. Columns 4–24, rows 1–40;
+  the container and merchant boards follow your column count so items drag
+  straight across. Real footprints per item (1×1 rings to 2×4 greatbows), free
+  shapes (L-pieces) supported. **Rotate 90° with `A`/`D` while carrying.** No
+  auto-sort and no search — organising it yourself is the point.
+- **Three boards: ITEMS · QUEST · KEYS**, on a strip above the grid. Quest
+  objects and keys are routed to their own board automatically, on pickup and
+  on every load, and they leave it again by themselves when an item stops
+  being a quest object. Each board is the same size as ITEMS and each grows
+  its own overflow rows — but **the QUEST and KEYS boards never slow you
+  down**, and their squares are outside the Space figure entirely. Nothing you
+  cannot drop can put you over the limit. A key is never refused at pickup for
+  want of room, and neither is a quest item. A tab shows how many tiles it
+  holds and lights up when something new lands on it.
 - **Pick-up-and-place**: left-click to lift, left-click the target square to set
   down (swap supported). Shift+left-click = stack/gold split slider.
 - Rarity glow (**unique = red · enchanted = blue**), poison shown as a droplet in
   the top-right, markers (favourite ◆ / quest ▲ / stolen ●), **newly acquired
   squares lit a shade brighter**, Shift comparison tooltip with an
   *Equipped* card.
-- **Capacity**: exceeding the board shows an overflow row and slows movement.
+- **Capacity**: exceeding the ITEMS board shows an overflow row and slows
+  movement (the QUEST and KEYS boards are exempt — see above).
   A full grid blocks pickups (quest/script-granted items are deliberately never
   blocked — they come in and push you into overflow instead). Shrinking the
   board never strands anything: whatever no longer fits its old square is
@@ -86,24 +96,31 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
   **Opens at its smallest zoom.**
 - **Equipment doll**: 17 slots, place to equip / right-click to unequip.
 - **Two rings**: vanilla wears one; here you can wear two.
-  - The first goes on with a plain **click**, into the left ring slot.
-  - The second must be **dragged onto the right ring slot**. Clicking will not
-    put it there — otherwise every ring would keep replacing the first one.
-  - **Two rings with the same effect are refused**, including two grades of one
-    family: the check is on the magic effect, so a different name or rating does
-    not get past it.
-  - Drag the left ring onto the right slot and **the two trade places**.
-  - The second ring's **effect applies, but it is not visible on your hand.** A
-    ring's mesh carries its own slot number inside the file, and while the first
-    ring holds that number the second cannot be drawn. That is a limit of the
-    game, not something this mod can work around.
+  - First or second, a plain **click** puts a ring in whichever ring slot is
+    **empty**. With both full, a click replaces the one **drawn on your hand**.
+  - To choose the slot, **drag onto it**. If it is taken, that ring is swapped
+    out and comes back to your cursor.
+  - **Nothing is refused.** Two of the same ring, or two rings with the same
+    effect, both go on — and both effects apply. 1.5.x had a rule against
+    matching effects, but it **only ever ran on one of the two slots**: the
+    other slot, a click and the quick wheel all let the same pair straight
+    through. A rule kept on half the roads only inconveniences the players who
+    happen to meet it, so it is gone.
+  - Both rings are **worn by the game itself**. The ring already on your hand
+    gives up its ring slot so the new one can take it, which is why
+    enchantments, tooltips and weight all behave normally.
+  - The second ring's **model is not drawn on your hand**: the one that gave up
+    its slot has nowhere for the game to draw it. The effect applies normally.
+  - If you run a mod that puts **more rings** on you (Jewelry Limiter, for
+    example), those show up on the doll as well.
 - **Gear-set tabs**: one click swaps the whole set (really equips; stats follow).
   Gear held by inactive tabs is hidden and takes no squares.
 - **Eighteen bags**: right-click opens the inner grid.
   - **Twelve general** — from a one-square pouch to a 3×3 pack holding a
     hundred squares. General goods vendors rotate three of them each restock.
   - **Six sorting bags** — ingredients, ore and ingots, hides, potions, soul
-    gems, keys (lockpicks included). Each takes only its own kind and
+    gems, keys (the lockpick — real keys go to the KEYS tab now). Each takes
+    only its own kind and
     **anything you pick up goes straight into it**; what you take back out
     stays where you put it. **COLLECT** on the title bar gathers that kind
     from wherever it is scattered. Always stocked by the trader who deals in
@@ -129,12 +146,26 @@ first run — there is nothing to edit beforehand. Safe to add to an ongoing sav
 - Pickpocketing: a success % on every square (for the whole stack), worn gear
   locked (Perfect Touch unlocks), reverse-pickpocketing + Poisoned-perk planting.
 - Containers auto-open after a successful lockpick (yields to QuickLoot-style widgets).
+- **A follower's worn gear**: right-click takes a piece at a time, but `R`
+  (take all) empties the PACK and leaves the body dressed. Strip a living NPC
+  of every outfit item and the game mints the whole outfit again and re-dresses
+  them -- vanilla behaviour, and not something a mod can switch off. To swap a
+  follower's kit, hand them the replacement FIRST and then take the old one.
+  Corpses and chests are unaffected: `R` takes everything.
 
 ### The quick wheel — change gear without opening anything
 
 **Hold the game's Favourites key (`Q` by default)** and the screen falls back
 while a ten-slot ring opens. It **replaces the vanilla favourites menu**, so it
 answers that key and follows it if you rebind it in the game's own controls.
+
+> **Giving the wheel a key of its own.** The wheel hides its key from the game,
+> so that the vanilla favourites menu never opens over it. That means another
+> control put on the same key stops working — put the inventory there and the
+> bag will not open at all. Set `!wheelkey` in
+> `SKSE/Plugins/GridInventory_ui.ini` to a scan code to move the wheel
+> somewhere of its own; `0` keeps it on the Favourites key. Common codes:
+> `Q=16 E=18 R=19 F=33 G=34 V=47 X=45 Z=44 CapsLock=58`.
 
 - **`A` / `D` switch group** — there are four.
 
@@ -180,11 +211,15 @@ everything the game measures still comes from what you are really wearing.
   wearing the same thing twice).
 
 ### Settings (SETTINGS in the title bar)
-- Scale, text size, **grid size**, 19 skins (two of them brush-and-ink),
+- Scale, text size, 19 skins (two of them brush-and-ink),
   languages (live switch), icon
   brightness/style, item shadow (distance/blur/opacity), capture light, icon
   cache reset, precache all, **quick wheel on/off**, trade options (unlimited
   merchant gold / merchant buys anything).
+- **Board size is not in here** — it is `!basegrid = cols, rows` in
+  `GridInventory_ui.ini`. It sizes all three boards at once, so it is a thing
+  you set and then leave alone rather than something to drag while looking at
+  it.
 - Sliders take a drag, the ± buttons at either end (held for continuous), a
   double-click to type an exact value, and a right-click to restore the default.
 

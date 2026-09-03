@@ -201,6 +201,13 @@ namespace FUI::UIRoot
         // assumption is now explicit
         std::atomic<bool> g_showSettings = false;
         std::atomic<bool> g_textInputOn = false;   // ImGui WantTextInput mirror (no engine calls)
+        // ★Written from the UI thread (the menu shown/hidden callbacks), read
+        // from the input thread (InputLock), hence atomic — same reason as the
+        // line above. Nothing here calls the engine.
+        std::atomic<bool> g_gameplayMasked = false;
+        // ★"!movewatch" -- the input-state trace's arming switch (UIRoot.h).
+        // Read from the Update hook, written from the ini parse.
+        std::atomic<bool> g_movementWatch = false;
 
         // ---- INSPECT overlay (C key) ----
         // The rotation is euler, exactly like a def, so the whole capture path
@@ -352,31 +359,117 @@ namespace FUI::UIRoot
             static unsigned s_lastChars = 0;
             static int      s_contradictions = 0;
 
+            // A press waiting one frame to see whether the window road answers
+            // it -- see the doubt block below. Modifiers travel WITH the press,
+            // because by the time it is judged the player may have let shift go.
+            struct Pending { int vk; bool shift; bool caps; };
+            static Pending  s_pend[8] = {};
+            static int      s_pendN = 0;
+            static unsigned s_pendBase = 0;
+
             // Only ever while a text field is waiting. Outside one there is
             // nothing to type into, and ToUnicodeEx is stateful (dead keys) --
             // calling it for every key at all times would leave half-composed
             // accents lying around for the next field that opens.
-            if (!a_io.WantTextInput) {
+            //
+            // ★And only while the board actually owns the keyboard. This is the
+            // SECOND road for characters, so the guard the thunk carries has to
+            // sit on it too -- "blocking one road and calling it done is the
+            // whole bug" is written thirty lines up, about this very pair. With
+            // the console up, or somebody else's overlay holding us suppressed,
+            // WantTextInput can still read true from the frame before, and an
+            // unguarded road would put the player's console command into our
+            // search box.
+            auto* ui = RE::UI::GetSingleton();
+            if (!a_io.WantTextInput || !IsBoardLive() ||
+                !ui || ui->IsMenuOpen(RE::Console::MENU_NAME)) {
                 for (auto& d : s_down) d = false;
+                s_pendN = 0;   // nothing left to type into; drop the doubt too
                 return;
             }
 
             const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            const bool caps  = (GetKeyState(VK_CAPITAL) & 1) != 0;
 
+            // The count as of the PREVIOUS sweep. A press detected now happened
+            // somewhere between that sweep and this one, so this is the mark a
+            // later WM_CHAR has to beat to prove it belongs to that press.
+            const unsigned prevChars = s_lastChars;
             const unsigned chars = g_wmCharSeen.load(std::memory_order_relaxed);
             const bool     wmAlive = chars != s_lastChars;
             s_lastChars = chars;
 
-            BYTE ks[256] = {};
-            if (g_kbFallback) {
+            // ★★A WM_CHAR JUST ARRIVED, AND THAT HAS TO BE ACTED ON.
+            // The build that only ever counted upward is why a reporter saw
+            // every letter typed twice. Two things follow from one arrival:
+            //
+            //   1. The tally goes back to zero. The latch below reasons "one
+            //      frame could be a race; three cannot" -- true of three IN A
+            //      ROW, and this counter never reset, so it was three IN A
+            //      LIFETIME. Races an hour apart added up on a machine whose
+            //      WM_CHAR was never broken for a moment.
+            //   2. The fallback lets go. It is the second road; it exists only
+            //      while the first is dead, and the first just spoke. Both alive
+            //      means both deliver, and ImGui cannot tell that the two
+            //      characters were one keystroke.
+            //
+            // Order matters: this runs BEFORE the sweep, so on the frame the
+            // window road comes back it is already the only road.
+            if (wmAlive) {
+                s_contradictions = 0;
+                if (g_kbFallback) {
+                    g_kbFallback = false;
+                    SKSE::log::info(
+                        "[UI] input: WM_CHAR is arriving again (chars {}). Polled "
+                        "characters off -- the window road has the keyboard.",
+                        chars);
+                }
+            }
+
+            auto synth = [&a_io](int a_vk, bool a_shift, bool a_caps) {
                 // ToUnicodeEx reads the WHOLE table, so the modifiers have to be
-                // in it or every letter comes out lower case.
-                if (shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
-                if (ctrl)  { ks[VK_CONTROL] = 0x80; }
-                if (alt)   { ks[VK_MENU] = 0x80; }
-                if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] = 0x01;
+                // in it or every letter comes out lower case. Ctrl and Alt are
+                // never here: a shortcut is filtered out before it can queue.
+                BYTE ks[256] = {};
+                if (a_shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
+                if (a_caps)  { ks[VK_CAPITAL] = 0x01; }
+                const UINT sc = MapVirtualKeyW(static_cast<UINT>(a_vk), MAPVK_VK_TO_VSC);
+                WCHAR     buf[8] = {};
+                const int n = ToUnicodeEx(static_cast<UINT>(a_vk), sc, ks, buf,
+                                          static_cast<int>(std::size(buf)), 0,
+                                          GetKeyboardLayout(0));
+                for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
+                    if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                }
+            };
+
+            // ★★★ONE FRAME OF DOUBT, AND THE DOUBLING BECOMES IMPOSSIBLE.
+            //
+            // The latch above is evidence, and evidence can be stale: it was
+            // gathered at some earlier moment and the road may have been fine
+            // ever since. Acting on it the instant a key goes down is what let a
+            // wrongly-latched session put the FIRST letter in twice -- the spare
+            // road spoke in the same frame as the press, and the real WM_CHAR
+            // for it only arrived on the next.
+            //
+            // So a press is not answered where it is seen. It waits one sweep,
+            // and is spoken for only if no WM_CHAR turned up in the meantime.
+            // On a healthy machine one always does, so nothing is ever
+            // synthesised and the un-latch above happens off the same evidence:
+            // not one doubled character, not even the first.
+            //
+            // On a machine whose road really is dead, nothing turns up, every
+            // press is spoken for, and the whole cost is one frame -- sixteen
+            // milliseconds of a keystroke nobody was going to receive at all.
+            if (s_pendN > 0) {
+                if (chars == s_pendBase) {
+                    for (int i = 0; i < s_pendN; ++i) {
+                        synth(s_pend[i].vk, s_pend[i].shift, s_pend[i].caps);
+                    }
+                }
+                s_pendN = 0;
             }
 
             for (int vk = 0; vk < 256; ++vk) {
@@ -386,13 +479,26 @@ namespace FUI::UIRoot
                 s_down[vk] = now;
                 if (!now) continue;
 
+                // ★A SHORTCUT IS NOT A CHARACTER, and it must not be judged as
+                // one. This sat below, inside the fallback branch only, so the
+                // latch above it saw every shortcut as evidence: Ctrl+A and
+                // Ctrl+V in the search box arrive as control codes, and ANY Alt
+                // combination arrives as WM_SYSCHAR -- which the thunk does not
+                // count at all, making each one a guaranteed "contradiction".
+                // Selecting-all and pasting a search term could latch the
+                // doubling road by itself. It belongs above BOTH branches.
+                if (ctrl || alt) continue;
+
                 if (!g_kbFallback) {
                     // ★THE LATCH, and it is a CONTRADICTION rather than a
                     // timeout: a printable key went down while a text field was
                     // focused, and no WM_CHAR arrived for it. One such frame
-                    // could be a race; three cannot. On a healthy setup this can
-                    // never fire, so the road stays inert -- one sweep a frame
-                    // while typing, and no events at all.
+                    // could be a race -- GetAsyncKeyState is true the instant the
+                    // key is physically down, while the count above only rises
+                    // when the game's message pump dispatches, so a key pressed
+                    // after this frame's pump reads as a contradiction and is
+                    // answered next frame. Three CONSECUTIVE cannot be that; the
+                    // reset above is what makes the word consecutive true.
                     if (!wmAlive && ++s_contradictions >= 3) {
                         g_kbFallback = true;
                         SKSE::log::warn(
@@ -407,14 +513,16 @@ namespace FUI::UIRoot
                     continue;
                 }
 
-                if (ctrl || alt) continue;   // a shortcut, not a character
-                const UINT sc = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
-                WCHAR     buf[8] = {};
-                const int n = ToUnicodeEx(static_cast<UINT>(vk), sc, ks, buf,
-                                          static_cast<int>(std::size(buf)), 0,
-                                          GetKeyboardLayout(0));
-                for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
-                    if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                // Queued, not spoken. Judged on the next sweep against the mark
+                // taken before the press. The overflow arm can only be reached
+                // by eight printable keys going down inside one frame, and a
+                // keystroke that cannot be queued is spoken immediately rather
+                // than lost.
+                if (s_pendN < static_cast<int>(std::size(s_pend))) {
+                    s_pendBase = prevChars;
+                    s_pend[s_pendN++] = { vk, shift, caps };
+                } else {
+                    synth(vk, shift, caps);
                 }
             }
         }
@@ -663,6 +771,24 @@ namespace FUI::UIRoot
             // and LT becomes the recharge key the board and the doll already
             // listen for as T -- the one hover verb a pad had no way to say.
             kActRecharge  = 1u << 12,
+            // ★★SWITCH BOARDS. With a container open there are two grids on
+            // screen, and crossing from one to the other is a whole window's
+            // worth of driving -- the single most repeated motion of a looting
+            // session, and the one thing a pad has no shortcut for. This puts
+            // the pointer straight onto the other board.
+            //
+            // ★Pinned to a button rather than looked up, like rotation: there
+            // is no vanilla action called "the other side of the screen", so
+            // there is nothing to inherit. LS is the one button on the pad
+            // this UI had never given a meaning to.
+            kActSwapSide  = 1u << 13,
+            // ★★THE BOARD STRIP ON THE SHOULDERS. ITEMS · QUEST · KEYS is a
+            // row of words a mouse clicks; on a pad that meant steering the
+            // pointer up to a three-word strip to change board. LB/RB is where
+            // every game with tabs puts this, and the two buttons came free
+            // when favourite moved to Back and the 3D view to the right stick.
+            kActTabPrev   = 1u << 14,
+            kActTabNext   = 1u << 15,
         };
 
         std::atomic<std::uint32_t> g_padRaw{ 0 };       // physical buttons held
@@ -697,7 +823,20 @@ namespace FUI::UIRoot
         // (render thread). It cannot be paid at OnShow itself: the board's
         // screen position is whatever the main window's restored layout makes
         // it, and no window has drawn yet when the menu is told to open.
-        std::atomic<bool> g_homeOwed{ false };
+        // ★★WHICH board it goes to is the mode's answer, not a constant: a
+        // chest, a corpse, a merchant and a mark all open onto goods that are
+        // not the player's, and the pointer belongs where the session is
+        // about to happen. Plain inventory homes to the player's own board.
+        enum class HomeSide : std::uint8_t { kNone, kPlayer, kPartner };
+        std::atomic<HomeSide> g_homeOwed{ HomeSide::kNone };
+        // Where the pointer last stood on each board, so switching sides and
+        // switching back puts it on the tile it left rather than on the first
+        // slot again -- taking three things out of a chest and putting two
+        // back is two crossings, and the second one should not lose the place
+        // the first one was working in. Indexed [0] player, [1] partner.
+        ImVec2   g_sideMark[2]{};
+        bool     g_sideMarkOk[2]{};
+        HomeSide g_sideOn = HomeSide::kPlayer;   // the board the pointer is on
 
         // Who owns the pointer on a pad — decided ONCE by observation, never
         // per frame (a per-frame verdict is what made it blink).
@@ -717,6 +856,19 @@ namespace FUI::UIRoot
         // Render reads it on the render thread.
         std::atomic<bool> g_suppressed{ false };
         int               g_suppressTicks = 0;   // safety-net age, in Ticks
+        // ★A named client holds this one (UIRoot.h SuppressBy). ATOMIC because
+        // a client dispatches its message on whatever thread it likes, and
+        // SKSE hands the dispatch straight to us on that thread -- a plain
+        // bool written there and read by the net is a data race.
+        std::atomic<bool> g_suppressByClient{ false };
+        // ...and the request itself is parked rather than acted on, for the
+        // same reason. Guarded because the sender's name is a string: two
+        // clients arriving at once must not tear it. Not a per-frame path --
+        // this is touched once per suppress message (rule 4-3 #3 is safe).
+        std::mutex        g_clientReqLock;
+        bool              g_clientReqPending = false;
+        bool              g_clientReqOn      = false;
+        std::string       g_clientReqWho;
 
         // Called from the input sink (game thread, but not the render pass) —
         // only flags are touched here; the cursor is seeded during the frame.
@@ -727,6 +879,37 @@ namespace FUI::UIRoot
         {
             if (a_fromDevice) g_padSuppressed.store(false);
             if (!g_padActive.exchange(true)) g_padSeed.store(true);
+        }
+
+        // ★★Walk the board strip, wrapping. Called straight from the pad
+        // translation below rather than routed through a synthesised key, and
+        // that is a DEPARTURE from every other action here -- so, why:
+        //
+        // The key-synthesis trick exists to keep two input roads on one
+        // handler. Every other gesture already HAD a keyboard handler that a
+        // pad had to reach (R = take all, Q = swap side), so sending the key
+        // is what stops the two drifting. The strip has no such handler -- it
+        // is three words a mouse clicks -- so there is no second road to stay
+        // on, and inventing a keyboard shortcut to route through would be
+        // adding a binding nobody asked for just to have something to forge.
+        // This IS the one piece of code, and the strip's own click path calls
+        // SetActiveTab exactly the same way.
+        //
+        // ★Both callers run on the render thread and g_activeTab is atomic, so
+        // there is nothing to serialise here.
+        void StepTab(int a_dir)
+        {
+            // ★Carrying an item blocks it, exactly as the strip's click does.
+            // A carried tile belongs to the board it was lifted from; changing
+            // the board out from under it would leave it hovering over a grid
+            // that never held it.
+            if (Grid::IsHolding()) return;
+            constexpr int n = static_cast<int>(Grid::Tab::kCount);
+            const int cur = static_cast<int>(Grid::ActiveTab());
+            const int next = ((cur + a_dir) % n + n) % n;   // wraps both ways
+            if (next == cur) return;
+            Grid::SetActiveTab(static_cast<Grid::Tab>(next));
+            Sfx::SelectOn();
         }
 
         // actions -> the input this UI is already built on
@@ -787,6 +970,21 @@ namespace FUI::UIRoot
             if (edge(kActRotR))      io.AddKeyEvent(ImGuiKey_D, down(kActRotR));
             // LT, empty cursor: the same T the recharge hover handlers read
             if (edge(kActRecharge))  io.AddKeyEvent(ImGuiKey_T, down(kActRecharge));
+            // LS: switch boards, which is Q on a keyboard. Sent as that key so
+            // ONE piece of code reads the gesture (HandleSideSwap) and the two
+            // input roads cannot drift apart.
+            if (edge(kActSwapSide))  io.AddKeyEvent(ImGuiKey_Q, down(kActSwapSide));
+            // ★The shoulders walk ITEMS · QUEST · KEYS. Blocked while a popup
+            // owns the screen -- a quantity slider is counting out an item
+            // that lives on the board behind it, and moving that board while
+            // it counts is the one thing this gesture must not do -- and while
+            // the search box holds the keyboard. Nothing is left half-done by
+            // skipping a press: the step is instantaneous, so a release that
+            // arrives after the guard lifts has no state to clear.
+            if (!modal && !io.WantTextInput) {
+                if (edge(kActTabPrev) && down(kActTabPrev)) StepTab(-1);
+                if (edge(kActTabNext) && down(kActTabNext)) StepTab(1);
+            }
             if (edge(kActSplit)) {
                 io.AddKeyEvent(ImGuiMod_Shift, down(kActSplit));
                 io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
@@ -858,6 +1056,38 @@ namespace FUI::UIRoot
         std::uint32_t ActionForButton(std::uint32_t a_idCode)
         {
             using K = RE::BSWin32GamepadDevice::Keys;
+            // ★LS IS OURS AND IS NOT ASKED ABOUT. The item menu may well have
+            // a name of its own for the left stick's click, and inheriting it
+            // would mean the switch-sides button quietly becoming zoom (or
+            // nothing at all) on some setups. Same reasoning as rotation: an
+            // action vanilla has never had cannot be looked up.
+            if (a_idCode == K::kLeftThumb) return kActSwapSide;
+            // ★★★AND SO ARE THESE FOUR (user ask, 1.6.1) -- PINNED AHEAD OF
+            // THE LOOKUP ON PURPOSE, which is the whole reason they sit here
+            // rather than in the switch at the foot of the function.
+            //
+            // The switch below is only reached when ControlMap has NO name for
+            // a button in any of our three contexts. Both shoulders DO have
+            // one (measured: RB comes back as 'ChargeItem'), so a physical
+            // default for them was unreachable the moment the engine had an
+            // opinion -- and the engine's opinion about the shoulders is about
+            // vanilla's list menu, which has no board strip to walk. Same for
+            // Back, which vanilla spends on menu chrome we do not have.
+            //
+            // So the four are simply OURS now, in the same sense LS above is:
+            //   Back  favourite   -- was LB
+            //   RS    3D view     -- was RB (the CLICK; deflecting the right
+            //                        stick is still the scroll wheel, and the
+            //                        two cannot collide -- one is an axis, the
+            //                        other a button bit)
+            //   LB/RB the tab strip
+            // ★A rebind cannot move them any more, which is the cost. It buys
+            // a layout that is the same on every setup -- and three of the
+            // four had no vanilla meaning worth inheriting to begin with.
+            if (a_idCode == K::kBack)           return kActFavorite;
+            if (a_idCode == K::kRightThumb)     return kActInspect;
+            if (a_idCode == K::kLeftShoulder)   return kActTabPrev;
+            if (a_idCode == K::kRightShoulder)  return kActTabNext;
             auto* cm = RE::ControlMap::GetSingleton();
             auto* ue = RE::UserEvents::GetSingleton();
             if (cm && ue) {
@@ -887,8 +1117,15 @@ namespace FUI::UIRoot
                 if (is(ue->accept))         return kActPrimary;
                 if (is(ue->equip) || is(ue->xButton)) return kActSecondary;
                 if (is(ue->dropItem) || is(ue->takeAll) || is(ue->yButton)) return kActDrop;
-                if (is(ue->toggleFavorite)) return kActFavorite;
-                if (is(ue->itemZoom))       return kActInspect;
+                // ★toggleFavorite / itemZoom USED TO BE ASKED FOR HERE, and
+                // must not be now that Back and RS carry those two outright.
+                // A pinned action that is ALSO reachable through the lookup is
+                // worse than either alone: some other button would answer to
+                // it as well, and -- because ResolvePadLabels labels an action
+                // with the FIRST button it finds carrying it -- the strip could
+                // end up printing that other button while Back is what the
+                // player is told to press. The glyph and the gesture have to
+                // come from one place.
                 if (is(ue->left))  return kActNudgeL;
                 if (is(ue->right)) return kActNudgeR;
                 if (is(ue->up))    return kActNudgeU;
@@ -902,8 +1139,9 @@ namespace FUI::UIRoot
             case K::kA:             return kActPrimary;
             case K::kX:             return kActSecondary;
             case K::kY:             return kActDrop;
-            case K::kLeftShoulder:  return kActFavorite;
-            case K::kRightShoulder: return kActInspect;
+            // (the shoulders left this switch when they became the tab strip,
+            // and Back/RS took favourite and the 3D view -- all four are
+            // pinned at the top of this function now)
             // ★★THE TRIGGERS MEAN TWO THINGS, AND THE CURSOR SAYS WHICH.
             //
             // Holding an item, they ROTATE it. Otherwise they are the split /
@@ -941,7 +1179,7 @@ namespace FUI::UIRoot
         // runs the binding lookup above (ControlMap + string compares) once per
         // button, so it is resolved on menu open and cached — KeyLabel() is
         // called every frame a tooltip is up.
-        const char* g_padLabel[9]{};   // indexed by Act
+        const char* g_padLabel[12]{};   // indexed by Act
         bool        g_padLabelReady = false;
 
         void ResolvePadLabels()
@@ -955,6 +1193,11 @@ namespace FUI::UIRoot
                 { K::kLeftShoulder, "LB" }, { K::kRightShoulder, "RB" },
                 { K::kLeftTrigger, "LT" }, { K::kRightTrigger, "RT" },
                 { K::kLeftThumb, "LS" }, { K::kRightThumb, "RS" },
+                // ★The 360 name, because Skyrim's own pad glyphs are 360 ones
+                // and this strip has to read like the rest of the game's. It
+                // is the button a Series pad calls View and a PlayStation one
+                // Select / Create -- one physical button, three vendor names.
+                { K::kBack, "Back" },
                 { K::kUp, "D-Up" }, { K::kDown, "D-Down" },
                 { K::kLeft, "D-Left" }, { K::kRight, "D-Right" },
             };
@@ -967,6 +1210,11 @@ namespace FUI::UIRoot
                 // LT's empty-cursor half; the loop resolves it naturally
                 // (ResolvePadLabels runs with an empty cursor).
                 kActRecharge,
+                // LS, pinned in ActionForButton -- so the loop below finds it
+                // on the left thumb and the prompt bar can name the button.
+                kActSwapSide,
+                // ...and the shoulders, pinned the same way.
+                kActTabPrev, kActTabNext,
             };
             static_assert(std::size(kWanted) == std::size(g_padLabel));
 
@@ -1064,6 +1312,64 @@ namespace FUI::UIRoot
             dl->AddPolyline(poly, 4, kPtrEdge, ImDrawFlags_Closed, 2.1f * s);
         }
 
+        // ---- the two boards, asked the same questions -------------------
+        // Both publish the same pair (first slot, visible rect) and the
+        // pointer treats them alike, so the side is a parameter rather than a
+        // branch at every call site. Both answer false until they have drawn.
+        bool SideHome(HomeSide a_side, ImVec2& a_out)
+        {
+            if (a_side == HomeSide::kPlayer)  return Grid::FirstSlotCenter(a_out);
+            if (a_side == HomeSide::kPartner) return LootBarter::FirstSlotCenter(a_out);
+            return false;
+        }
+
+        bool SideRect(HomeSide a_side, ImVec2& a_min, ImVec2& a_max)
+        {
+            if (a_side == HomeSide::kPlayer)  return Grid::BoardRect(a_min, a_max);
+            if (a_side == HomeSide::kPartner) return LootBarter::BoardRect(a_min, a_max);
+            return false;
+        }
+
+        bool OnSide(HomeSide a_side, const ImVec2& a_p)
+        {
+            ImVec2 lo{}, hi{};
+            return SideRect(a_side, lo, hi) &&
+                   a_p.x >= lo.x && a_p.x < hi.x && a_p.y >= lo.y && a_p.y < hi.y;
+        }
+
+        // ★★★MOVING THE POINTER MEANS MOVING ALL THREE OF THEM.
+        //
+        // There is no single cursor here. Ours (g_padCursor) is what a pad
+        // integrates and what DrawPointer draws; the engine's MenuCursor is
+        // the position source for the mouse path and for pad kEngine mode; the
+        // OS cursor is what the no-CursorMenu fallback reads. Writing one and
+        // not the others means the next frame's reader undoes the move -- and
+        // which reader that is depends on the player's setup, which is exactly
+        // the kind of "works here, not there" this has to avoid.
+        //
+        // ★g_engineLast* rides along: without it our own write reads back next
+        // frame as "the engine moved its cursor by itself", which is the
+        // signal the pad ownership probe is measuring.
+        void SendCursorTo(const ImVec2& a_pos)
+        {
+            g_padCursor = a_pos;
+            g_padNudgeX = 0.0f;   // a step pressed before the jump does not
+            g_padNudgeY = 0.0f;   // get to drag the pointer back off it
+            if (auto* mc = RE::MenuCursor::GetSingleton()) {
+                mc->cursorPosX = a_pos.x;
+                mc->cursorPosY = a_pos.y;
+                g_engineLastX  = a_pos.x;
+                g_engineLastY  = a_pos.y;
+            }
+            // ...in CLIENT coordinates, like the fallback that reads it (a
+            // windowed setup is offset from the desktop).
+            if (g_gameWnd) {
+                POINT p{ static_cast<LONG>(std::lround(a_pos.x)),
+                         static_cast<LONG>(std::lround(a_pos.y)) };
+                if (ClientToScreen(g_gameWnd, &p)) SetCursorPos(p.x, p.y);
+            }
+        }
+
         void MouseHandler()
         {
             auto& io = ImGui::GetIO();
@@ -1086,14 +1392,28 @@ namespace FUI::UIRoot
                 }
             }
 
-            // ★★★THE POINTER STARTS ON THE FIRST SLOT.
+            // ★★★THE POINTER STARTS ON THE FIRST SLOT -- ON A PAD.
             //
-            // Opening the inventory used to leave the pointer wherever it had
-            // last been left -- screen centre on a pad's first open, or some
-            // corner the mouse was parked in -- so the first thing every open
-            // asked for was a drive back to the board. It starts on the first
-            // cell now, which is where the eye goes anyway and, on a pad, the
-            // one place a d-pad can count cells FROM.
+            // Opening the inventory used to leave the pointer wherever the
+            // stick had last parked it, so the first thing every open asked a
+            // controller for was a drive back to the board. It starts on the
+            // first cell now, which is where the eye goes anyway and, on a
+            // pad, the one place a d-pad can count cells FROM.
+            //
+            // ★★★AND ONLY ON A PAD (user ask). A mouse pointer is already
+            // where the hand left it: moving it is moving something the player
+            // is holding, and it arrives under a hand that did not ask for the
+            // trip -- the cursor is somewhere new and the hand has to find it
+            // again. A stick has no such position to respect: it integrates
+            // from wherever we say, so putting it on a slot costs nothing and
+            // saves the drive. Same reason the d-pad repeat is a pad feature
+            // and the arrow keys are not.
+            //
+            // ★★WHICH board that is, is the MODE's answer (HomeSide). A chest,
+            // a corpse, a merchant's shelf and a mark's pockets all open onto
+            // goods that are not the player's, and the slot that matters there
+            // is the container's first one -- so the pointer starts on THAT
+            // board, and the player's own is one key away (HandleSideSwap).
             //
             // Paid here rather than at OnShow because the board's position is
             // not knowable until it has drawn once (Grid::FirstSlotCenter):
@@ -1101,30 +1421,49 @@ namespace FUI::UIRoot
             // frame no window has drawn at all. So the debt waits -- one frame,
             // normally -- and is paid before this frame's position is read,
             // whichever source ends up reading it.
-            if (g_homeOwed.load()) {
-                if (ImVec2 home{}; Grid::FirstSlotCenter(home)) {
-                    g_homeOwed.store(false);
-                    g_padCursor = home;
-                    g_padNudgeX = 0.0f;   // nothing pressed before the open
-                    g_padNudgeY = 0.0f;   // gets to drag the pointer off it
-                    // The engine's own cursor is the position source in both
-                    // the mouse path and pad kEngine mode, so it has to be
-                    // told too -- and g_engineLast* with it, or our write
-                    // reads back next frame as "the engine moved by itself".
-                    if (auto* mc = RE::MenuCursor::GetSingleton()) {
-                        mc->cursorPosX = home.x;
-                        mc->cursorPosY = home.y;
-                        g_engineLastX  = home.x;
-                        g_engineLastY  = home.y;
-                    }
-                    // ...and the OS pointer, which is what the no-CursorMenu
-                    // fallback below reads. In CLIENT coordinates, like that
-                    // fallback (a windowed setup is offset from the desktop).
-                    if (g_gameWnd) {
-                        POINT p{ static_cast<LONG>(std::lround(home.x)),
-                                 static_cast<LONG>(std::lround(home.y)) };
-                        if (ClientToScreen(g_gameWnd, &p)) SetCursorPos(p.x, p.y);
-                    }
+            {
+                static int s_wait = 0;   // frames the debt has gone unpaid
+                const HomeSide owed = g_homeOwed.load();
+                ImVec2 home{};
+                if (owed == HomeSide::kNone) {
+                    s_wait = 0;
+                // ★A mouse keeps its own position -- the debt is DROPPED, not
+                // deferred, so picking a controller up later in the session
+                // does not suddenly teleport a pointer the player is watching.
+                // (The pad's own seed handles that handover: it takes over
+                // from wherever the pointer already is.)
+                } else if (!g_padActive.load()) {
+                    g_homeOwed.store(HomeSide::kNone);
+                    // The pointer is wherever the engine parked it -- screen
+                    // centre, typically -- which is on neither board. Start
+                    // the switch key from the player's side so its first press
+                    // in a container session goes to the GOODS; the per-frame
+                    // recorder in HandleSideSwap corrects this the moment the
+                    // pointer is actually over one of the two boards.
+                    g_sideOn = HomeSide::kPlayer;
+                    g_sideMarkOk[0] = false;
+                    g_sideMarkOk[1] = false;
+                    s_wait = 0;
+                } else if (SideHome(owed, home)) {
+                    g_homeOwed.store(HomeSide::kNone);
+                    g_sideOn = owed;
+                    // a paid debt IS the first frame of a session: the places
+                    // remembered on each board belong to the last one
+                    g_sideMarkOk[0] = false;
+                    g_sideMarkOk[1] = false;
+                    s_wait = 0;
+                    SendCursorTo(home);
+                // ★The container side can fail to arrive at all: DrawWindows
+                // stands down when the partner reference cannot be resolved,
+                // and then there is no board to point at, ever. Rather than
+                // hold the debt open for the whole session, fall back to the
+                // player's own board -- the pointer belongs on SOME slot.
+                } else if (owed == HomeSide::kPartner && ++s_wait > 60 &&
+                           Grid::FirstSlotCenter(home)) {
+                    g_homeOwed.store(HomeSide::kNone);
+                    g_sideOn = HomeSide::kPlayer;
+                    s_wait = 0;
+                    SendCursorTo(home);
                 }
             }
 
@@ -1256,6 +1595,74 @@ namespace FUI::UIRoot
                                         static_cast<float>(client.y));
                 }
             }
+        }
+
+        // ★★★ONE KEY, BOTH BOARDS -- Q on a keyboard, LS on a pad.
+        //
+        // A container session is two grids on opposite sides of the screen and
+        // a pointer that has to cross between them for every single move. On a
+        // stick that crossing IS the session: the same long drive, twenty
+        // times, through a window where nothing else is happening. This lands
+        // the pointer on the other board outright, and it is deliberately the
+        // same key for both roads -- a player switching between mouse and pad
+        // should not have to learn the gesture twice.
+        //
+        // ★It goes back to the TILE IT LEFT, not to the first slot, whenever
+        // that tile is still on that board. Taking three things out of a chest
+        // and putting two back is two crossings, and the second one should not
+        // lose the place the first one was working in. The first slot is the
+        // answer only for a board the pointer has not stood on yet.
+        //
+        // ★Runs INSIDE the frame, after both boards have drawn, so the jump is
+        // applied by the next frame's MouseHandler -- the same one-frame
+        // deferral the open's own homing uses, and invisible for the same
+        // reason.
+        void HandleSideSwap()
+        {
+            // a plain inventory has no other side to be on
+            if (LootBarter::CurrentMode() == LootBarter::Mode::kNormal) return;
+
+            auto& io = ImGui::GetIO();
+            const ImVec2 p = io.MousePos;
+            // Where the pointer stands, recorded every frame -- this is what
+            // the return trip aims at. Standing on NEITHER board (a title bar,
+            // the gold strip, empty screen) records nothing and leaves the
+            // last answer standing, so a switch from the chrome still means
+            // "the other board" rather than "the board I am hovering over".
+            if (OnSide(HomeSide::kPlayer, p)) {
+                g_sideOn = HomeSide::kPlayer;
+                g_sideMark[0] = p;
+                g_sideMarkOk[0] = true;
+            } else if (OnSide(HomeSide::kPartner, p)) {
+                g_sideOn = HomeSide::kPartner;
+                g_sideMark[1] = p;
+                g_sideMarkOk[1] = true;
+            }
+
+            // A popup owns the keyboard while it is up -- and on a pad LS is
+            // speaking to ITS buttons -- so the pointer must not be pulled out
+            // from under an unfinished count. The search box takes Q as a
+            // letter, which is the same rule from the other direction.
+            if (LootBarter::SliderActive() || LootBarter::ConfirmActive() ||
+                Grid::IsTrashConfirmOpen() || Equip::IsPopupOpen() ||
+                Grid::IsPouchOpen() || IsInspectOpen() || io.WantTextInput) {
+                return;
+            }
+            if (!ImGui::IsKeyPressed(ImGuiKey_Q, false)) return;
+
+            const HomeSide want = (g_sideOn == HomeSide::kPartner)
+                                      ? HomeSide::kPlayer
+                                      : HomeSide::kPartner;
+            const int wi = (want == HomeSide::kPlayer) ? 0 : 1;
+            ImVec2 to{};
+            if (g_sideMarkOk[wi] && OnSide(want, g_sideMark[wi])) {
+                to = g_sideMark[wi];
+            } else if (!SideHome(want, to)) {
+                return;   // that board has not drawn: there is nowhere to go
+            }
+            g_sideOn = want;
+            SendCursorTo(to);
+            Sfx::Focus();   // the pointer moved without the hand moving it
         }
 
         void ScrollHandler()
@@ -1458,85 +1865,19 @@ namespace FUI::UIRoot
             }
         }
 
-        // GRID SIZE — the main board, in cells. Every bag has always been an
-        // arbitrary bw x bh; this is the main view finally saying its own.
+        // ⛔GRID SIZE (RowBoardSize) is gone from the settings window (1.6).
+        // The board is still a setting -- "!basegrid = cols, rows" in
+        // GridInventory_ui.ini, read, clamped and written back exactly as
+        // before -- it simply has no slider any more.
         //
-        // ★A HELD VALUE, like TEXT SIZE and for a sharper reason. Applying
-        // mid-drag would re-place the whole board and resize the window on
-        // every frame of the drag -- and the window resizing under the cursor
-        // is what made the SCALE row ghost (see RowCellScale). Worse here: the
-        // settings window is anchored to the main window's right edge, so the
-        // slider itself would walk away from the hand holding it.
-        //
-        // ★The two numbers share one pair of flags. Testing
-        // IsItemDeactivatedAfterEdit after the row would only ever see the
-        // second slider, so releasing COLUMNS would never commit.
-        void RowBoardSize(const SettingsCtx& a_c)
-        {
-            SettingLabel(a_c, Lang::Str::BoardSizeLabel);
-            // The label carries the warning: both sliders spend their own
-            // hover on the right-click hint, and the cost of shrinking the
-            // board (items fall into overflow = over-encumbered) is the one
-            // thing the row's name cannot say.
-            if (ImGui::IsItemHovered()) NoteHoverHint(Lang::T(Lang::Str::BoardSizeHint));
-            RightAlign(a_c.trackW);
-
-            static float s_cols = 0.0f, s_rows = 0.0f;
-            static bool  s_held = false;
-            if (!s_held) {
-                // ★The REQUEST, not BaseRows(): a board trimmed to fit a short
-                // screen must still show what the player asked for, or the row
-                // would ratchet their setting down every time they touched it.
-                s_cols = static_cast<float>(Grid::BaseCols());
-                s_rows = static_cast<float>(Grid::BaseRowsSetting());
-            }
-
-            const float half = (a_c.trackW - 6.0f * a_c.S) * 0.5f;
-            const auto axis = [&](const char* a_id, float* a_v, int a_lo, int a_hi,
-                                  int a_def, const char* a_fmt) {
-                if (SettingSlider(a_id, a_v, static_cast<float>(a_lo),
-                                  static_cast<float>(a_hi), half,
-                                  static_cast<float>(a_def), a_fmt, 1.0f)) {
-                    s_held = true;
-                }
-            };
-            // Axis named inside the value ("W 9"), the way CAPTURE LIGHT does
-            // it — two labelled rows for two numbers always read together
-            // would push the section past the panel height for nothing.
-            axis("##boardcols", &s_cols, Grid::kMinCols, Grid::kMaxCols,
-                 Grid::kDefCols, "W %.0f");
-            ImGui::SameLine(0.0f, 6.0f * a_c.S);
-            axis("##boardrows", &s_rows, Grid::kMinBoardRows, Grid::kMaxBoardRows,
-                 Grid::kDefRows, "H %.0f");
-
-            // ★★ROUNDED, NOT TRUNCATED, and it has to happen HERE rather than
-            // at the commit. The track is continuous (a_step only sizes the
-            // arrows), so a drag leaves 8.6 in the float -- which "%.0f" shows
-            // as 9 and a static_cast<int> would commit as 8. The player would
-            // release on a 9 and get an 8, with nothing on screen to explain
-            // it. Rounding the held value instead makes the number shown and
-            // the number committed the same number, and snaps the track to
-            // whole cells on the way, which is all this setting has.
-            s_cols = std::round(s_cols);
-            s_rows = std::round(s_rows);
-
-            // ★"Nothing is held" asked of ImGui, not of the slider: the
-            // right-click default never activates a slider at all and the step
-            // arrows are their own items. One condition, all four ways in.
-            if (s_held && !ImGui::IsAnyItemActive()) {
-                s_held = false;
-                if (Grid::SetBaseSize(static_cast<int>(s_cols),
-                                      static_cast<int>(s_rows))) {
-                    // The board changed shape: everything seated on it has to
-                    // be re-placed, and the capacity figure the pickup gate
-                    // reads has to be recomputed before the next question.
-                    Grid::MarkCapacityDirty();
-                    Grid::RequestRebuild();
-                    WinManager::GetSingleton()->Save();
-                }
-            }
-        }
-
+        // The row was always the most delicate one in the panel: it could not
+        // apply mid-drag (re-placing the whole board every frame, while the
+        // settings window is anchored to the main window's right edge, walked
+        // the slider out from under the hand holding it), so it carried a
+        // held-value dance that nothing else here needs. With three boards
+        // answering to those two numbers now -- the main board and the two tab
+        // boards -- that is three re-placements per frame of a drag, for a
+        // number a player sets once and then leaves alone.
         // SKIN — ★GI73: grouped by CHROME FAMILY, two colour variants each.
         //
         // Six flat colour chips could not say what any of them were: 3/4 are
@@ -2300,13 +2641,10 @@ namespace FUI::UIRoot
         // ★TEXT SIZE sits right under SCALE: both answer "this is too small",
         // and putting them together is what lets a player try one and then the
         // other without hunting.
-        // ★GRID SIZE follows the two scale rows. All three answer "the board
-        // is the wrong size", and they answer it differently — the first two
-        // change how big the cells are drawn, this one changes how many there
-        // are. A player who tries SCALE and finds it was capacity they wanted
-        // should find this on the next line, not in another section.
+        // ★No GRID SIZE row -- see the note where RowBoardSize used to be.
+        // The two scale rows still answer "the cells are the wrong size";
+        // "the board is the wrong size" is an ini line now.
         constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowFontScale,
-                                                   RowBoardSize,
                                                    RowLanguage,
                                                    RowWheelEnable,
                                                    RowPreset, RowPresetExport };
@@ -2369,7 +2707,6 @@ namespace FUI::UIRoot
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
                 lw(Lang::Str::ScaleLabel),
                 lw(Lang::Str::FontScaleLabel),
-                lw(Lang::Str::BoardSizeLabel),
                 lw(Lang::Str::SkinLabel),
                 lw(Lang::Str::LanguageLabel),
                 lw(Lang::Str::PresetLabel),
@@ -3282,10 +3619,29 @@ namespace FUI::UIRoot
             if (g_hoverHintFrame == ImGui::GetFrameCount() && !g_hoverHint.empty()) {
                 bits = { { "", g_hoverHint } };
             } else if (IsInspectOpen()) {
-                bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
-                         { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) },
-                         { K(Act::kDrop), T(S::PromptReset), true },
-                         { "ESC", T(S::PromptClose), true } };
+                // ★On a pad the row names the BUTTONS -- this was the last
+                // branch still speaking mouse to a controller. The GESTURES are
+                // unchanged, because on a pad they already resolve to exactly
+                // the input this view listens for: the left stick drives the
+                // pointer and the primary button IS mouse button 0 (the inspect
+                // view is not one of TranslatePadButtons' `modal` popups, so it
+                // stays a click rather than becoming Enter), the right stick is
+                // the wheel (NotePadStick -> AddScrollEvent), kActDrop is the R
+                // that resets, and B closes the top layer through the same
+                // user-event channel ESC uses. Only the WORDS were wrong:
+                // "drag" and "wheel" named a device the player is not holding.
+                if (g_padActive.load()) {
+                    bits = { { K(Act::kPrimary), "" },
+                             { "L Stick", T(S::PromptOrbit) },
+                             { "R Stick", T(S::PromptZoom), true },
+                             { K(Act::kDrop), T(S::PromptReset), true },
+                             { "B", T(S::PromptClose), true } };
+                } else {
+                    bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
+                             { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) },
+                             { K(Act::kDrop), T(S::PromptReset), true },
+                             { "ESC", T(S::PromptClose), true } };
+                }
             // an explicit click deserves an answer, so this outranks every
             // ambient state below — but not an open 3D view, which is modal
             // and cannot be reached from the settings window anyway
@@ -3363,8 +3719,24 @@ namespace FUI::UIRoot
                 } else if (const auto hp = Grid::HoveredPrompt(); hp.active) {
                     bits = { { K(Act::kPrimary), T(S::PromptSelect) } };
                 } else {
-                    bits = { { "", T(S::PromptDrag) }, { "", T(S::PromptOrbit) },
-                             { "", T(S::PromptWheel), true }, { "", T(S::PromptZoom) } };
+                    // ★★NOT "drag orbit / wheel zoom". Those are the INSPECT
+                    // overlay's gestures and nothing else's: the only
+                    // drag-to-orbit and the only wheel-zoom in the build sit
+                    // behind `g_inspObj` in DrawInspect. And this branch is
+                    // BELOW IsInspectOpen() in the chain, so it can only ever
+                    // draw while that view is SHUT -- the row was four words
+                    // that were false every time they appeared.
+                    //
+                    // It dates from when an icon's angle was aimed by dragging
+                    // the preview. That moved twice since: the angle is typed
+                    // into the panel's RX/RY/RZ sliders now, and the 3D view
+                    // went behind the inspect key (which works in EDIT mode on
+                    // purpose -- Grid.cpp targets the same def the editor would
+                    // select, so an adopted angle lands on it). So the idle row
+                    // names THAT key: the one thing an empty cursor in EDIT can
+                    // still reach, and the place those four words are true.
+                    // Through KeyLabel, so it is pad-correct for free.
+                    bits = { { K(Act::kInspect), T(S::PromptInspect) } };
                 }
             } else if (const auto hp = Grid::HoveredPrompt(); hp.active) {
                 // ★Hovering an item takes the bar, and it carries EVERY key the
@@ -3415,7 +3787,11 @@ namespace FUI::UIRoot
                                  !bits.empty() && !hp.canRecharge });
             } else if (mode == LootBarter::Mode::kPickpocket) {
                 warn = true;
-                bits = { { "", T(S::WarnPickpocket) } };
+                // ★the switch rides the warning rather than replacing it --
+                // the same shape the trash bin's row uses, and the only place
+                // a mark's pockets can say the key exists
+                bits = { { "", T(S::WarnPickpocket) },
+                         { K(Act::kSwapSide), T(S::PromptSwitchSide), true } };
             // ★No barter row on purpose. The tooltip already names the verb
             // (buy / sell, which side of the counter decides) AND offers Shift
             // to set a quantity -- and it only offers it on a stack, which a
@@ -3423,10 +3799,29 @@ namespace FUI::UIRoot
             // duplication this bar exists to avoid, so barter falls through to
             // the overload warning instead.
             } else if (LootBarter::IsLootMode(mode)) {
-                bits = { { K(Act::kDrop), T(S::PromptTakeAll) } };
+                bits = { { K(Act::kDrop), T(S::PromptTakeAll) },
+                         { K(Act::kSwapSide), T(S::PromptSwitchSide), true } };
+            // ★Barter gets a row after all -- but only this one bit of it. The
+            // note above is about the item VERBS, which the tooltip already
+            // carries; switching sides is not an item verb, and nothing on
+            // screen names it, so this row is the only place a player can find
+            // out the key exists. It still yields to the overload warning,
+            // which is the one thing in this window that has to be said
+            // whether or not anyone asked.
+            } else if (mode == LootBarter::Mode::kBarter && !Grid::IsOverloaded()) {
+                bits = { { K(Act::kSwapSide), T(S::PromptSwitchSide) } };
             } else if (Grid::IsOverloaded()) {
                 warn = true;
                 bits = { { "", T(S::WarnOverload) }, { "", T(S::WarnOverloadFix), true } };
+            // ★★PAD ONLY, and dead last -- the idle row, which until now was
+            // blank. On a mouse the strip is three words you click, and a
+            // standing row naming a gesture the pointer already performs would
+            // be noise. On a pad it is the ONLY place the shoulders are named:
+            // nothing on screen suggests a board can be walked from a button.
+            // Same reasoning as the barter row's lone "switch side" bit.
+            } else if (g_padActive.load()) {
+                bits = { { K(Act::kTabPrev), "" },
+                         { K(Act::kTabNext), T(S::PromptTabs) } };
             }
 
             // ★Fade, and hold the last row while it fades OUT. Without the
@@ -3445,6 +3840,105 @@ namespace FUI::UIRoot
             s_fade += (target - s_fade) * (1.0f - std::exp(-dt * 14.0f));
             if (s_fade > 0.995f) s_fade = 1.0f;
             DrawPromptRow(s_shown, s_shownWarn, s_fade);
+        }
+
+        // ★★(1.6) THE BOARD STRIP -- ITEMS · QUEST · KEYS, in the row the
+        // ITEMS label used to have to itself.
+        //
+        // It is a strip of LABELS, not buttons, and that is the point: the
+        // header above the grid has always been one word in the section-label
+        // voice, and three framed buttons there would read as a toolbar
+        // sitting on top of the board. The active tab is drawn exactly as the
+        // old ITEMS label was (skins that use "◇ LABEL" still do); the other
+        // two are the same word held back to inkDim, and brighten on hover.
+        // Nothing about the row's height changes, so the window's layout
+        // arithmetic -- which pays for this line out of gridBodyH -- is
+        // untouched.
+        //
+        // ★A COUNT, and only when there is something to count. "KEYS" alone
+        // cannot say whether the board behind it is empty, and the whole
+        // promise of these tabs is that the player stops having to think
+        // about what is on them; "KEYS 12" answers it from the main board.
+        // ★A NEW arrival lights the tab in the accent, the same signal the
+        // board's own NEW wash carries -- an item that lands on a board you
+        // are not looking at has to be able to say so from here.
+        //
+        // Returns the width it consumed, so the caching counter can follow it.
+        float DrawGridTabs()
+        {
+            const auto& sk = Theme::S();
+            const float S = Theme::Scale();
+            const float gap = 16.0f * S;
+            const ImVec2 base = ImGui::GetCursorScreenPos();
+            const float lineH = ImGui::GetTextLineHeight();
+
+            struct TabDef { Grid::Tab tab; Lang::Str name; const Lang::Str* hint; };
+            static constexpr Lang::Str kQuestHint = Lang::Str::QuestTabHint;
+            static constexpr Lang::Str kKeysHint  = Lang::Str::KeysTabHint;
+            const TabDef kTabs[] = {
+                { Grid::Tab::kMain,  Lang::Str::Items,    nullptr },
+                { Grid::Tab::kQuest, Lang::Str::QuestTab, &kQuestHint },
+                { Grid::Tab::kKeys,  Lang::Str::KeysTab,  &kKeysHint },
+            };
+
+            // ★The whole strip is hit-tested against MEASURED rects rather
+            // than drawn as ImGui items, and the reason is the drawing itself:
+            // SectionLabel is a text call that reserves its own space, so
+            // wrapping each tab in a button would either move the word (the
+            // button's padding) or leave the button somewhere the word is not.
+            // Measuring first also lets a tab know it is hovered BEFORE it
+            // picks its colour -- an item-based hover is a frame behind, and
+            // one frame of the wrong colour on a three-word strip is visible.
+            const bool winHov = ImGui::IsWindowHovered(
+                ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            const bool clickable = winHov && !Grid::IsHolding() && !MouseInOverlay();
+            float x = 0.0f;
+            for (const TabDef& t : kTabs) {
+                // The count rides the label so the two are one measurement --
+                // a number positioned separately would have to guess at a
+                // string the skin may render with a prefix.
+                char label[64];
+                const int n = t.tab == Grid::Tab::kMain ? 0 : Grid::TabTileCount(t.tab);
+                if (n > 0) std::snprintf(label, sizeof(label), "%s %d", Lang::T(t.name), n);
+                else       std::snprintf(label, sizeof(label), "%s", Lang::T(t.name));
+
+                const float w = SectionLabelWidth(label);
+                const ImVec2 p0(base.x + x, base.y);
+                // Half the gap on either side, so a click that lands between
+                // two tabs goes to the nearer one instead of nowhere.
+                const ImVec2 h0(p0.x - gap * 0.5f, p0.y);
+                const ImVec2 h1(p0.x + w + gap * 0.5f, p0.y + lineH);
+                const bool hovered = clickable && ImGui::IsMouseHoveringRect(h0, h1);
+                const bool active = Grid::ActiveTab() == t.tab;
+
+                if (hovered) {
+                    if (t.hint) NoteHoverHint(Lang::T(*t.hint));
+                    if (!active && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        Grid::SetActiveTab(t.tab);
+                        Sfx::SelectOn();
+                    }
+                }
+
+                ImGui::SetCursorScreenPos(p0);
+                if (active) {
+                    SectionLabel(label);   // the voice the ITEMS label always had
+                } else {
+                    // ★NEW on a board you are NOT looking at outranks "this is
+                    // not your tab": an arrival you cannot see is the one thing
+                    // this strip exists to tell you about.
+                    const ImVec4 col = Grid::TabHasNew(t.tab) ? sk.sel
+                                     : hovered                ? sk.ink
+                                                              : sk.inkDim;
+                    SectionLabel(label, &col);
+                }
+                x += w + gap;
+            }
+            // ★The cursor is left exactly where a single SectionLabel would
+            // have left it -- on the next line, with the strip's line recorded
+            // as the previous one. That is what makes the caching counter's
+            // SameLine and the FIND box's right-alignment work here unchanged:
+            // this row swapped one word for three and nothing else.
+            return x - gap;
         }
 
         void DrawMainWindow()
@@ -3600,7 +4094,7 @@ namespace FUI::UIRoot
             ImGui::BeginChild("fab_right", ImVec2(gridW, bodyH), ImGuiChildFlags_None,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             {
-                SectionLabel(Lang::T(Lang::Str::Items));
+                DrawGridTabs();   // (1.6) ITEMS · QUEST · KEYS
                 auto* cache = IconCache::GetSingleton();
                 if (cache->IsBusy()) {
                     ImGui::SameLine();
@@ -3700,6 +4194,19 @@ namespace FUI::UIRoot
         } else {
             OutlinedText(a_col ? ImGui::GetColorU32(*a_col) : Theme::Chrome(1.0f), a_text);
         }
+    }
+
+    float SectionLabelWidth(const char* a_text)
+    {
+        if (!a_text) return 0.0f;
+        // ★Measured the way SectionLabel DRAWS it, prefix included. The board
+        // strip hit-tests these rects before it knows which colour a tab is
+        // in, and a width that forgot the diamond would put every tab's hit
+        // area two characters left of the word on three of the skins.
+        if (Theme::S().diamondLabels) {
+            return ImGui::CalcTextSize(("\xE2\x97\x87 " + std::string(a_text)).c_str()).x;
+        }
+        return ImGui::CalcTextSize(a_text).x;
     }
 
     void NoteHoverHint(const char* a_text)
@@ -3914,8 +4421,55 @@ namespace FUI::UIRoot
         }
     }
 
-    void Suppress(bool a_on, const char* a_why)
+    void Suppress(bool a_on, const char* a_why, SuppressBy a_by)
     {
+        // ★★OWNERSHIP, and both halves of it run BEFORE the early-out.
+        //
+        // Both halves run BEFORE the early-out, so that a message arriving
+        // while the state is already what it asks for still settles OWNERSHIP:
+        // a client whose suppress lands while the engine already had us hidden
+        // would otherwise never own the thing it asked for.
+        if (a_on) {
+            if (a_by == SuppressBy::kClient) {
+                // ★★★A HOLD OVER NOTHING IS A TRAP, and with no timer behind
+                // it, a permanent one. Taken while the inventory is CLOSED,
+                // the hold survives to the next open -- where kShow is refused
+                // (it is kEngine), the board never draws, and every key that
+                // could close it is gated behind IsBoardLive. The player would
+                // have an open, invisible, unreachable menu for the rest of
+                // the session, and nothing in the design would ever end it.
+                //
+                // There is nothing to step aside from when we are not on
+                // screen, so the request is refused rather than banked.
+                if (!IsSessionOpen()) {
+                    SKSE::log::warn("[SUPPRESS] refused ({}): the inventory is "
+                                    "not open -- send it while the menu is up",
+                                    a_why);
+                    return;
+                }
+                g_suppressByClient.store(true);
+            }
+        } else {
+            // ★★GIVING BACK IS THE HOLDER'S TO DO, and it cuts BOTH ways.
+            //
+            // kEngine while a client holds: refused. The engine hands us a
+            // kShow whenever the stack thinks we are topmost again, and
+            // honouring it would put the board back on screen over a client
+            // window that is still up, silently, with no event the client
+            // could answer.
+            //
+            // kClient while the ENGINE holds: also refused, and this one is
+            // less obvious. A client that closes its window while a vanilla
+            // confirmation box happens to be up would otherwise lift the box's
+            // suppression too -- and the net never re-suppresses, it only
+            // releases, so the board would sit over that box until the player
+            // dismissed it. That is exactly the bug 1.5.1 was released to fix,
+            // reachable again through a release nobody meant to be about it.
+            const bool held = g_suppressByClient.load();
+            if (a_by == SuppressBy::kEngine && held)  return;
+            if (a_by == SuppressBy::kClient && !held) return;
+            g_suppressByClient.store(false);
+        }
         if (g_suppressed.exchange(a_on) == a_on) return;
         if (a_on) {
             g_suppressTicks = 0;
@@ -3935,20 +4489,68 @@ namespace FUI::UIRoot
                     open += name.c_str();
                 }
             }
-            SKSE::log::info("[SUPPRESS] on ({}) -- open menus:{}", a_why,
+            SKSE::log::info("[SUPPRESS] on ({}, {}) -- open menus:{}", a_why,
+                            g_suppressByClient.load() ? "client-held" : "engine",
                             open.empty() ? " (none)" : open.c_str());
         } else {
             SKSE::log::info("[SUPPRESS] off ({})", a_why);
         }
     }
 
+    void RequestClientSuppress(bool a_on, const char* a_who)
+    {
+        // Nothing here may touch the engine: see the header. Park and return.
+        std::scoped_lock lock(g_clientReqLock);
+        g_clientReqPending = true;
+        g_clientReqOn      = a_on;
+        g_clientReqWho     = a_who ? a_who : "api";
+    }
+
+    // Game thread, from Tick. Applies whatever the last message asked for --
+    // a suppress and a release in the same frame collapse to the release,
+    // which is the right answer for a boolean.
+    void ApplyPendingClientSuppress()
+    {
+        bool        on{};
+        std::string who;
+        {
+            std::scoped_lock lock(g_clientReqLock);
+            if (!g_clientReqPending) return;
+            g_clientReqPending = false;
+            on                 = g_clientReqOn;
+            who                = std::move(g_clientReqWho);
+            g_clientReqWho.clear();
+        }
+        Suppress(on, who.c_str(), SuppressBy::kClient);
+    }
+
     bool IsSuppressed() { return g_suppressed.load(std::memory_order_relaxed); }
+
+    bool IsSuppressedByClient() { return g_suppressByClient.load(); }
+
+    std::uint32_t MappedScanCode(std::string_view a_event)
+    {
+        if (auto* cm = RE::ControlMap::GetSingleton()) {
+            using Ctx = RE::ControlMap::InputContextID;
+            for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(Ctx::kTotal); ++c) {
+                const auto k = cm->GetMappedKey(a_event, RE::INPUT_DEVICE::kKeyboard,
+                                                static_cast<Ctx>(c));
+                if (k != 0xFF && k != 0xFFFFFFFF && k != 0) return k;
+            }
+        }
+        return 0;
+    }
+
+    bool IsSessionOpen()
+    {
+        auto* ui = RE::UI::GetSingleton();
+        return ui && ui->IsMenuOpen(GridInventoryMenu::MENU_NAME);
+    }
 
     bool IsBoardLive()
     {
         if (IsSuppressed()) return false;
-        auto* ui = RE::UI::GetSingleton();
-        return ui && ui->IsMenuOpen(GridInventoryMenu::MENU_NAME);
+        return IsSessionOpen();
     }
 
     void OpenInspect(RE::TESBoundObject* a_obj, const std::string& a_key)
@@ -4244,13 +4846,36 @@ namespace FUI::UIRoot
         // rebound the controls since the last time the menu was up. Done HERE,
         // on the game thread, so the render thread only ever reads the result.
         ResolvePadLabels();
-        // ★The pointer goes to the first slot on every open. Forget last
-        // session's board position first: the layout, the scale and even the
-        // resolution may have moved since, and a stale centre would park the
-        // pointer on screen that is no longer board. Render pays the debt on
-        // the first frame that has drawn one (see MouseHandler).
+        // ★The pointer goes to the first slot on every open -- ON A PAD; a
+        // mouse keeps the position the hand left it at, and Render drops the
+        // debt when it sees one (see MouseHandler). The debt is raised either
+        // way because the input device is the RENDER thread's reading, not
+        // something this side of the menu open can answer.
+        //
+        // Forget last session's board positions first: the layout, the scale
+        // and even the resolution may have moved since, and a stale centre
+        // would park the pointer on screen that is no longer board. Render
+        // pays the debt on the first frame that has drawn one.
+        //
+        // ★★A CONTAINER SESSION AIMS AT THE CONTAINER. LootBarter::Enter runs
+        // before the menu is told to open (main.cpp swallows the vanilla menu
+        // first), so the mode is already known here and the side can be
+        // decided once, at the open, rather than guessed at every frame.
+        // ★The debt is the ONLY thing written here: it is atomic, and every
+        // other piece of this state belongs to the render thread. The side
+        // the pointer is on, and the places it is remembered on each board,
+        // are set when the debt is paid -- one frame later, over there.
         Grid::ForgetSlotCenter();
-        g_homeOwed.store(true);
+        LootBarter::ForgetSlotCenter();
+        // ★(1.6) the bag opens on the board you actually carry. Which tab you
+        // were last looking at is session state, not a preference: leaving it
+        // on KEYS means the next I opens onto a board that is empty most of
+        // the time, and the pointer's home cell (forgotten just above) would
+        // be sent there with it.
+        Grid::SetActiveTab(Grid::Tab::kMain);
+        g_homeOwed.store(LootBarter::CurrentMode() != LootBarter::Mode::kNormal
+                             ? HomeSide::kPartner
+                             : HomeSide::kPlayer);
         // Park anchor = the SAVED main-window centre — set BEFORE the first
         // capture request so no frame is ever exposed.
         {
@@ -4300,12 +4925,53 @@ namespace FUI::UIRoot
         // the visible sprites for the open transition.
         g_prefetchOwed = true;
 
+        // ★The wheel's magic side cannot photograph its own icons -- no 3D
+        // scene there -- and a spell is never in the bag, so nothing else
+        // would ever ask. Every open, because favourites change between them.
+        IconCache::GetSingleton()->QueueFavouriteSpells();
+
         SKSE::log::info("[UI] menu shown ({} icons cached)",
             IconCache::GetSingleton()->CachedCount());
+
+        // ★AUTHOR TOOLING, on the same watch-file idiom as the vanilla
+        // passthrough: drop the file, open the bag once, and the shipping pak
+        // is beside it. Nothing here runs for a player, and the file is removed
+        // afterwards so a forgotten one cannot rewrite the pak every session.
+        //
+        // ★★THE TWO SURVEYS MOVED IN HERE, and that is the whole change. They
+        // asked how many armours have a picture that depends on who wears them,
+        // and how many spells the engine already draws an object for. Both
+        // questions are ANSWERED -- 268 of 4386, and 813 of 947 -- and both
+        // answers were acted on: the sex-dependent ones are left out of the pak
+        // and the spells got their icons. What was left was a form-array walk
+        // and thirteen lines of internal arithmetic in the log of every player
+        // who ever opened a bag, reporting a decision that had already been
+        // taken. They belong with the tool that consumes them, behind its file.
+        static bool s_authorRan = false;
+        if (!s_authorRan) {
+            s_authorRan = true;
+            std::error_code ec;
+            constexpr const char* kFlag =
+                "Data/SKSE/Plugins/GridInventory_makeshippingpak.txt";
+            if (std::filesystem::exists(kFlag, ec)) {
+                IconCache::GetSingleton()->ReportSexSpecificArmour();
+                IconCache::GetSingleton()->ReportSpellDisplayObjects();
+                IconCache::GetSingleton()->ExportShippingPak(
+                    "Data/SKSE/Plugins/GridInventory_icons.shipping.pak");
+                std::filesystem::remove(kFlag, ec);
+            }
+        }
     }
 
     void OnClose()
     {
+        // ★★A HOLD MUST NOT OUTLIVE THE THING IT WAS HELD OVER. A client hold
+        // refuses the engine's kShow and never expires, so if it is not
+        // answered here NOTHING answers it: the next open would come up
+        // suppressed and invisible and stay that way for the rest of the
+        // session. The window it was covering is gone, so the hold ends here
+        // -- with kOverride, because the client is not the one saying so.
+        Suppress(false, "menu closed", SuppressBy::kOverride);
         CloseInspect();           // release the pinned inspect model + engine scale
         Editor::OnMenuClosed();   // flush pending edits, drop selection
         // F2: closing the whole menu confirms every parked deletion; flush
@@ -4406,8 +5072,16 @@ namespace FUI::UIRoot
         // Mouse/keyboard side is ours to choose (these are hardcoded above in
         // the ImGui translation), so it needs no lookup.
         static constexpr const char* kKeyboard[] = {
-            "LMB", "RMB", "R", "F", "C", "Shift", "A", "D", "T",
+            "LMB", "RMB", "R", "F", "C", "Shift", "A", "D", "T", "Q",
+            // ★The tab strip has no key: a mouse CLICKS the word it wants, so
+            // there was never a shortcut to name. Empty rather than invented --
+            // a keycap here would promise a key that does nothing.
+            "", "",
         };
+        // ★Three tables indexed by the same enum (this one, g_padLabel and
+        // ResolvePadLabels' kWanted). Adding an Act and forgetting one of them
+        // is a silent wrong glyph, so it is a build error instead.
+        static_assert(std::size(kKeyboard) == std::size(g_padLabel));
         const auto i = static_cast<std::size_t>(a_act);
         if (i >= std::size(kKeyboard)) return "";
         // (recharge used to stop at the keyboard here -- it rides LT now and
@@ -4591,6 +5265,19 @@ namespace FUI::UIRoot
     void SetVanillaKey(int a_scancode) { g_vanillaKey.store(a_scancode); }
     int  VanillaKey() { return g_vanillaKey.load(); }
 
+    // Test switch, not a setting: see UIRoot.h.
+    std::atomic<bool> g_npcVanilla{ false };
+    bool NpcVanilla() { return g_npcVanilla.load(); }
+    void SetNpcVanilla(bool a_on)
+    {
+        g_npcVanilla.store(a_on);
+        if (a_on) {
+            SKSE::log::warn("[UI] ★!npcvanilla -- a FOLLOWER's trade container "
+                            "will open the ENGINE's window, not ours. Every "
+                            "other screen is unchanged.");
+        }
+    }
+
     void Render()
     {
         if (!g_initialized.load()) return;
@@ -4715,13 +5402,29 @@ namespace FUI::UIRoot
         {
             static int      s_wantFrames = 0;
             static unsigned s_charsAtFocus = 0;
+            static unsigned s_keysAtFocus = 0;
             static bool     s_said = false;
             if (io.WantTextInput) {
                 if (s_wantFrames == 0) {
                     s_charsAtFocus = g_wmCharSeen.load(std::memory_order_relaxed);
+                    s_keysAtFocus  = g_wmKeySeen.load(std::memory_order_relaxed);
                 }
                 ++s_wantFrames;
+                // ★★AND ONLY IF THEY WERE TYPING. "No characters in two seconds"
+                // was read as a dead road, and it is also what a person looks
+                // like while they think -- click a number field in EDIT, pause,
+                // and this fired at ERROR level on ordinary behaviour (measured
+                // 2026-09-02: `chars 2 keys 5`, the road plainly alive).
+                //
+                // ★The keystroke count is the missing half, and it was already
+                // being PRINTED here. Both faults this watches for -- the road
+                // gone, or the characters taken upstream -- can only show
+                // themselves while keys are arriving. No keys is not a fault;
+                // it is somebody deciding what to type. Requiring the keys to
+                // have moved makes the line rarer and every instance of it
+                // real, which is the point of logging it at all.
                 if (s_wantFrames == 120 && !s_said &&
+                    g_wmKeySeen.load(std::memory_order_relaxed) > s_keysAtFocus &&
                     g_wmCharSeen.load(std::memory_order_relaxed) == s_charsAtFocus) {
                     s_said = true;
                     // ★`msgs` is the liveness signal: it counts EVERY message
@@ -4768,6 +5471,9 @@ namespace FUI::UIRoot
         DrawMainWindow();
         Grid::DrawBagWindows();   // one managed window per open bag (E2/E5)
         LootBarter::DrawWindows();  // container/merchant partner window (loot/barter)
+        // ★After BOTH boards have drawn: it asks each one where it is, and a
+        // board that has not drawn this frame cannot answer.
+        HandleSideSwap();           // Q / LS: put the pointer on the other board
         DrawSettingsWindow();     // ⚙ popup (scale / skin / language)
         Equip::DrawLoadoutWindows();   // L2: loadout +buy / delete confirm (top level)
         Grid::DrawPouchWindow();       // G2: coin-pouch withdraw (top level)
@@ -4847,7 +5553,50 @@ namespace FUI::UIRoot
         // window but the permanent furniture remains, nobody is there any
         // more and we come back. The grace lets a mod close one window and
         // open the next without us flashing in between.
-        if (IsSuppressed()) {
+        // ★Before the net looks at anything: a client's request parked on
+        // another thread becomes real HERE, where the engine is safe to read.
+        ApplyPendingClientSuppress();
+        if (IsSuppressed() && IsSuppressedByClient()) {
+            // ★★★A CLIENT THAT ASKED BY NAME IS NOT A CLIENT THAT FORGOT.
+            //
+            // The stack test below is structurally blind to it, and that was
+            // measured rather than argued: the author of Fitting Room / Menu
+            // Studio timed six suppressions and the net revoked every one of
+            // them 166-341ms in, always with "nothing left above us". Their
+            // editor is a Flick overlay, not a registered menu, so it never
+            // appears in the menu map at all -- "nothing above us" was true
+            // from the first frame, and no test over that map can ever say
+            // otherwise. The net was right about the stack and wrong about
+            // the screen.
+            //
+            // ★★AND NO TIMER EITHER, which took one more round to see. The
+            // first version kept a ten-minute backstop here on the grounds
+            // that a client dying while holding this would strand the player.
+            // It would -- but nobody sits in front of a frozen game for ten
+            // minutes. Two is where people reach for the task manager. So the
+            // timer could not reach the case it was written for, and the only
+            // thing it could still reach was a LEGITIMATE session that ran
+            // long, which it would end for no reason. A safety net that
+            // cannot arrive in time is not a safety net; it is a bug with an
+            // alibi.
+            //
+            // So the hold is absolute, and the client owns every exit path of
+            // its own window (checklist 6-1: the same pairing rule as an
+            // injected key's IsUp). Ours are still ours: our close, a save
+            // load and a new game all take it back.
+            //
+            // ★And ONE test remains, which is not a timer: a hold cannot
+            // outlive the session it was taken over. OnClose answers the
+            // ordinary close, but a menu torn down without a kForceHide would
+            // leave the hold standing, and the next open would come up
+            // invisible and unreachable for good. This is a structural
+            // question, not a clock, so it costs the client nothing and
+            // answers within one tick.
+            if (!IsSessionOpen()) {
+                Suppress(false, "the session it was held over is gone",
+                         SuppressBy::kOverride);
+            }
+        } else if (IsSuppressed()) {
             // ★★A NAME LIST WOULD HAVE BEEN WRONG, and the first measurement
             // said so: a real session had BTPS, TrueHUD and SegmentedHUD open
             // the whole time. Any list I could write would go stale the next
@@ -4886,7 +5635,8 @@ namespace FUI::UIRoot
             ++g_suppressTicks;
             if ((!blocker && g_suppressTicks > kGrace) ||
                 g_suppressTicks > kBackstop) {
-                Suppress(false, !blocker ? "nothing left above us" : "backstop");
+                Suppress(false, !blocker ? "nothing left above us" : "backstop",
+                         SuppressBy::kOverride);
             }
         }
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
@@ -4949,6 +5699,12 @@ namespace FUI::UIRoot
     {
         return g_textInputOn;
     }
+
+    void NoteGameplayMask(bool a_held) { g_gameplayMasked = a_held; }
+    bool IsGameplayMasked()            { return g_gameplayMasked; }
+
+    void SetMovementWatch(bool a_on) { g_movementWatch = a_on; }
+    bool MovementWatch()             { return g_movementWatch; }
 
     void AddScrollEvent(float a_x, float a_y)
     {

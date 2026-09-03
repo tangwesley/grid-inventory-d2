@@ -18,7 +18,7 @@ namespace FUI::HostApi
 {
     // Registers the ABI listener. Call from SKSEPluginLoad.
     //
-    // ★TWO listeners, split by sender, and that split is the whole design:
+    // Two listeners, split by sender, and that split is the whole design:
     //
     //   RegisterListener("SKSE", MessageHandler)   <- lifecycle, untouched 1.0 path
     //   RegisterListener(nullptr, <ours>)          <- any sender, ABI messages only
@@ -33,13 +33,15 @@ namespace FUI::HostApi
     // Called from the lifecycle handler on kPostLoad: announce the host.
     void Broadcast();
 
-    // ★★THE ONE SIGNAL THAT RUNS OUTWARD (kMsgCostumeState).
+    // The one signal that runs outward (kMsgCostumeState).
     //
-    // Announce the costume the player is wearing the look of. a_tab is the
-    // loadout tab supplying it, -1 when no costume is in force; a_forms lists
-    // the pieces (empty when a_tab is -1). Requested by a mod author who needs
-    // to follow the player's APPEARANCE, which equipment does not report -- a
-    // costume changes how you look without changing what you wear.
+    // Announces the costume whose look the player is currently wearing. a_tab
+    // is the loadout tab supplying it, or -1 when no costume is in force;
+    // a_forms lists the pieces, and is empty when a_tab is -1.
+    //
+    // Requested by a mod author who needs to follow the player's APPEARANCE,
+    // which the equipment events do not report -- a costume changes how you
+    // look without changing what you wear.
     //
     // Called from the game thread only (Costume::Tick), and only when the state
     // actually moved -- listeners are entitled to treat each one as a change.

@@ -46,6 +46,21 @@ namespace FUI::DualRing
     // siblings. A router-path wear (no list resolved yet) records 0, which is
     // correct for every vanilla ring -- their enchant lives on the FORM.
     [[nodiscard]] std::uint16_t SecondSig();
+    // ★★★AND ITS ExtraUniqueID, WHICH THE SIGNATURE CANNOT STAND IN FOR.
+    //
+    // "uid, else signature" is how this codebase names a unit everywhere else,
+    // and the two are not interchangeable: ExtraForPool answers a uid request
+    // from the uid branch, and its SIGNATURE branch deliberately SKIPS every
+    // list carrying a uid (GI42 -- a uid unit is the sole member of its own
+    // pool, so it can never be the answer to a pool-by-name request).
+    //
+    // Recording only the signature therefore meant that in any load order where
+    // the engine hands out uids -- which is most of them -- nothing could
+    // resolve the carried ring at all. Measured from a reporter's log: the wear
+    // recorded sig 0xf3a2 and the doll's own self-check printed
+    // `ringL='Silver Ring'(u0000/s0000)` on the same frame, because the lookup
+    // that had to bridge them was asking by signature for a unit that had a uid.
+    [[nodiscard]] std::uint16_t SecondUid();
 
     // ★The carrier is not the player's property. Hide it exactly where the
     // costume anchors are hidden -- grid, doll, capacity, tooltips, transfers.
@@ -68,7 +83,10 @@ namespace FUI::DualRing
         kNoCarrier,      // the ESP record is missing
         kNoFreeSlot,
     };
-    [[nodiscard]] Verdict CanWear(RE::TESObjectARMO* a_ring);
+    // a_uid / a_sig name the incoming unit. They are not optional for a
+    // same-form pair: see SharesEffect for what an unnamed one resolves to.
+    [[nodiscard]] Verdict CanWear(RE::TESObjectARMO* a_ring,
+                                  std::uint16_t a_uid = 0, std::uint16_t a_sig = 0);
     // ★Would wearing a_ring next to the CARRIED ring stack the same base
     // effect? The duplication rule in one place: same enchantment family =
     // true; an unenchanted ring stacks with anything = false. This is the
@@ -77,7 +95,14 @@ namespace FUI::DualRing
     [[nodiscard]] bool WouldDuplicate(RE::TESObjectARMO* a_ring);
     // The same test between ANY two rings -- the equip router asks it about
     // the engine-slot ring, which WouldDuplicate (carried ring only) cannot.
-    [[nodiscard]] bool SharesEffect(RE::TESObjectARMO* a_x, RE::TESObjectARMO* a_y);
+    //
+    // a_yUid / a_ySig name the INCOMING unit, and passing them is not optional
+    // for a same-form pair. Without a name, a ring whose affix lives on its own
+    // unit resolves through the WORN list instead -- which belongs to a_x -- so
+    // the test compares the first ring against itself and always says "shares".
+    // a_x is the engine-worn ring and resolves correctly with no name.
+    [[nodiscard]] bool SharesEffect(RE::TESObjectARMO* a_x, RE::TESObjectARMO* a_y,
+                                    std::uint16_t a_yUid = 0, std::uint16_t a_ySig = 0);
     // English, for the log. A player-facing string would mean a new Lang key
     // and four translations; nothing shows these to the player yet.
     [[nodiscard]] const char* VerdictText(Verdict a_v);

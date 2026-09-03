@@ -102,6 +102,10 @@ namespace FUI::Wheeler
 
         constexpr ImU32 kInk = IM_COL32(0x0a, 0x0a, 0x0b, 255);
         constexpr ImU32 kRed = IM_COL32(0xb5, 0x31, 0x2a, 255);
+        // ★The LEFT hand's check. Same ink family as the red -- it has to read
+        // as the same mark in a different hand, not as a different mark -- so
+        // it is the red walked toward amber rather than a fresh orange.
+        constexpr ImU32 kAmber = IM_COL32(0xd0, 0x7a, 0x22, 255);
         constexpr ImU32 kPaper = IM_COL32(0xd8, 0xc9, 0xa0, 255);
         constexpr ImU32 kDim = IM_COL32(0xa2, 0xa2, 0x9f, 255);
         constexpr ImU32 kInkText = IM_COL32(0xe6, 0xe3, 0xdd, 255);
@@ -130,11 +134,35 @@ namespace FUI::Wheeler
         constexpr int kCostume = 1;
         constexpr int kItems   = 2;
         constexpr int kMagic   = 3;
-        constexpr int kGroups  = 4;
+        constexpr int kBuiltinGroups = 4;
         int   g_group = kPreset;
+        // ★★★TEN WAS NEVER THE LIMIT ON WHAT IS STARRED, only on what fits.
+        //
+        // The eleventh star used to be counted, kept in g_starredAll and shown
+        // nowhere -- "seen, but no place to show it", as the collection loop
+        // put it. A group has PAGES now: the same ten places, however many
+        // times over the list needs. W and S step through them, which is the
+        // axis A and D already established for groups.
+        //
+        // ★Pages, not more slots. Sixteen wedges makes every one of them
+        // harder to aim at, and the wheel is a thing you point at without
+        // looking. Ten stays ten.
+        int   g_page = 0;
+        // A ceiling, because the count comes from how many things are starred
+        // and that is the player's to make silly. Sixteen pages is a hundred
+        // and sixty favourites.
+        constexpr int kMaxPages = 16;
         // ★On by default: the wheel is what this feature IS, and a player who
         // wants the vanilla screen back can say so once. See Wheeler.h.
         bool  g_enabled = true;
+        // ★★TAP HELD IT OPEN. The wheel has always been a hold: press, aim,
+        // let go, it applies. A tap now leaves it standing until the key is
+        // pressed again, and the two live together -- hold past the threshold
+        // and nothing about the old behaviour changes.
+        bool  g_toggled = false;
+        // Milliseconds. Above this a press is a HOLD and the release applies;
+        // below it the press is a TAP and the release does nothing.
+        float g_tapMs = 250.0f;
         // ★Said once per stand-down -- see the probe in OnButton.
         bool  g_saidPassing = false;
 
@@ -180,8 +208,22 @@ namespace FUI::Wheeler
         // Ten each is enough; ten between them was not.
         FavItem g_fav[kSlots]{};
         int     g_favN = 0;
+        // ★★★EVERY STAR, IN FULL, and not because ten was too few.
+        //
+        // g_starredAll has always held every starred FormID -- enough to answer
+        // "is this starred", which is all anything needed. A user group needs
+        // more than that: it names ten forms out of the whole list and has to
+        // build slots from them, and the editor that fills such a group needs
+        // to show what there IS to choose from.
+        //
+        // Collected in the same walk that fills the two built-in wheels. A
+        // second walk of the inventory to answer the same question is the cost
+        // this avoids, and A/D stepping between groups is exactly where paying
+        // it twice would be felt.
+        std::vector<FavItem> g_allFav, g_allMag;
         FavItem g_mag[kSlots]{};
         int     g_magN = 0;
+
 
         // defined with UseFav, needed by the snapshot above it
         [[nodiscard]] bool UsesVoiceSlot(RE::TESForm* a_form);
@@ -194,7 +236,23 @@ namespace FUI::Wheeler
         // the engine hands it over. A newly starred item therefore lands at the
         // end and stays put once moved, which is the only behaviour that does
         // not shuffle the wheel under a hand that has learned it.
-        std::vector<RE::FormID> g_order[2];   // [0] gear, [1] magic
+        // ★★ONE ARRANGEMENT PER GROUP, and it must GROW with them. [0] gear and
+        // [1] magic were the whole world while there were two item wheels; a
+        // user group is a third, a fourth, and it indexes this by its own group
+        // number. A fixed pair here and a group index of 5 is a write past the
+        // end of an array -- which is why this changed the moment user groups
+        // could be reached at all, rather than when they could be created.
+        std::vector<std::vector<RE::FormID>> g_order;
+
+        // The arrangement for a group, made to exist if it does not yet.
+        // ★Never a bare g_order[i]: the vector is grown lazily and every reader
+        // and writer has to agree on who does the growing.
+        [[nodiscard]] std::vector<RE::FormID>& OrderFor(int a_which)
+        {
+            const std::size_t i = static_cast<std::size_t>((std::max)(0, a_which));
+            if (g_order.size() <= i) g_order.resize(i + 1);
+            return g_order[i];
+        }
 
         // ★★★EVERY STAR, NOT JUST THE TEN THAT FIT.
         //
@@ -219,7 +277,7 @@ namespace FUI::Wheeler
         // potion runs out would move everything else.
         void ApplyOrder(FavItem* a_list, int a_n, int a_which)
         {
-            auto& want = g_order[a_which];
+            auto& want = OrderFor(a_which);
             if (want.empty()) return;
             // ★★★A PLACE IS HELD BY A STAR, NOT RESERVED BY A NAME. Anything in
             // the table that is not starred right now gives its place up, so
@@ -273,13 +331,23 @@ namespace FUI::Wheeler
             for (int i = 0; i < kSlots; ++i) a_list[i] = out[i];
         }
 
+        // ★★★A DRAG EDITS ONE PAGE, NOT THE WHOLE LIST.
+        //
+        // This used to assign ten places over the arrangement, which was the
+        // whole of it. The arrangement spans every page now, so assigning ten
+        // would keep page one and DELETE every page after it -- one drag and
+        // the eleventh star onwards is gone. It writes into the window the
+        // player is looking at instead, and leaves the rest of the list where
+        // it was.
         void RememberOrder(const FavItem* a_list, int a_n, int a_which)
         {
             (void)a_n;
-            auto& out = g_order[a_which];
-            out.assign(kSlots, 0);
+            auto& out = OrderFor(a_which);
+            const std::size_t from = static_cast<std::size_t>(g_page) * kSlots;
+            if (out.size() < from + kSlots) out.resize(from + kSlots, 0);
             for (int i = 0; i < kSlots; ++i) {
-                if (a_list[i].form) out[i] = a_list[i].form->GetFormID();
+                out[from + static_cast<std::size_t>(i)] =
+                    a_list[i].form ? a_list[i].form->GetFormID() : 0;
             }
         }
 
@@ -597,6 +665,11 @@ namespace FUI::Wheeler
         // Index 0 = keyboard, 1 = gamepad. A set of one is the ordinary case.
         std::uint32_t g_combo[2][kMaxCombo] = { { 0x2B }, { 0x0100 } };  // \ , LB
         int           g_comboN[2] = { 1, 1 };
+        // ★The player's own key, from !wheelkey in the ui ini. 0 = follow the
+        // game's Favourites binding, which is still the default. Never written
+        // by AdoptFavoritesKey -- see the note there for why that direction is
+        // the one that matters.
+        std::uint32_t g_keyOverride[2] = { 0, 0 };
         float         g_slowFactor = 0.25f;
 
         // What is physically down right now. ★Needed because a combination has
@@ -612,12 +685,6 @@ namespace FUI::Wheeler
         // The code that opened the wheel -- the only one whose release is ours
         // to eat. See the header for why that distinction is not cosmetic.
         std::uint32_t g_openedBy = 0;
-
-        // rebinding
-        int           g_capDev = -1;          // -1 = off, 0 = keyboard, 1 = pad
-        std::uint32_t g_capCode[kMaxCombo] = {};
-        int           g_capN = 0;
-        int           g_capHeld = 0;          // still-down count; 0 = commit
 
         [[nodiscard]] float Scale()
         {
@@ -835,6 +902,16 @@ namespace FUI::Wheeler
             bool (*eligible)(int slot);            // ...and may it be chosen now
             const char* (*name)(int slot);         // hub text
             bool (*current)(int slot);             // draws the tick
+            // ★HOW MANY OF IT, or 0 for a group where the question means
+            // nothing. A preset is not a quantity and neither is a spell; only
+            // the gear wheel has stacks. Asked of the table rather than tested
+            // by group id, for the same reason every other row here is.
+            int  (*count)(int slot);
+            // ★WHICH HAND, as a mask: 1 = right, 2 = left, 3 = both, 0 = this
+            // is not a thing held in a hand (a cuirass, a preset) or is not out
+            // at all. `current` still answers "is it on" for everything; this
+            // answers the finer question only the two hand wheels can.
+            int  (*hands)(int slot);
             void (*apply)(int slot);               // what letting go does
             // ★There is no "slot to open on". Every wheel opens with nothing
             // chosen -- see SeedCursor. This used to be a per-group function
@@ -882,6 +959,52 @@ namespace FUI::Wheeler
             RE::TESBoundObject* noFace(int s);
             RE::TESBoundObject* costumeFace(int s);
             RE::TESBoundObject* itemFace(int s);
+            int noCount(int) { return 0; }
+            int noHands(int) { return 0; }
+            // ★★★THE SAME QUESTION UseFav ASKS, and it must stay the same one.
+            // The click decides what to do by asking the engine which hand
+            // holds this; the check says which hand holds this. If these two
+            // ever disagree the wheel is drawing a lie about its own next
+            // click, so both go to the engine rather than to the snapshot.
+            int itemHands(int s)
+            {
+                if (s < 0 || s >= kSlots || !g_fav[s].obj) return 0;
+                auto* pc = RE::PlayerCharacter::GetSingleton();
+                if (!pc) return 0;
+                int m = 0;
+                if (pc->GetEquippedObject(false) == g_fav[s].obj) m |= 1;   // right
+                if (pc->GetEquippedObject(true) == g_fav[s].obj) m |= 2;   // left
+                return m;
+            }
+            // ★Spells too -- one spell in both hands is dual casting, and it is
+            // the state most worth being able to see at a glance. A voice-slot
+            // power answers 0: a shout is not held, and `current` says it is on.
+            int magicHands(int s)
+            {
+                if (s < 0 || s >= kSlots || !g_mag[s].form) return 0;
+                auto* pc = RE::PlayerCharacter::GetSingleton();
+                if (!pc || !pc->Is3DLoaded() || UsesVoiceSlot(g_mag[s].form)) return 0;
+                auto& rt = pc->GetActorRuntimeData();
+                int m = 0;
+                if (rt.selectedSpells[RE::Actor::SlotTypes::kRightHand] == g_mag[s].form) m |= 1;
+                if (rt.selectedSpells[RE::Actor::SlotTypes::kLeftHand] == g_mag[s].form) m |= 2;
+                return m;
+            }
+            // ★★TWO OF THE SAME WEAPON ARE ONE PLACE ON THE WHEEL, and the
+            // number is how the player knows there is a second one to put in
+            // the other hand. The vanilla menu does exactly this -- one entry
+            // with a count -- and the click rule in UseFav now matches it.
+            // The value was already being carried; nothing but this draws it.
+            int itemCount(int s)
+            {
+                return (s >= 0 && s < kSlots) ? g_fav[s].count : 0;
+            }
+            RE::TESBoundObject* magicFace(int s);
+            int noCount(int s);
+            int itemCount(int s);
+            int noHands(int s);
+            int itemHands(int s);
+            int magicHands(int s);
             const char* itemMedallion(int s);
             const char* magicMedallion(int s);
         }
@@ -1001,28 +1124,78 @@ namespace FUI::Wheeler
             bool reorder(int from, int to);
         }
 
-        constexpr GroupDesc kGroup[kGroups] = {
+        constexpr GroupDesc kGroup[kBuiltinGroups] = {
             // ★PRESET gets the drawn weapon medallion -- a sword captured in 3D
             // and squeezed into this circle is a hairline. COSTUME gets the real
             // ITEM icon, because a costume IS armour and the body piece is what
             // the player recognises; there is no weapon in it to name.
             { "PRESET", Preset::filled, Preset::eligible, Preset::name,
-              Preset::current, Preset::apply,
+              Preset::current, Art::noCount, Art::noHands, Preset::apply,
               Art::presetMedallion, Art::noFace, Preset::click, Preset::reorder },
             { "COSTUME", Costume_::filled, Costume_::eligible, Costume_::name,
-              Costume_::current, Costume_::apply,
+              Costume_::current, Art::noCount, Art::noHands, Costume_::apply,
               Art::noMedallion, Art::costumeFace, Costume_::click, Costume_::reorder },
             { "GEAR", Items::filled, Items::eligible, Items::name,
-              Items::current, Items::apply,
+              Items::current, Art::itemCount, Art::itemHands, Items::apply,
               Art::itemMedallion, Art::itemFace, Items::click, Items::reorder },
             { "MAGIC", Magic::filled, Magic::eligible, Magic::name,
-              Magic::current, Magic::apply,
-              Art::magicMedallion, Art::noFace, Magic::click, Magic::reorder },
+              Magic::current, Art::noCount, Art::magicHands, Magic::apply,
+              Art::magicMedallion, Art::magicFace, Magic::click, Magic::reorder },
         };
+
+        // ★★HOW MANY PAGES this group needs. The item wheels grow one page
+        // for every ten stars; the set wheels have exactly one, because what
+        // they show is a list of tabs and there have never been more than fit.
+        // ★★★THE ARRANGEMENT IS ONE LIST PER WHEEL, AND PAGES ARE WINDOWS ON IT.
+        //
+        // It was briefly one list per (wheel, page), which looked tidier and
+        // was wrong: which PAGE a star landed on then came from where it sat in
+        // the collection walk, and that walk reads
+        //
+        //     std::map<TESBoundObject*, ...>
+        //
+        // -- keyed by the form's ADDRESS. Items came out in pointer order,
+        // which is to say no order, and could differ between sessions. Spells
+        // meanwhile come from MagicFavorites, an array the engine appends to,
+        // so they were in the order they were starred. One wheel sorted by
+        // memory and the other by history is exactly what "the order looks
+        // odd" is (reported).
+        //
+        // With one list, a star keeps its PLACE -- which is also its page --
+        // and a new one takes the first free place, appending a page when there
+        // is none. Which is the answer anyone would have guessed: the thing I
+        // just starred is at the end, and nothing else moved.
+        [[nodiscard]] int PageCount(int a_group)
+        {
+            const int which = a_group == kItems ? 0 : a_group == kMagic ? 1 : -1;
+            if (which < 0) return 1;
+            const std::size_t n = OrderFor(which).size();
+            return std::clamp(static_cast<int>((n + kSlots - 1) / kSlots), 1, kMaxPages);
+        }
+
+        // How many wheels A/D can reach. Fixed at four: what grows is PAGES.
+        [[nodiscard]] int GroupCount() { return kBuiltinGroups; }
+
 
         [[nodiscard]] const GroupDesc& G(int a_group)
         {
-            return kGroup[std::clamp(a_group, 0, kGroups - 1)];
+            return kGroup[std::clamp(a_group, 0, kBuiltinGroups - 1)];
+        }
+
+        // ★The banner. A group's name is in its descriptor; the PAGE is not,
+        // because it is a fact about right now. Shown only when there is more
+        // than one -- "GEAR 1/1" is a number that never changes and never
+        // means anything, which is the same reason a stack of one draws no
+        // count on its slot.
+        [[nodiscard]] const char* TitleOf(int a_group)
+        {
+            const GroupDesc& g = G(a_group);
+            const int pages = PageCount(a_group);
+            if (pages <= 1) return g.title;
+            static char s_buf[64];
+            std::snprintf(s_buf, sizeof(s_buf), "%s  %d/%d", g.title,
+                          std::clamp(g_page, 0, pages - 1) + 1, pages);
+            return s_buf;
         }
 
         [[nodiscard]] bool Filled(int a_group, int a_slot)
@@ -1147,6 +1320,8 @@ namespace FUI::Wheeler
             return body ? body : (head ? head : first);
         }
 
+        void FillPage();   // defined below CollectFavorites, which fills its input
+
         // Gather the starred items, in inventory order, up to the wheel's size.
         // ★Called once per open, on the game thread. It walks the inventory and
         // reads ExtraHotkey, which is where the engine keeps the star -- the
@@ -1166,6 +1341,8 @@ namespace FUI::Wheeler
             // whoever tests it after using the feature once.
             for (auto& f : g_fav) f = {};
             for (auto& f : g_mag) f = {};
+            g_allFav.clear();
+            g_allMag.clear();
             g_favN = 0;
             g_starredAll[0].clear();
             auto* player = RE::PlayerCharacter::GetSingleton();
@@ -1213,7 +1390,7 @@ namespace FUI::Wheeler
                 }
                 if (!star) star = wornStar;
                 if (star) g_starredAll[0].insert(obj->GetFormID());
-                if (star && g_favN < kSlots) {
+                if (star) {
                     // ★★★KEEP THE SIGNATURE OF THE UNIT THAT CARRIES THE STAR.
                     // The star sits on one ExtraDataList and we are holding it
                     // -- but sig was written as 0, which means "no instance" all
@@ -1236,10 +1413,13 @@ namespace FUI::Wheeler
                     // the doll (user report).
                     const bool wornHere = entry->IsWorn() ||
                                           DualRing::Second() == obj;
-                    g_fav[g_favN] = { obj, obj, FavKind::kItem,
+                    const FavItem fi{ obj, obj, FavKind::kItem,
                                       Grid::InstanceSigOf(star), -1,
                                       data.first, wornHere, starUid };
-                    ++g_favN;   // one tile per form: a starred pool is one thing
+                    // ★The full list first, and the ten that FIT second. They
+                    // used to be the same act, which is why anything past the
+                    // tenth star existed only as a FormID in a set.
+                    g_allFav.push_back(fi);
                 }
             }
             // ★...and the magic side of the same star. The engine keeps spells
@@ -1254,8 +1434,34 @@ namespace FUI::Wheeler
                     if (form->Is(RE::FormType::Spell))      k = FavKind::kSpell;
                     else if (form->Is(RE::FormType::Shout)) k = FavKind::kShout;
                     else continue;   // scrolls and the like arrive as items above
-                    g_starredAll[1].insert(form->GetFormID());
-                    if (g_magN >= kSlots) continue;   // seen, but no place to show it
+                    // ★★★ONE PLACE PER FORM, and the list is not ours to trust.
+                    //
+                    // Reported with a video: star ten-odd items, then star a
+                    // spell, and the spell lands on the ring TWICE. Nothing on
+                    // our side can put it there twice -- this loop writes one
+                    // entry per element and ApplyOrder marks each one taken --
+                    // so the duplicate has to already be in mf->spells, which
+                    // we only ever READ. Neither the reporter's steps nor any
+                    // variation of them reproduced it here, and a list we do
+                    // not own is not a list we can reason about from outside.
+                    //
+                    // A form appearing twice on one wheel is never right, so it
+                    // is refused here regardless of who put it there, and the
+                    // refusal says so once per session -- if the next report
+                    // carries that line, the engine's list was the answer.
+                    // g_starredAll is inserted BEFORE the check on purpose: it
+                    // is a set and answers "is this starred at all", which the
+                    // duplicate does not change.
+                    if (!g_starredAll[1].insert(form->GetFormID()).second) {
+                        static std::set<RE::FormID> s_said;
+                        if (s_said.insert(form->GetFormID()).second) {
+                            SKSE::log::warn("[WHEEL] '{}' ({:08X}) is in the game's "
+                                            "magic favourites TWICE -- shown once",
+                                            form->GetName() ? form->GetName() : "?",
+                                            form->GetFormID());
+                        }
+                        continue;
+                    }
                     // ★"Currently on" for magic is the hand, not the pack. A
                     // shout sits in the voice slot; a spell in either hand, and
                     // both count -- the tick says "this is what you have out",
@@ -1269,12 +1475,124 @@ namespace FUI::Wheeler
                             if (sel == form) { on = true; break; }
                         }
                     }
-                    g_mag[g_magN] = { form, nullptr, k, 0, -1, 1, on };
-                    ++g_magN;
+                    g_allMag.push_back(FavItem{ form, nullptr, k, 0, -1, 1, on });
                 }
             }
-            ApplyOrder(g_fav, g_favN, 0);
-            ApplyOrder(g_mag, g_magN, 1);
+            FillPage();
+        }
+
+        // ★★★TEN PLACES, A PAGE AT A TIME. The two item arrays used to be the
+        // first ten stars and nothing else; they are now whichever ten the
+        // page is on, which is what makes every accessor below work unchanged
+        // for page four as for page one.
+        //
+        // ★The arrangement is per (wheel, page): dragging on page two must not
+        // reorder page one, and the hand learns each page separately.
+        // ★Give every star a PLACE in the wheel's one list, then show the ten
+        // that this page covers.
+        //
+        // A star already in the list keeps exactly where it is -- that is the
+        // whole promise of a wheel worth arranging. One that is not takes the
+        // first free place, and if every place is taken the list grows by a
+        // page. A place whose star is gone is freed rather than closed up, so
+        // a potion running out does not move everything after it.
+        // One form into the first free place, growing by a page if there is
+        // none. Already-placed forms are left exactly where they are.
+        void SeatOne(int a_which, RE::FormID a_id)
+        {
+            if (!a_id) return;
+            auto& ord = OrderFor(a_which);
+            if (ord.empty()) ord.assign(kSlots, 0);
+            if (std::find(ord.begin(), ord.end(), a_id) != ord.end()) return;
+            auto slot = std::find(ord.begin(), ord.end(), 0u);
+            if (slot == ord.end()) {
+                if (static_cast<int>(ord.size()) >= kMaxPages * kSlots) return;
+                ord.insert(ord.end(), kSlots, 0);
+                slot = ord.end() - kSlots;
+            }
+            *slot = a_id;
+        }
+
+        void SeatStars(int a_which, const std::vector<FavItem>& a_all)
+        {
+            auto& ord = OrderFor(a_which);
+            if (ord.empty()) ord.assign(kSlots, 0);
+            const auto starred = [&](RE::FormID a_id) {
+                for (const auto& e : a_all) {
+                    if (e.form && e.form->GetFormID() == a_id) return true;
+                }
+                return false;
+            };
+            for (auto& id : ord) {
+                if (id && !starred(id)) id = 0;   // its star went away
+            }
+            for (const auto& e : a_all) {
+                if (e.form) SeatOne(a_which, e.form->GetFormID());
+            }
+        }
+
+        void FillPage()
+        {
+            for (auto& f : g_fav) f = {};
+            for (auto& f : g_mag) f = {};
+            g_favN = g_magN = 0;
+            SeatStars(0, g_allFav);
+            SeatStars(1, g_allMag);
+
+            // ★★★A PAGE THAT HOLDS NOTHING IS NOT A PAGE.
+            //
+            // The list only ever grew. SeatStars frees a place whose star went
+            // away by zeroing it, and nothing shrank the list afterwards --
+            // but PageCount is ceil(size / kSlots), so the pages a burst of
+            // stars created outlived the stars themselves. Star twenty-five
+            // things and unstar twenty, and the wheel still offered three
+            // pages: one with your five, and two blank rings W/S would walk
+            // you through. It never healed, because nothing ever shortened
+            // the list.
+            //
+            // ★Trim to a PAGE boundary, never to the last star. Cutting to the
+            // exact count would close the gaps a wheel exists to keep -- the
+            // free places on the last page are where the next star lands, and
+            // the hand is entitled to find them empty.
+            const auto trim = [](int a_which) {
+                auto& ord = OrderFor(a_which);
+                std::size_t used = 0;   // one past the last occupied place
+                for (std::size_t i = 0; i < ord.size(); ++i) {
+                    if (ord[i]) used = i + 1;
+                }
+                const std::size_t slots = static_cast<std::size_t>(kSlots);
+                const std::size_t keep =
+                    (std::max)(slots, ((used + slots - 1) / slots) * slots);
+                if (ord.size() > keep) ord.resize(keep);
+            };
+            trim(0);
+            trim(1);
+            // ★And the page the player is standing on has to come back inside.
+            // The windows below clamp for THEMSELVES, but RememberOrder writes
+            // at raw g_page * kSlots and resizes to reach it -- so a stale page
+            // survived by having the next drag rebuild the very pages this just
+            // removed.
+            g_page = std::clamp(g_page, 0, PageCount(g_group) - 1);
+
+            const auto window = [](int a_which, const std::vector<FavItem>& a_all,
+                                   FavItem* a_out, int& a_n, int a_page) {
+                const auto& ord = OrderFor(a_which);
+                const std::size_t from = static_cast<std::size_t>(a_page) * kSlots;
+                for (int i = 0; i < kSlots; ++i) {
+                    const std::size_t at = from + static_cast<std::size_t>(i);
+                    if (at >= ord.size() || !ord[at]) continue;
+                    for (const auto& e : a_all) {
+                        if (!e.form || e.form->GetFormID() != ord[at]) continue;
+                        a_out[i] = e;
+                        a_n = i + 1;
+                        break;
+                    }
+                }
+            };
+            window(0, g_allFav, g_fav, g_favN,
+                   std::clamp(g_page, 0, PageCount(kItems) - 1));
+            window(1, g_allMag, g_mag, g_magN,
+                   std::clamp(g_page, 0, PageCount(kMagic) - 1));
         }
 
         [[nodiscard]] const char* SlotKey(int a_group, int a_slot)
@@ -1317,10 +1635,28 @@ namespace FUI::Wheeler
             }
             RE::TESBoundObject* itemFace(int s)
             {
-                // ★Only real items have a captured sprite. A spell is not an
-                // object the engine can stand in a menu and photograph, so it
-                // falls through to the medallion below.
                 return (s >= 0 && s < kSlots) ? g_fav[s].obj : nullptr;
+            }
+            // ★★★A SPELL CAN BE PHOTOGRAPHED AFTER ALL, and the line that used
+            // to sit above said otherwise: "a spell is not an object the engine
+            // can stand in a menu and photograph". It is not, itself -- but the
+            // game keeps one that is. MDOB is the bound object the vanilla
+            // magic menu stands in its own 3D scene for that spell, and
+            // IconCache::CaptureSourceOf now follows it, so asking for a
+            // spell's icon returns a flame or a ward instead of nothing.
+            //
+            // Reported: with everything wearing its school's sigil, choosing a
+            // spell meant reading names -- fine at five spells, slow at sixty.
+            // The sigil stays as the medallion UNDER this, so the school is
+            // still readable at a glance and the picture says which one.
+            //
+            // ★Shouts share this group and are NOT bound objects, so they
+            // answer null here and keep the sigil alone, exactly as before.
+            RE::TESBoundObject* magicFace(int s)
+            {
+                if (s < 0 || s >= kSlots) return nullptr;
+                auto* form = g_mag[s].form;
+                return form ? form->As<RE::TESBoundObject>() : nullptr;
             }
             const char* itemMedallion(int) { return nullptr; }
             // ★A shout borrows the spell medallion. Wrong drawing beats no
@@ -1376,6 +1712,62 @@ namespace FUI::Wheeler
         // engine holding whatever was pressed when the wheel opened -- walk,
         // open, and the character walks forever. Muted events still reach it,
         // and a held key reads as released, so it tidies itself up.
+        // ★★★THE GRID'S STANCE BLOCK RIDES THE SAME HOOK, and it is here rather
+        // than in main.cpp because there is only one PlayerControls vtable slot
+        // and InputLock already owns it.
+        //
+        // main.cpp masks the gameplay layer through ControlMap while the board
+        // is open under "!nopause", but it CANNOT take kFighting or kSneaking
+        // down: those are the bits Papyrus's DisablePlayerControls uses, and
+        // dropping them makes the engine sheathe the player's weapons and stand
+        // them out of a crouch -- the "opening the inventory puts my sword away"
+        // and "...and blows my sneak" reports. So the bits stay up and the user
+        // events behind them are silenced instead, one layer earlier, with the
+        // same blank-call-restore the wheel uses for movement.
+        //
+        // ★★★IT USED TO BE A LIST OF SEVEN EVENT NAMES -- leftAttack,
+        // rightAttack, dualAttack, forceRelease, readyWeapon, shout, sneak --
+        // chosen to stand in for exactly the two flags above. That was the bug:
+        // the list answers "which buttons do kFighting and kSneaking govern",
+        // when the question this hook actually has to answer is "which buttons
+        // can drive the player while the board is up", and the second is only
+        // equal to the first if the ControlMap mask covers everything else.
+        //
+        // It does not. `kBlockedMask` in main.cpp deliberately leaves kMenu up
+        // (menus must keep working), and a controlmap is free to put a gameplay
+        // event on a kMenu-only flag word: measured on this machine's
+        // controlmap, Main Gameplay's `Wait` (flags 0x808) and `Journal`
+        // (0x808) carry no masked bit and no stance name, so both reached the
+        // player through a hole the list could not see. Wait sits on Back --
+        // which is the favourite button now.
+        //
+        // So the filter is gone. PlayerControls drives the PLAYER and nothing
+        // else; while our board holds the mask there is no button on any device
+        // whose gameplay meaning we want, so every one of them is blanked and
+        // put straight back. A rebind cannot open a new hole in a rule with no
+        // list in it. (Thumbsticks are deliberately untouched -- movement and
+        // look are flag-masked already, and our own cursor reads the sticks
+        // from the restored event.)
+        [[nodiscard]] bool IsMenuOpenEvent(const RE::BSFixedString& a_ue)
+        {
+            // The MenuControls half of the same door (see MenuLock). These are
+            // the events that OPEN a vanilla menu from gameplay; they are not
+            // routed through PlayerControls at all, so the blanking above never
+            // sees them. None is anything our board needs -- it reads Accept /
+            // Cancel / the directions / X / Y, and not one of those is here --
+            // which is what makes a targeted list safe on this hook where a
+            // blanket one would eat our own menu's input.
+            auto* ue = RE::UserEvents::GetSingleton();
+            if (!ue) return false;
+            return a_ue == ue->wait || a_ue == ue->journal ||
+                   a_ue == ue->tweenMenu || a_ue == ue->favorites ||
+                   a_ue == ue->quickInventory ||
+                   a_ue == ue->hotkey1 || a_ue == ue->hotkey2 ||
+                   a_ue == ue->hotkey3 || a_ue == ue->hotkey4 ||
+                   a_ue == ue->hotkey5 || a_ue == ue->hotkey6 ||
+                   a_ue == ue->hotkey7 || a_ue == ue->hotkey8;
+        }
+
         struct InputLock
         {
             // ★★Blank, call, put back -- the same discipline as MenuLock and for
@@ -1425,6 +1817,20 @@ namespace FUI::Wheeler
                         // after us, and if it is the hotkey the wheel can never
                         // open again.
                         if (n >= 16) continue;
+                        saved[n++] = { b, b->Value() };
+                        b->GetRuntimeData().value = 0.0f;
+                    }
+                } else if (a_event && UIRoot::IsGameplayMasked()) {
+                    // ★The grid's half (see the note above the helpers). An
+                    // `else`, not a second pass: with the wheel up every button
+                    // is already blanked, and blanking one twice would restore
+                    // the zero rather than the value.
+                    // ★No name filter any more -- every button, because there
+                    // is no gameplay button we want while the board is up.
+                    for (auto* e = *a_event; e; e = e->next) {
+                        auto* b = e->AsButtonEvent();
+                        if (!b) continue;
+                        if (n >= 16) continue;   // no blank without a restore
                         saved[n++] = { b, b->Value() };
                         b->GetRuntimeData().value = 0.0f;
                     }
@@ -1560,6 +1966,37 @@ namespace FUI::Wheeler
                             if (!InCombo(pad, b->GetIDCode())) continue;
                         }
                         if (n >= 16) continue;   // see InputLock: no blank without a restore
+                        saved[n++] = { b, b->Value() };
+                        b->GetRuntimeData().value = 0.0f;
+                    }
+                // ★★★THE GRID'S HALF, AND IT HAD TO BE ON THIS HOOK.
+                //
+                // `Wait` and `Journal` are opened by MenuOpenHandler, which is
+                // a MENUCONTROLS handler -- InputLock above never sees them, so
+                // blanking every button there does not touch either one. They
+                // are the two Main Gameplay events on this machine's controlmap
+                // that carry no bit `kBlockedMask` takes down, and Wait sits on
+                // Back: the button favourite now uses.
+                //
+                // ★An `else if`, so it cannot fight the wheel's own pass over
+                // the same events (double-blanking restores the zero).
+                // ★And a NAMED list, unlike InputLock -- the opposite choice on
+                // purpose. This hook is upstream of every menu including ours:
+                // the board's Cancel-to-close arrives through here, so blanking
+                // wholesale would wall the player into a menu they cannot shut.
+                // Only the gameplay menu-openers are taken, and none of them is
+                // an event the board reads.
+                //
+                // ★It also asks nothing about `g_enabled`. The wheel's branch
+                // above is gated on the wheel being switched on and on no menu
+                // owning input -- and our board sets kUsesMenuContext, so it
+                // trips AnotherMenuOwnsInput() every time. The wheel's gate is
+                // the wheel's; the board's mask is its own question.
+                } else if (a_event && UIRoot::IsGameplayMasked()) {
+                    for (auto* e = *a_event; e; e = e->next) {
+                        auto* b = e->AsButtonEvent();
+                        if (!b || !IsMenuOpenEvent(b->QUserEvent())) continue;
+                        if (n >= 16) continue;   // no blank without a restore
                         saved[n++] = { b, b->Value() };
                         b->GetRuntimeData().value = 0.0f;
                     }
@@ -1886,7 +2323,30 @@ namespace FUI::Wheeler
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             }
 
-            void AdvanceMovie(float, std::uint32_t) override {}
+            // ★★★THE CLOSE ANIMATION NEEDS A CLOCK THAT SURVIVES A PAUSE.
+            //
+            // Tick() runs from the PlayerCharacter update hook, and that hook
+            // STOPS the moment a menu pauses the game. Let go of the hotkey and
+            // open a menu before the wheel has finished shrinking away and the
+            // animation freezes mid-close -- with it, the overlay menu it is
+            // supposed to take down. The player then reads a menu with our
+            // ghost sitting on top of it, and it clears only when they close
+            // that menu and the hook starts again. Reported.
+            //
+            // A menu's AdvanceMovie keeps being called while the game is
+            // paused, which is exactly the clock that is missing. Our own grid
+            // has driven UIRoot::Tick from here since it learned the same
+            // lesson; the wheel's copy of the method was left empty.
+            //
+            // ★Only while PAUSED, or the two clocks would both run: the wheel
+            // does not pause the game itself, so during ordinary play the hook
+            // is already ticking and a second call here would close the wheel
+            // at double speed.
+            void AdvanceMovie(float, std::uint32_t) override
+            {
+                auto* ui = RE::UI::GetSingleton();
+                if (ui && ui->GameIsPaused()) Tick();
+            }
 
         private:
             static RE::IMenu* Creator()
@@ -1942,6 +2402,10 @@ namespace FUI::Wheeler
         {
             if (!g_open) return;
             g_open = false;
+            // ★Every exit clears it, not just the toggle's own. A wheel shut by
+            // a load, by the settings switch or by standing down to vanilla
+            // must not come back believing it is still being held open.
+            g_toggled = false;
             g_dir = -1;
             // ★★AND IT DOES NOT TOUCH THE PICK. The release path latches
             // g_pick one line before calling this, precisely so the close
@@ -2045,7 +2509,30 @@ namespace FUI::Wheeler
             // right-click all along; it was simply never reachable from here.
             // ★Reads the snapshot, so it lags a rebuild at most -- a third of a
             // second, and the alternative is walking the inventory per click.
-            if (a_list[a_slot].worn) {
+            //
+            // ★★★...EXCEPT THAT A HAND IS NOT THE BODY, and the same correction
+            // the spell branch above already carries. `worn` is true when the
+            // form is out ANYWHERE, which is right for the tick that marks a
+            // slot active and wrong for deciding what a click means: with a
+            // sword in the right hand, right-clicking to put its twin in the
+            // LEFT hand read as "already out" and took the first one off. Two
+            // of the same weapon, one in each hand, was unreachable -- and the
+            // VANILLA menu does it: one entry with a count, left-click for the
+            // right hand, then right-click for the left. (Reported.)
+            //
+            // ★No type test, and that is what makes it right. Asking the
+            // engine what is in each hand answers for a weapon, a torch and a
+            // shield alike; a cuirass is in neither hand, so it falls through
+            // to the snapshot and keeps behaving exactly as it did. Read at the
+            // click for the same reason the spells are -- the snapshot
+            // refreshes on a timer and a second click lands inside that window.
+            bool wornHere = a_list[a_slot].worn;
+            if (auto* pc = RE::PlayerCharacter::GetSingleton()) {
+                const bool inL = pc->GetEquippedObject(true) == obj;
+                const bool inR = pc->GetEquippedObject(false) == obj;
+                if (inL || inR) wornHere = a_leftHand ? inL : inR;
+            }
+            if (wornHere) {
                 // ★The second ring is not ENGINE-worn -- a carrier stands in
                 // for it -- so the engine unequip below is a no-op for it.
                 // The carrier's own gate does the whole job (sound, redraw).
@@ -2642,29 +3129,6 @@ namespace FUI::Wheeler
         return out;
     }
 
-    // ★NO CALLER as of the Favorites-key move: the settings row that armed this
-    // is gone, and AdoptFavoritesKey overwrites whatever the ini or a capture
-    // produced. Kept because the machinery is correct and the day someone wants
-    // the wheel on its own key -- or on a combination, which the game's own
-    // controls cannot express -- this is what that costs. Delete it if that day
-    // does not come.
-    void BeginCapture(bool a_pad)
-    {
-        g_capDev = a_pad ? 1 : 0;
-        g_capN = 0;
-        g_capHeld = 0;
-    }
-
-    void CancelCapture() { g_capDev = -1; }
-    bool Capturing() { return g_capDev >= 0; }
-
-    const char* CaptureText()
-    {
-        static char s_buf[96];
-        ComboToText(g_capDev == 1, g_capCode, g_capN, s_buf, sizeof(s_buf));
-        return s_buf;
-    }
-
     // ---- lifetime ------------------------------------------------------------
     void RegisterMenu()
     {
@@ -2690,8 +3154,45 @@ namespace FUI::Wheeler
     // ★Re-read on every open rather than cached: the control map is the
     // player's to change at any moment, and a wheel bound to a key they have
     // since moved is indistinguishable from a broken wheel.
+    // ★★★...UNLESS THE PLAYER HAS SAID OTHERWISE, which they now can.
+    //
+    // Following the game's binding is right until two of the game's bindings
+    // want the same key. The wheel's pre-menu blanking (MenuLock) erases its
+    // hotkey before MenuControls sees it, even while the wheel is closed --
+    // that is how the vanilla favourites menu is stopped from ever appearing.
+    // Put Inventory on that same key and the erasure takes the inventory with
+    // it: the vanilla InventoryMenu never opens, so our intercept never fires,
+    // so the bag cannot be opened AT ALL. Reported, and the same shape as the
+    // earlier F collision that ate the favourite-toggle key.
+    //
+    // No amount of cleverness inside the blanking fixes that -- one key cannot
+    // be eaten and passed on at once. The player needs somewhere else to put
+    // the wheel, so !wheelkey in the ui ini is that somewhere.
+    void SetTapMs(int a_ms)
+    {
+        // Bounded here as well as at the reader: this is also reachable from a
+        // preset import, and a shared file is not a trusted one.
+        g_tapMs = static_cast<float>(std::clamp(a_ms, 60, 2000));
+    }
+
+    int TapMs() { return static_cast<int>(g_tapMs); }
+
+    void SetKeyOverride(bool a_pad, std::uint32_t a_code)
+    {
+        g_keyOverride[a_pad ? 1 : 0] = a_code;
+    }
+
+    std::uint32_t KeyOverride(bool a_pad) { return g_keyOverride[a_pad ? 1 : 0]; }
+
     void AdoptFavoritesKey()
     {
+        // ★The override is applied FIRST and the adopt is skipped for that
+        // device, so re-reading it on every open is idempotent. That is the
+        // whole difference from the ini key this replaces, which stored the
+        // RESOLVED value and therefore climbed back over the player's rebind.
+        for (int d = 0; d < 2; ++d) {
+            if (g_keyOverride[d]) SetCombo(d == 1, &g_keyOverride[d], 1);
+        }
         auto* cm = RE::ControlMap::GetSingleton();
         auto* ue = RE::UserEvents::GetSingleton();
         if (!cm || !ue) return;
@@ -2699,8 +3200,8 @@ namespace FUI::Wheeler
         const auto pad = cm->GetMappedKey(ue->favorites, RE::INPUT_DEVICE::kGamepad);
         // 0xFF is the engine's "not bound". Leave the previous answer standing
         // rather than binding the wheel to nothing.
-        if (kb != 0xFF) { const std::uint32_t c = kb; SetCombo(false, &c, 1); }
-        if (pad != 0xFF) { const std::uint32_t c = pad; SetCombo(true, &c, 1); }
+        if (!g_keyOverride[0] && kb != 0xFF) { const std::uint32_t c = kb; SetCombo(false, &c, 1); }
+        if (!g_keyOverride[1] && pad != 0xFF) { const std::uint32_t c = pad; SetCombo(true, &c, 1); }
     }
 
     // ---- persistence ---------------------------------------------------------
@@ -2719,8 +3220,9 @@ namespace FUI::Wheeler
         if (!g_setInit) ResetSetOrder();
         if (!a_intfc->OpenRecord(kRecordType, kVersion)) return;
         for (int w = 0; w < 2; ++w) {
-            a_intfc->WriteRecordData(static_cast<std::uint32_t>(g_order[w].size()));
-            for (const auto id : g_order[w]) a_intfc->WriteRecordData(id);
+            const auto& ord = OrderFor(w);
+            a_intfc->WriteRecordData(static_cast<std::uint32_t>(ord.size()));
+            for (const auto id : ord) a_intfc->WriteRecordData(id);
         }
         // ★The set wheels' arrangement, as TAB INDICES rather than FormIDs. A
         // preset exists only inside this save, so its index means exactly one
@@ -2736,6 +3238,15 @@ namespace FUI::Wheeler
         // characters reach for different things, and a spellsword's habit is
         // not a stealth archer's.
         a_intfc->WriteRecordData(static_cast<std::int32_t>(g_group));
+
+        // ---- v4 ------------------------------------------------------------
+        //
+        // ★Nothing new but the page NUMBER. The arrangements above are the
+        // same two lists they have always been -- they are simply allowed to
+        // be longer than ten now, because a page is a window on one list
+        // rather than a list of its own. A format that grows by loosening a
+        // bound is a format nobody has to migrate.
+        a_intfc->WriteRecordData(static_cast<std::int32_t>(g_page));
     }
 
     void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t a_version)
@@ -2754,12 +3265,15 @@ namespace FUI::Wheeler
             // many FormIDs of memory and throws out of a load callback with no
             // catch above it. The real value is always kSlots; anything else
             // is a damaged record and there is nothing to salvage.
-            if (n > static_cast<std::uint32_t>(kSlots)) {
+            // ★The cap is pages now, not one wheel's worth. A v3 save never
+            // holds more than ten; a v4 one holds as many as the player has
+            // starred, and the ceiling is the same one the page count has.
+            if (n > static_cast<std::uint32_t>(kMaxPages * kSlots)) {
                 SKSE::log::warn("[WHEEL] cosave order count {} is impossible -- record ignored", n);
                 return;
             }
-            g_order[w].clear();
-            g_order[w].reserve(n);
+            OrderFor(w).clear();
+            OrderFor(w).reserve(n);
             for (std::uint32_t i = 0; i < n; ++i) {
                 RE::FormID id = 0;
                 if (!a_intfc->ReadRecordData(id)) return;
@@ -2775,7 +3289,7 @@ namespace FUI::Wheeler
                 // learned rotates by a slot.
                 RE::FormID resolved = 0;
                 if (!a_intfc->ResolveFormID(id, resolved)) resolved = 0;
-                g_order[w].push_back(resolved);
+                OrderFor(w).push_back(resolved);
             }
         }
         if (a_version < 2) return;   // no set arrangement in that save
@@ -2789,21 +3303,32 @@ namespace FUI::Wheeler
         }
         if (a_version < 3) return;   // no remembered group in that save
         std::int32_t grp = 0;
-        if (a_intfc->ReadRecordData(grp)) {
-            g_group = std::clamp(static_cast<int>(grp), 0, kGroups - 1);
+        if (!a_intfc->ReadRecordData(grp)) return;
+
+        if (a_version < 4) {
+            g_group = std::clamp(static_cast<int>(grp), 0, GroupCount() - 1);
+            return;
         }
+
+        std::int32_t pg = 0;
+        if (a_intfc->ReadRecordData(pg)) g_page = (std::max)(0, static_cast<int>(pg));
+        g_group = std::clamp(static_cast<int>(grp), 0, GroupCount() - 1);
     }
 
     void RevertGame(SKSE::SerializationInterface*)
     {
-        g_order[0].clear();
-        g_order[1].clear();
+        // ★All of them, not the two that used to exist. A user group's
+        // arrangement is written in the outgoing save's language too.
+        g_order.clear();
+        // ...and the groups themselves. They are per save, like everything else
+        // here: another character's wheels are not this one's.
         // ★★Cleared, not left alone. Revert fires before every load, and a tab
         // index from the outgoing save names a different set in the incoming
         // one -- the arrangement is the only thing here that is written in a
         // language the next save does not speak.
         ResetSetOrder();
         g_group = kPreset;   // ...and the remembered group, for the same reason
+        g_page = 0;          // ...and the page within it
         // ★★★A LOAD IS AN EXIT TOO. The wheel is held open by a key, and it
         // deliberately does not pause the game -- so a load that lands while it
         // is up leaves g_open true with nobody left to release the key. Every
@@ -2860,6 +3385,16 @@ namespace FUI::Wheeler
         SKSE::log::info("[WHEEL] {}", a_on ? "enabled" : "disabled -- vanilla favourites restored");
     }
 
+    void NoteStarred(RE::FormID a_form)
+    {
+        auto* form = a_form ? RE::TESForm::LookupByID(a_form) : nullptr;
+        if (!form) return;
+        // ★Which wheel it belongs to is a property of the FORM, so the caller
+        // never has to know -- the same reason ForgetFavorite asks both lists.
+        const bool magic = form->Is(RE::FormType::Spell) || form->Is(RE::FormType::Shout);
+        SeatOne(magic ? 1 : 0, a_form);
+    }
+
     void ForgetFavorite(RE::FormID a_form)
     {
         if (!a_form) return;
@@ -2895,11 +3430,20 @@ namespace FUI::Wheeler
             SKSE::log::info("[WHEEL] disabled by settings");
             return;
         }
-        // ★★★ONE SOURCE. The ini used to carry the binding too, and that
-        // second copy is what broke the wheel the moment the inventory was
-        // opened: WinManager re-reads that file on every open and put the stale
-        // key back. The game's own Favorites binding is the answer, and nothing
-        // else is consulted.
+        // ★★★ONE SOURCE, and it is still one: the ini says WHERE the wheel
+        // lives, not what key it is currently on. The old ini entry stored the
+        // resolved value, which is what broke the wheel the moment the
+        // inventory was opened -- WinManager re-reads this file on every open
+        // and put the stale key back over the player's rebind. An override
+        // cannot do that: 0 means "follow the game", and re-reading it changes
+        // nothing. Anything else is a deliberate choice that has to survive
+        // exactly this re-read.
+        SetKeyOverride(false, WinManager::ReadWheelKey(false));
+        SetKeyOverride(true,  WinManager::ReadWheelKey(true));
+        // ★Same reason as the two above: the FIRST press has to be judged
+        // correctly, and that press can come long before any window has
+        // pulled in the rest of this file.
+        SetTapMs(WinManager::ReadWheelTapMs(TapMs()));
         AdoptFavoritesKey();
         SKSE::log::info("[WHEEL] hotkey: {} / pad {}", ComboText(false), ComboText(true));
     }
@@ -3107,32 +3651,6 @@ namespace FUI::Wheeler
             else if (id < 256) g_kbDown[id] = false;
         }
 
-        // ---- rebinding ----------------------------------------------------
-        if (g_capDev >= 0) {
-            if ((g_capDev == 1) != pad) return false;   // other device: not ours
-            if (!pad && id == 1 && a_event->IsDown()) { // Esc cancels
-                g_capDev = -1;
-                return true;
-            }
-            if (a_event->IsDown()) {
-                bool seen = false;
-                for (int i = 0; i < g_capN; ++i) seen |= g_capCode[i] == id;
-                if (!seen && g_capN < kMaxCombo) g_capCode[g_capN++] = id;
-                if (!seen) ++g_capHeld;
-            } else if (a_event->IsUp()) {
-                // ★Commit when the LAST one comes up. Committing on the first
-                // release would take "Shift" out of Shift+X the instant a hand
-                // came off the modifier -- and a hand comes off the modifier
-                // first about half the time.
-                if (g_capHeld > 0 && --g_capHeld == 0 && g_capN > 0) {
-                    SetCombo(pad, g_capCode, g_capN);
-                    g_capDev = -1;
-                    WinManager::GetSingleton()->Save();
-                }
-            }
-            return true;   // nothing else in the game sees these
-        }
-
         // ---- cycling the groups while the wheel is up ----------------------
         // ★★A/D -- the keys the hand is already on. They are the movement keys,
         // which is exactly why they were unusable before: the wheel used to let
@@ -3180,6 +3698,79 @@ namespace FUI::Wheeler
                 return true;
             }
 
+            // ★★★PAGES ON THE OTHER AXIS. A and D step the GROUP, so W and S
+            // step the PAGE -- the same four keys the hand already uses to
+            // move, with the same meaning it already has: sideways is a
+            // different kind of thing, up and down is more of this kind.
+            //
+            // ★On the pad, LB and RB. The D-pad's sideways pair is already
+            // the group, and its UP is often the wheel's own hotkey -- so
+            // "only D-pad down" would be a one-way cycle, which is fine at two
+            // pages and tiresome at four. The shoulders are a pair and are
+            // free.
+            //
+            // ★★...unless the player's hotkey IS a shoulder. The wheel follows
+            // the game's Favourites binding, which is theirs to set, so a page
+            // key is only a page key when it is not already the key holding
+            // this wheel open. Hardcoding the pair without asking is how the
+            // last collision report happened (see AdoptFavoritesKey).
+            constexpr std::uint32_t kW = 17, kS = 31;              // scan codes
+            constexpr std::uint32_t kPadLB = 0x0100, kPadRB = 0x0200;
+            int pdir = 0;
+            if (!pad && id == kW) pdir = -1;
+            else if (!pad && id == kS) pdir = 1;
+            else if (pad && id == kPadLB && !InCombo(true, kPadLB)) pdir = -1;
+            else if (pad && id == kPadRB && !InCombo(true, kPadRB)) pdir = 1;
+            if (pdir) {
+                const int pages = PageCount(g_group);
+                if (pages > 1) {
+                    const int which = g_group == kItems ? 0
+                                    : g_group == kMagic ? 1 : -1;
+                    const int next = (g_page + pdir + pages) % pages;
+                    // ★★★A CARRIED THING TRAVELS WITH YOU. Turning the page
+                    // mid-drag used to drop it -- which meant nothing could
+                    // ever leave the page it was seated on, and a wheel you
+                    // cannot rearrange across its own pages is a wheel that
+                    // arranges itself.
+                    //
+                    // ★It is a move within ONE list, because that is what the
+                    // arrangement is: pages are windows on it, so page two's
+                    // slot three and page one's slot three are simply two
+                    // indices, and carrying between them is the same rotation
+                    // a drag already performs -- neighbours step aside, over
+                    // the page boundary as within it.
+                    if (g_dragFrom >= 0 && which >= 0) {
+                        auto& ord = OrderFor(which);
+                        const std::size_t from =
+                            static_cast<std::size_t>(g_page) * kSlots + g_dragFrom;
+                        const std::size_t to =
+                            static_cast<std::size_t>(next) * kSlots + g_dragFrom;
+                        if (from < ord.size() && to < ord.size()) {
+                            const RE::FormID id = ord[from];
+                            ord.erase(ord.begin() + static_cast<std::ptrdiff_t>(from));
+                            ord.insert(ord.begin() + static_cast<std::ptrdiff_t>(to), id);
+                            g_dragMoved = true;
+                            g_arranged = true;   // ...and the release must not act
+                        }
+                        g_page = next;
+                        FillPage();
+                        // the carried thing is at the same PLACE on the new page
+                        g_sel = g_dragFrom;
+                    } else {
+                        g_page = next;
+                        FillPage();
+                        g_dragFrom = -1;
+                        g_dragMoved = false;
+                        g_sel = -1;
+                    }
+                    g_groupT = 0.0f;   // re-ink the ring for the new ten
+                    StepBlip();
+                } else {
+                    Sfx::SelectOff();   // nothing to turn to
+                }
+                return true;
+            }
+
             int dir = 0;
             if (!pad && id == kA) dir = -1;
             else if (!pad && id == kD) dir = 1;
@@ -3189,7 +3780,12 @@ namespace FUI::Wheeler
             else if (pad && id == kRT) dir = 1;
             else if (pad && id == kBack) dir = 1;
             if (dir) {
-                g_group = (g_group + dir + kGroups) % kGroups;
+                g_group = (g_group + dir + GroupCount()) % GroupCount();
+                // ★Back to the first page. Page three of GEAR is not a place
+                // in MAGIC, and landing on an empty ring reads as the wheel
+                // being broken rather than as the page being past the end.
+                g_page = 0;
+                FillPage();
                 g_groupT = 0.0f;   // re-ink the ring for the new list
                 // ★★★A DRAG DOES NOT SURVIVE A GROUP CHANGE. Slot 2 of PRESET
                 // and slot 2 of GEAR are unrelated, so carrying an index across
@@ -3211,6 +3807,34 @@ namespace FUI::Wheeler
 
         }
 
+        // ★★★ESC SHUTS A WHEEL THAT WAS TAPPED OPEN, and it is not our ESC.
+        //
+        // A held wheel has a way out already -- bring the aim back to centre
+        // and let go. A TAPPED one is standing on its own, and the key that
+        // shuts every other thing in this game should shut it too.
+        //
+        // ★Asked of the control map, never hardcoded. "ESC" is 0x01 on nobody's
+        // keyboard but the default one, and this mod has already been caught
+        // once assuming a binding (see UIRoot::MappedScanCode for what that
+        // cost). Both events are honoured because ESC and the pad's B are the
+        // same gesture wearing different names: Pause is what backs out of
+        // play, Cancel is what backs out of a menu, and the wheel is neither
+        // and both.
+        if (g_open && g_toggled && a_event->IsDown()) {
+            auto* ue = RE::UserEvents::GetSingleton();
+            const std::uint32_t esc =
+                ue ? UIRoot::MappedScanCode(ue->pause) : 0;
+            const std::uint32_t cancel =
+                ue ? UIRoot::MappedScanCode(ue->cancel) : 0;
+            constexpr std::uint32_t kPadB = 0x2000;
+            if ((!pad && ((esc && id == esc) || (cancel && id == cancel))) ||
+                (pad && id == kPadB)) {
+                Sfx::SelectOff();
+                CloseWheel();
+                return true;   // eaten: the pause menu must not open behind it
+            }
+        }
+
         if (!InCombo(pad, id)) return false;
 
         // ★★A member that is NOT the one that opened the wheel is passed
@@ -3220,6 +3844,15 @@ namespace FUI::Wheeler
         // sprinting. Only the opening code is ours to take.
         if (g_open && id != g_openedBy && !a_event->IsUp()) return false;
 
+        // ★A SECOND PRESS SHUTS A TAPPED WHEEL, and applies nothing. Letting
+        // it apply would make the same key mean "choose this" and "never mind"
+        // depending on where the pointer happens to be resting, which is a coin
+        // flip the player did not ask to toss.
+        if (a_event->IsDown() && g_open && g_toggled && id == g_openedBy) {
+            Sfx::SelectOff();
+            CloseWheel();
+            return true;
+        }
         if (a_event->IsDown() && !g_open && ComboComplete(pad)) {
             if (SomethingElseOwnsTheKey(id)) return false;
             LoadTextures();
@@ -3286,6 +3919,27 @@ namespace FUI::Wheeler
             return true;
         }
         if (a_event->IsUp() && g_open) {
+            // ★★★TAP OR HOLD, decided by the ENGINE'S OWN measure of the press.
+            //
+            // ButtonEvent carries how long it was held (HeldDuration), so
+            // nothing here has to remember when the key went down -- and the
+            // muting we do to the event stream deliberately leaves that field
+            // alone (see Mute), precisely so it can still be read here.
+            //
+            // Under the threshold the press was a TAP: the wheel stays up, and
+            // the release neither applies nor closes. Over it, everything below
+            // runs exactly as it always has.
+            //
+            // ★Only the OPENING key's duration is asked. A combo's modifier was
+            // already down before the wheel existed, so its clock says nothing
+            // about this press. (DynamicKeyActionFramework takes the minimum
+            // across a chord for the same reason -- the youngest press is the
+            // one the player just made.)
+            if (id == g_openedBy && !g_toggled &&
+                a_event->HeldDuration() * 1000.0f < g_tapMs) {
+                g_toggled = true;
+                return true;
+            }
             // ★Latch before clearing g_open -- the close animation has to know
             // which slot to hold on to, and the pointer stops existing here.
             g_pick = g_sel;
@@ -3307,28 +3961,6 @@ namespace FUI::Wheeler
             return id == g_openedBy;
         }
         return g_open && id == g_openedBy;
-    }
-
-    void Mute(RE::InputEvent* a_event)
-    {
-        if (!a_event || !g_open) return;
-        if (auto* b = a_event->AsButtonEvent()) {
-            // See the header: zeroing the value is what lets the engine
-            // release a key it was already holding instead of holding it
-            // forever. heldDownSecs is deliberately left alone -- it is the
-            // thing that tells those two cases apart.
-            b->GetRuntimeData().value = 0.0f;
-            return;
-        }
-        if (auto* m = a_event->AsMouseMoveEvent()) {
-            m->mouseInputX = 0;
-            m->mouseInputY = 0;
-            return;
-        }
-        if (auto* t = a_event->AsThumbstickEvent()) {
-            t->xValue = 0.0f;
-            t->yValue = 0.0f;
-        }
     }
 
     bool OnThumbstick(const RE::ThumbstickEvent* a_event)
@@ -3507,18 +4139,6 @@ namespace FUI::Wheeler
             g_keyMs = 0.0f;
             AdoptFavoritesKey();
         }
-        // ★★Disarm capture the moment the panel it belongs to is gone. While it
-        // is armed EVERY key is swallowed, so a menu closed by Esc, by a load,
-        // or by anything else that does not route through the settings row
-        // would leave the game deaf to the keyboard with nothing on screen to
-        // explain it. Checked here because Tick is the one thing that runs
-        // whatever else happens.
-        if (g_capDev >= 0) {
-            // ★...and the settings row is equally gone when the menu is merely
-            // suppressed, so the same disarm applies: an armed capture eats
-            // every key, and it must never outlive the panel it belongs to.
-            if (!UIRoot::IsBoardLive()) g_capDev = -1;
-        }
         // ★★The brush advances BEFORE the "nothing is moving" early-out. It used
         // to sit after it, so the stroke could only ever be laid down while the
         // wheel was still opening -- once open, g_dir goes to 0 and Tick returns
@@ -3592,6 +4212,9 @@ namespace FUI::Wheeler
     void Draw()
     {
         if (g_t <= 0.001f) return;
+
+        const bool live = g_open;
+
         const auto& io = ImGui::GetIO();
         const float S = Scale();
         const ImVec2 c(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
@@ -3601,7 +4224,7 @@ namespace FUI::Wheeler
         // ring re-inks slot by slot on a list switch; if the things standing on
         // it did not go with it, the old list's icons would hang in the air
         // over a ring that is being repainted underneath them.
-        const float ge = (std::min)(g_t, g_open ? g_groupT : 1.0f);
+        const float ge = (std::min)(g_t, live ? g_groupT : 1.0f);
         const float e = 1.0f - std::pow(1.0f - ge, 3.0f);
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -3630,7 +4253,7 @@ namespace FUI::Wheeler
         }
 
         // ---- where the pointer is -------------------------------------------
-        if (g_open) {
+        if (live) {
             const float d = std::sqrt(g_mx * g_mx + g_my * g_my);
             if (d > kDeadzone) {
                 float a = std::atan2(g_my, g_mx) * 57.29578f;   // screen degrees
@@ -3689,8 +4312,8 @@ namespace FUI::Wheeler
             }
         }
 
-        const int shown = g_open ? g_sel : g_pick;
-        const int shownGroup = g_open ? g_group : (g_pickGroup >= 0 ? g_pickGroup : g_group);
+        const int shown = live ? g_sel : g_pick;
+        const int shownGroup = live ? g_group : (g_pickGroup >= 0 ? g_pickGroup : g_group);
 
         if (!g_texOk) {
             Halo(dl, c, "GridInventory_wheel textures missing", 20.0f * S, kInkText, 255);
@@ -3703,7 +4326,7 @@ namespace FUI::Wheeler
         // click would land on a wheel of blanks and fill in a frame later. One
         // slot per frame: the whole list is ready inside ten frames, and no
         // single frame pays for nine texture uploads.
-        if (g_open) {
+        if (live) {
             g_warm = (g_warm + 1) % kSlots;
             if (Filled(kCostume, g_warm)) {
                 if (auto* face = G(kCostume).face(g_warm)) {
@@ -3774,7 +4397,7 @@ namespace FUI::Wheeler
             // change alone cannot say which one is travelling.
             const float home = i * kStep;
             const float shown = g_angleInit ? g_slotAngle[i] : home;
-            const bool carried = g_open && i == g_dragFrom && shownGroup == g_group;
+            const bool carried = live && i == g_dragFrom && shownGroup == g_group;
             if (carried) { carriedIdx = i; carriedLt = le; carriedA = a; continue; }
             DrawWheelTex(dl, g_slot[i], c, side * (0.62f + 0.38f * le), shown - home,
                 (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
@@ -3932,7 +4555,7 @@ namespace FUI::Wheeler
         if (e > 0.55f && shown >= 0) {
             const int a = static_cast<int>(255 * (std::min)(1.0f, (e - 0.55f) / 0.3f));
             DrawArc(dl, c, side, shown * kStep,
-                    g_open ? g_arcT : 1.0f, a);
+                    live ? g_arcT : 1.0f, a);
         }
 
         // ---- medallions -------------------------------------------------------
@@ -3970,7 +4593,7 @@ namespace FUI::Wheeler
                 const float grow = 0.62f + 0.38f * ie;
                 // ...and up with the carried slot, which is lifted 1.10x.
                 const float lift =
-                    (g_open && i == g_dragFrom && shownGroup == g_group) ? 1.10f : 1.0f;
+                    (live && i == g_dragFrom && shownGroup == g_group) ? 1.10f : 1.0f;
                 const float r = (kRSegIn + kRSegOut) * 0.5f * k * grow * lift;
                 const ImVec2 m(c.x + r * std::cos(ang), c.y + r * std::sin(ang));
                 // ★Size follows more gently than position: the ink's full 0.62
@@ -3993,6 +4616,25 @@ namespace FUI::Wheeler
                 // would have enlarged the aliasing along with the shape.
                 constexpr float kSigilScale = 0.92f;   // spell, of the medallion box
                 constexpr float kWordScale  = 1.00f;   // shout, ...along its length
+                // ★★★THE SIGIL IS THE FALLBACK NOW, NOT A GROUND.
+                //
+                // It was tried underneath the picture on the reasoning that the
+                // sigil says "what school" while the picture says "which spell",
+                // so both were worth keeping. On the ring they simply crowded
+                // each other -- the spell's own art already reads as fire or
+                // frost, and a mark behind it added ink without adding an
+                // answer. Removed on sight (author's call).
+                //
+                // So the three branches stay the plain if/else CHAIN they were:
+                // a spell draws its picture, and anything with no picture --
+                // every SHOUT, since TESShout is not a bound object, and the
+                // handful of spells whose display object has no model -- falls
+                // through to the mark exactly as before.
+                //
+                // ★The flag lives on for the two things that ARE still true of
+                // a spell's picture: it needs more room than an item's, and it
+                // must not be given the dark-object halo.
+                const bool magicUnder = shownGroup == kMagic;
                 // Which of the two the group wants is the table's answer now.
                 if (auto* face = G(shownGroup).face(i)) {
                     auto* cache = IconCache::GetSingleton();
@@ -4037,16 +4679,57 @@ namespace FUI::Wheeler
                         // medallion fills its square in both directions, a 2x3
                         // sprite only fills one. Match what the eye sees, not the
                         // box -- and a capture carries its own margin on top.
-                        const float fit = (sz * 1.34f) / (std::max)(aw, ah);
+                        // ★★A SPELL'S PICTURE NEEDS MORE ROOM THAN AN ITEM'S,
+                        // and the reason is in the pixels rather than in taste.
+                        // An item capture is a solid object filling its trimmed
+                        // sprite. A spell's is its magic-menu display object --
+                        // a flame, a ward -- which renders as a small bright
+                        // core inside a wide dim glow, and the trim keeps that
+                        // glow because it is real content. Measured: 'Flames'
+                        // stores 160x155 and the part you can actually see on
+                        // black is a fifth of it. At the item's 1.34 the core
+                        // came out a dot (reported).
+                        const float faceFit = magicUnder ? 2.40f : 1.34f;
+                        const float fit = (sz * faceFit) / (std::max)(aw, ah);
                         const float hw = aw * fit, hh = ah * fit;
-                        const ImVec2 q0(m.x - hw, m.y - hh), q1(m.x + hw, m.y + hh);
+                        // ★★A PICTURE WHOSE MIDDLE IS NOT ITS CENTRE gets the
+                        // same nudge the board already has. fx/fy exist for
+                        // exactly this ("the auto rule is right for every
+                        // symmetric shape; this exists for the ones that are
+                        // not") and the wheel was the one surface that ignored
+                        // them.
+                        //
+                        // It is a spell that needed it. Measured: 'Flames'
+                        // stores its bright weight at 0.60 of its own height
+                        // while every other spell measured 0.50 -- the model is
+                        // a dim flame ABOVE a bright orb, so no centring rule
+                        // can put both where the eye wants them. One number in
+                        // the item ini can.
+                        //
+                        // Fractions of the drawn HALF-size, so a value reads
+                        // the same however large the ring is drawn.
+                        const auto fdef = cache->ResolveDef(face);
+                        const float nx = fdef.fx * hw;
+                        const float ny = fdef.fy * hh;
+                        const ImVec2 q0(m.x - hw + nx, m.y - hh + ny),
+                                     q1(m.x + hw + nx, m.y + hh + ny);
                         // ★★A menu-captured item is a DARK object and it lands on
                         // BLACK ink here. The grid already solved this: a shader
                         // that draws the sprite's alpha alone, stamped in white
                         // around it, gives a halo no tint can (black collapses
                         // the colour, white multiplies to the sprite itself).
+                        // ★★★...AND A SPELL IS NOT A DARK OBJECT, so it gets
+                        // none of it. The halo below stamps the sprite's ALPHA
+                        // in white eight times around itself, which is a clean
+                        // outline when the alpha has an edge -- a cuirass, a
+                        // potion. A spell's display object is a light: its
+                        // alpha is a wide soft gradient, and eight white copies
+                        // of a gradient is a smear, which is what it looked
+                        // like (reported). Nothing is lost by skipping it --
+                        // the premise the halo exists for, "dark thing on black
+                        // ink", is exactly backwards for something glowing.
                         constexpr int kSpokes = 8;
-                        if (UIRoot::BeginSilhouette(dl)) {
+                        if (!magicUnder && UIRoot::BeginSilhouette(dl)) {
                             // stacked alpha is not additive: solve per stamp or
                             // the middle of the halo goes solid white
                             const float want = 0.66f * (a / 255.0f);
@@ -4088,10 +4771,57 @@ namespace FUI::Wheeler
                 if (IsCurrent(shownGroup, i) && g_tick.srv) {
                     const float ts = sz * 2.0f;   // half-extent, so 4x the medallion radius
                     const ImVec2 tc(m.x + sz * 0.72f, m.y - sz * 0.72f);
-                    dl->AddImage(reinterpret_cast<ImTextureID>(g_tick.srv),
-                        ImVec2(tc.x - ts, tc.y - ts), ImVec2(tc.x + ts, tc.y + ts),
-                        ImVec2(0, 0), ImVec2(1, 1),
-                        (kRed & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
+                    // ★★WHICH HAND, IN THE MARK ITSELF.
+                    //
+                    // One check said "this is out" and stopped there, which was
+                    // enough while only one hand could hold a thing. Both hands
+                    // are reachable now, so the mark carries the answer: RED is
+                    // the right hand, AMBER the left, and a thing in both wears
+                    // two checks slightly apart -- overlapping, because they are
+                    // one item held twice rather than two items.
+                    //
+                    // ★The single-hand case keeps the OLD anchor exactly. The
+                    // common mark must not drift a pixel for a feature about
+                    // the uncommon one.
+                    const int hm = G(shownGroup).hands(i);
+                    const auto stamp = [&](ImVec2 c, ImU32 col) {
+                        dl->AddImage(reinterpret_cast<ImTextureID>(g_tick.srv),
+                            ImVec2(c.x - ts, c.y - ts), ImVec2(c.x + ts, c.y + ts),
+                            ImVec2(0, 0), ImVec2(1, 1),
+                            (col & 0x00FFFFFF) | (static_cast<ImU32>(a) << 24));
+                    };
+                    if (hm == 3) {
+                        // ★Left drawn FIRST so the right hand's red sits on top:
+                        // red is the one that was always there, and the eye
+                        // should still find it first.
+                        const float d = sz * 0.34f;
+                        stamp(ImVec2(tc.x - d, tc.y + d), kAmber);
+                        stamp(ImVec2(tc.x + d, tc.y - d), kRed);
+                    } else {
+                        stamp(tc, hm == 2 ? kAmber : kRed);
+                    }
+                }
+                // ★★HOW MANY, and only when there is more than one.
+                //
+                // Two of the same weapon are ONE place on this wheel -- the
+                // list is keyed by form -- so without a number there is nothing
+                // to say the second one exists, and the player has no reason to
+                // try the other hand. The vanilla menu shows exactly this: one
+                // entry, a count, and both hands reachable from it.
+                //
+                // ★"1" is not information. Every unique thing on the ring would
+                // wear a number that never changes and never means anything,
+                // and the wheel is already carrying a medallion, a picture and
+                // sometimes a check in the same square.
+                //
+                // ★Opposite corner from the check, on purpose: a stack that is
+                // also equipped shows both, and two marks in one corner would
+                // have to be laid out around each other.
+                if (const int n = G(shownGroup).count(i); n > 1) {
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "%d", n);
+                    Halo(dl, ImVec2(m.x + sz * 0.78f, m.y + sz * 0.78f), buf,
+                         sz * 0.95f, IM_COL32(236, 232, 225, 255), a);
                 }
             }
             // ★Held until the wheel is FULLY open. Slots fade in one at a
@@ -4108,7 +4838,7 @@ namespace FUI::Wheeler
                     SKSE::log::warn(
                         "[WHEEL] icons: {} from cache, {} fell back to a drawing "
                         "(group {}, caplight {:.0f},{:.0f})",
-                        diagHit, diagMiss, G(shownGroup).title,
+                        diagHit, diagMiss, TitleOf(shownGroup),
                         Theme::CaptureLightAz(), Theme::CaptureLightEl());
                 }
             }
@@ -4271,7 +5001,7 @@ namespace FUI::Wheeler
                     ImVec2(0, 0), ImVec2(1, 1),
                     (kInk & 0x00FFFFFF) | (static_cast<ImU32>(a * 0.95f) << 24));
             }
-            Halo(dl, ImVec2(c.x, ty), G(shownGroup).title, 16.0f * S, kPaper, a);
+            Halo(dl, ImVec2(c.x, ty), TitleOf(shownGroup), 16.0f * S, kPaper, a);
         }
 
         ImGui::End();
@@ -4279,17 +5009,29 @@ namespace FUI::Wheeler
         // ---- the inventory's own prompt bar ------------------------------------
         using LS = Lang::Str;
         std::vector<UIRoot::PromptBit> bits;
+        // ★★THE ROW SAYS WHAT IS TRUE RIGHT NOW, not what the wheel can do.
+        //
+        // The page cap appears only when there IS another page -- the same rule
+        // the banner follows for "1/1" and a slot follows for a stack of one: a
+        // control that cannot do anything is a word in the way. And the last
+        // cap tells the truth about the press that is holding this open: after
+        // a TAP, letting go does nothing and pressing again is the way out, so
+        // saying "release to apply" would be an instruction that fails.
+        const bool paged = PageCount(g_group) > 1;
+        const char* last = g_toggled ? Lang::T(LS::WheelClose) : Lang::T(LS::WheelApply);
         if (g_padDriving) {
             bits = { { "STICK", Lang::T(LS::WheelPick) },
-                     { "D-PAD", Lang::T(LS::WheelGroup), true },
-                     { "", Lang::T(LS::WheelApply), true } };
+                     { "D-PAD", Lang::T(LS::WheelGroup), true } };
+            if (paged) bits.push_back({ "LB/RB", Lang::T(LS::WheelPage), true });
+            bits.push_back({ "", last, true });
         } else {
             // ★"MOUSE" named the device, not the control -- and the mouse does
             // two different things here. The wheel picks, the button switches
             // group; a cap that says MOUSE tells you neither.
             bits = { { "WHEEL", Lang::T(LS::WheelPick) },
-                     { "A/D", Lang::T(LS::WheelGroup), true },
-                     { "", Lang::T(LS::WheelApply), true } };
+                     { "A/D", Lang::T(LS::WheelGroup), true } };
+            if (paged) bits.push_back({ "W/S", Lang::T(LS::WheelPage), true });
+            bits.push_back({ "", last, true });
         }
         UIRoot::DrawPromptRow(bits, false, std::clamp(g_t * 1.6f, 0.0f, 1.0f));
     }

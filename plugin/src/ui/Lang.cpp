@@ -36,10 +36,11 @@ namespace FUI::Lang
         };
         std::vector<Pack> g_packs;      // files that ADD a language, in list order
         bool              g_loaded = false;
-        // ★A file called en.ini does not become a second English — it overlays
-        // the compiled one, so it is held apart from the list rather than in
-        // it. Overlay and not replace: a half-written en.ini then costs the
-        // lines it got wrong, not the whole UI.
+        // A file called en.ini does not become a second English entry. It
+        // overlays the compiled one, so it is held apart from the list rather
+        // than inside it. Overlaying rather than replacing means a
+        // half-finished en.ini costs only the lines it got wrong, not the whole
+        // UI.
         Pack g_en;
         bool g_hasEn = false;
 
@@ -151,11 +152,11 @@ namespace FUI::Lang
                     ++misses;
                     continue;
                 }
-                // ★A translated line is handed to printf-style calls with the
-                // ARGUMENTS the English string was written for. A '%' sequence
-                // that differs from the English one (missing %s, stray %d) is
-                // not a style choice but a crash at draw time — drop the line
-                // and let that one string fall back to English instead.
+                // A translated line is passed to printf-style calls with the
+                // ARGUMENTS the English string was written for. So a '%'
+                // sequence that differs from the English one -- a missing %s, a
+                // stray %d -- is not a style choice but a crash at draw time.
+                // Drop the line and let that one string fall back to English.
                 if (kEN[idx] && FmtSig(val.c_str()) != FmtSig(kEN[idx])) {
                     SKSE::log::warn(
                         "[LANG] {}: '{}' format specifiers differ from English"

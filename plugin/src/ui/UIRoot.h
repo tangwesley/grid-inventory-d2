@@ -1,7 +1,9 @@
 ﻿#pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct ImDrawList;
@@ -40,6 +42,8 @@ namespace FUI::UIRoot
     // colour, but it does not get to wear a different typeface from the label
     // beside it.
     void SectionLabel(const char* a_text, const ImVec4* a_col = nullptr);
+    // What SectionLabel would measure for this text, prefix and all.
+    [[nodiscard]] float SectionLabelWidth(const char* a_text);
 
     // One line of help for the BOTTOM prompt bar, good for this frame only.
     // Call it while a control is hovered; the bar shows it in place of its
@@ -79,8 +83,60 @@ namespace FUI::UIRoot
     // ★A suppressed menu is still OPEN: IsMenuOpen stays true, the board, the
     // carry and every sub-window are exactly where they were. What stops is
     // drawing and input -- see IsBoardLive.
-    void Suppress(bool a_on, const char* a_why);
+
+    // ★★WHO ASKED, because the safety net has to treat them differently.
+    //
+    //   kEngine   -- a kHide off the message queue, or a menu we noticed
+    //                opening over us. The asker is a MENU, so the net can
+    //                look at the menu stack to tell when it has gone.
+    //   kClient   -- a mod that named itself through kMsgSuppressUI. It may
+    //                have no menu at all (a Flick overlay is not one), so no
+    //                stack test can see it and none is applied. It owns the
+    //                hold and the hold does not expire: only its own release,
+    //                our close, or a load takes it back.
+    //   kOverride  -- release regardless of who holds it. The engine-side
+    //                backstop, the session reset and our own close speak
+    //                with this.
+    enum class SuppressBy
+    {
+        kEngine,
+        kClient,
+        kOverride,
+    };
+    // ★GAME THREAD ONLY. It reads the engine's menu map (to decide, and to say
+    // what was open), and RE::UI walks that map without a lock.
+    void Suppress(bool a_on, const char* a_why, SuppressBy a_by = SuppressBy::kEngine);
+
+    // ★★THE CLIENT'S DOOR, and the only one that is safe from anywhere.
+    //
+    // A mod dispatches its suppress on whatever thread it likes and SKSE runs
+    // the listener right there, so the ABI path must not touch the engine at
+    // all. This just parks the request; Tick picks it up on the game thread
+    // next frame and calls Suppress for real. One frame of latency buys the
+    // whole cross-thread hazard, which is the right trade -- the alternative
+    // is reading RE::UI's menu map while the game thread is editing it.
+    void RequestClientSuppress(bool a_on, const char* a_who);
+
     [[nodiscard]] bool IsSuppressed();
+    // True while the current hold belongs to a named client (kClient above).
+    [[nodiscard]] bool IsSuppressedByClient();
+    // ★The engine's own question: is our menu on the stack at all. Suppression
+    // does not move this -- that is the whole point of suppression, and it is
+    // what the ABI's IsMenuOpen answers.
+    [[nodiscard]] bool IsSessionOpen();
+
+    // ★★★WHICH KEY IS THIS EVENT BOUND TO, asked of the WHOLE control map.
+    //
+    // ControlMap::GetMappedKey searches ONE context and returns 0xFF for
+    // anything it does not find there, so "not in the context you guessed"
+    // comes back indistinguishable from "not bound at all". That cost us once
+    // already: the grid's close key asked the default context, got 0xFF, and
+    // fell back to a hardcoded I -- fine until a player rebound Inventory.
+    //
+    // Shared rather than copied. Two callers ask this now (the grid's close
+    // and magic keys, the wheel's cancel), and a second copy of a scan is a
+    // second chance for the two to disagree about what a binding is.
+    [[nodiscard]] std::uint32_t MappedScanCode(std::string_view a_event);
     // ★"Is the player looking at our board right now." Distinct from
     // IsMenuOpen, which answers a question about the engine's menu stack.
     // Anything that consumes input, draws, or means "the user can see this"
@@ -148,6 +204,28 @@ namespace FUI::UIRoot
     // the raw-input I-key close must not fire while the user is typing
     [[nodiscard]] bool IsTextInputActive();
 
+    // ★★True while main.cpp's "!nopause" gameplay-input mask is held. Set by
+    // the mask itself (one owner, SetGameplayInput) and read from the INPUT
+    // thread by Wheeler's InputLock, which silences the buttons the mask
+    // deliberately does not take down — kFighting and kSneaking carry the
+    // player's STANCE, so dropping them makes the engine sheathe the weapon and
+    // stand the player up. They stay up and the buttons go quiet instead. See
+    // kBlockedMask in main.cpp for the whole argument.
+    void               NoteGameplayMask(bool a_held);
+    [[nodiscard]] bool IsGameplayMasked();
+
+    // ★"!movewatch" — main.cpp's [MOVEWATCH] input-state trace. OFF by default;
+    // it prints a line whenever anything that can hold the player still
+    // changes (enabledControls, the engine's stored word, the input context
+    // stack, the movement/look handlers, blockPlayerInput). Kept because it is
+    // what finally named the conversation freeze — a dialogue photographing
+    // enabledControls through our mask — and the next input-state report will
+    // want the same timeline. The state lives beside the mask's own flag above
+    // for the same reason: main.cpp has no header, and this is the mask's
+    // module as far as everyone else is concerned.
+    void               SetMovementWatch(bool a_on);
+    [[nodiscard]] bool MovementWatch();
+
     // ---- gamepad -----------------------------------------------------------
     // The engine hides its Cursor Menu (and stops advancing MenuCursor) when a
     // controller is driving, which left this UI with no pointer at all. These
@@ -191,6 +269,17 @@ namespace FUI::UIRoot
         // for it without consulting the controller table (it sits past the
         // end of that array on purpose).
         kRecharge,
+        // ★Switch boards: Q on a keyboard, LS on a pad. Ours too -- vanilla
+        // has no such action, because vanilla's container screen is one list.
+        kSwapSide,
+        // ★★Walk the board strip (ITEMS · QUEST · KEYS) on the shoulders.
+        // PAD-ONLY, and the only two actions here that are: the strip is three
+        // words a mouse simply clicks, so there is no keyboard key to name and
+        // KeyLabel answers "" for them off a pad. They exist as actions anyway
+        // so the prompt bar can print the BUTTON, which is the one way a pad
+        // player finds out the gesture is there at all.
+        kTabPrev,
+        kTabNext,
     };
     [[nodiscard]] const char* KeyLabel(Act a_act);
 
@@ -230,6 +319,32 @@ namespace FUI::UIRoot
     // can both reach it without either owning the other.
     void               SetVanillaKey(int a_scancode);
     [[nodiscard]] int  VanillaKey();
+
+    // ---- TEST ONLY: "!npcvanilla = 1" in GridInventory_ui.ini -------------
+    //
+    // ★★★HAND THE FOLLOWER'S TRADE CONTAINER BACK TO THE ENGINE, and nothing
+    // else. The passthrough above is all-or-nothing: F11 and the watch file
+    // give every screen back, which is the wrong instrument for asking about
+    // one of them.
+    //
+    // Reported (Nexus, 1.5.1, alongside Nether's Follower Framework): the
+    // trade option went missing from a follower's dialogue and "Follow me"
+    // kept reappearing for a follower already following; removing this mod
+    // cured it. We touch no follower state -- one read of IsPlayerTeammate in
+    // the whole plugin, and DialogueMenu is not mentioned anywhere -- but we
+    // DO swallow the ContainerMenu that the trade line opens (kNPCMode), and
+    // that is the only surface we share with any of it.
+    //
+    // ★So this narrows the question to one variable. With it on, the follower
+    // trade is exactly vanilla and everything else is exactly ours: if the
+    // dialogue still breaks, the swallow is not the cause and the report
+    // belongs elsewhere; if it stops, we know which side to look at.
+    //
+    // ★Chests, corpses, merchants, pickpocketing and the player's own bags are
+    // all untouched by this -- kLoot, kSteal, kPickpocket and BarterMenu keep
+    // their interception.
+    void               SetNpcVanilla(bool a_on);
+    [[nodiscard]] bool NpcVanilla();
 
     // ★★Draw the next images as SILHOUETTES: the vertex tint supplies the
     // colour, the texture supplies only its ALPHA. Needed because an ImGui tint

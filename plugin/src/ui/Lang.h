@@ -4,11 +4,11 @@ namespace FUI::Lang
 {
     // i18n. Persisted as "!lang" = a language id ("en" / "ko" / a pack name).
     //
-    // ★GI74: ENGLISH IS THE ONLY COMPILED LANGUAGE. Korean, Chinese, Japanese
-    // and everything after them live as text in GridInventory_lang\, on the
-    // exact same footing as a user's own translation — so a typo in the Korean
-    // is a text edit, not a rebuild, and deleting the folder leaves a working
-    // English UI rather than a broken one.
+    // GI74: English is the only compiled language. Korean, Chinese, Japanese
+    // and everything after them live as text files in GridInventory_lang\, on
+    // exactly the same footing as a user's own translation. So a typo in the
+    // Korean is a text edit rather than a rebuild, and deleting the folder
+    // leaves a working English UI instead of a broken one.
     //
     // English stays compiled because it is the FALLBACK: any key a pack has
     // not translated resolves here, so there has to be a copy no file can
@@ -20,27 +20,32 @@ namespace FUI::Lang
     // impossible. Adding a string = adding one row here; translations catch up
     // through their .ini files and show English until they do.
     //   X(name, en)
-    // ★★EQUIP SLOT strings. The nine slots the doll knows, plus "Accessory"
-    // for every biped slot it does not -- which is what SlotAccepts already
+    // Equipment slot strings: the nine slots the doll knows, plus "Accessory"
+    // for every biped slot it does not. That matches what SlotAccepts already
     // files them as, so the tooltip and the doll cannot disagree.
-    // ★Bethesda names the mod slots too (kModBack and friends) and they are
-    // deliberately NOT used: modders ignore that intent (47 carries backpacks,
-    // capes, quivers and wings alike), while the NUMBER is never wrong and is
-    // what every mod page and conflict guide quotes.
-    // ★Nothing multi-line may sit INSIDE the macro below -- each line needs a
-    // trailing backslash and one missing ends it. That is why this is here.
+    //
+    // Bethesda does give the mod slots names (kModBack and friends), and we
+    // deliberately do not use them: modders ignore that intent -- slot 47
+    // carries backpacks, capes, quivers and wings alike -- whereas the NUMBER
+    // is never wrong, and is what every mod page and conflict guide quotes.
+    //
+    // Nothing multi-line may sit INSIDE the macro below, because each line
+    // needs a trailing backslash and one missing backslash ends the macro.
+    // That is why this note is out here.
     #define FUI_LANG_STRINGS(X)                                                                                 \
         X(Inventory, "Inventory")   /* main title — sentence case, like every bag title */                                                        \
         X(Edit, "EDIT")                                                                                     \
         X(Settings, "SETTINGS")                                                                             \
         X(ScaleLabel, "SCALE")                                                                        \
         X(FontScaleLabel, "TEXT SIZE")   /* player's font multiplier over the automatic scale */      \
-        X(BoardSizeLabel, "GRID SIZE")   /* main board, in cells: columns x rows */                   \
-        X(BoardSizeHint, "How many cells the inventory holds. Items that no longer fit move to the overflow rows below the board, which counts as over-encumbered.") \
         X(SkinLabel, "SKIN")                                                                                \
         X(LanguageLabel, "LANGUAGE")                                                                        \
         X(Gold, "GOLD")                                                                                     \
         X(Items, "ITEMS")                                                                                   \
+        X(QuestTab, "QUEST")   /* the board that holds quest objects (1.6) */                               \
+        X(KeysTab, "KEYS")     /* the board that holds keys (1.6) */                                        \
+        X(QuestTabHint, "Quest items live here. They take no space off your pack and never slow you down.") \
+        X(KeysTabHint, "Keys live here. They take no space off your pack and never slow you down.")         \
         X(EquipTab, "EQUIP")                                                                                \
         X(CloseHint, "I / ESC to close")                                                                    \
         X(ResetDefault, "Reset to default")                                                                 \
@@ -55,7 +60,7 @@ namespace FUI::Lang
         X(FootMove, "Move")                                                                                 \
         X(FootRotate, "Rotate")                                                                             \
         /* shown in a slider's note column while its value is being typed.       */                         \
-        /* ★One word: the note column is narrow and sits under the next row's    */                         \
+        /* One word: the note column is narrow and sits under the next row's     */                         \
         /* label, so the long form ran into the item art beside it. Esc is the   */                         \
         /* universal cancel and does not need saying.                            */                         \
         X(GaugeTyping, "Enter")                                                                             \
@@ -89,6 +94,7 @@ namespace FUI::Lang
         X(WeapCrossbow, "Crossbow")                                                                         \
         X(WeapStaff, "Staff")                                                                               \
         X(InventoryFull, "Inventory is full - no room for this item")   /* capacity: pickup blocked */      \
+        X(PartialPickup, "Took what fit - the rest stays on the ground")   /* capacity: split pickup */ \
         X(BuyPresetTab, "Buy Preset Tab")   /* L2 popups */                                                 \
         X(CostLabel, "Cost")                                                                                \
         X(NotEnoughGold, "Not enough gold")                                                                 \
@@ -140,6 +146,11 @@ namespace FUI::Lang
         X(MerchantGoldLabel, "Merchant Gold")                                                               \
         X(MerchantNoGold, "Merchant can't afford that")                                                     \
         X(SellFavoriteConfirm, "Sell this favorited item?")                                                 \
+        /* vanilla parity: a merchant too poor for the whole price ASKS instead of refusing -- */           \
+        /* confirming sells the goods for every coin they still have.                          */           \
+        X(MerchantShortGoldConfirm, "The merchant is short on gold. Sell for all they have?")               \
+        X(SellFullPrice, "Full price: %d G")   /* what the sale WOULD have paid */                          \
+        X(SellFavoriteNote, "This item is favorited")   /* the star's warning, as a note */                 \
         X(MerchantWontBuy, "The merchant doesn't deal in that")   /* Phase 6 restriction */                 \
         X(QuestItemLocked, "Quest items can't be removed")   /* Phase 7 quest guard */                      \
         X(TakeLabel, "Take")   /* slider action labels */                                                   \
@@ -149,7 +160,9 @@ namespace FUI::Lang
         /* (1.5.x) a whole-cell take that only partly fit -- the rest stayed put */                         \
         X(TookWhatFit, "Took what fit - the rest stayed behind")                                            \
         X(EquippedLabel, "Equipped")   /* shift-compare card */                                             \
-        X(HintTakeAll, "R  Take all")                                                                        \
+        /* %s = the take-all key from UIRoot::KeyLabel -- R on a keyboard,  */                              \
+        /* whatever the pad's own binding turned out to be on a controller.  */                             \
+        X(HintTakeAll, "%s  Take all")                                                                      \
         X(PrecacheLabel, "PRECACHE ALL")                                                                    \
         /* shown after a cache reset: it re-reads the drawn PNGs too, but a file */                         \
         /* ADDED since launch is not in the virtual Data folder to be found.     */                         \
@@ -205,7 +218,7 @@ namespace FUI::Lang
         X(ActRead, "read")                                                                                  \
         X(ActReread, "read again")                                                                          \
         X(BookRead, "Read")                                                                                 \
-        /* ★LOTD'S OWN WORD, counted in its plugin rather than guessed: "on     \
+        /* LOTD's own word, counted in its plugin rather than guessed: "on      \
            display" 50 times, "displayed" 46, and "donate" never once in a      \
            string a player reads. Its own messages are DBM_SetDisplayedMessage  \
            and DBM_SetDisplayedDoneMessage, and its dialogue says "the item is  \
@@ -229,7 +242,7 @@ namespace FUI::Lang
         X(ActUnequip, "unequip")   /* GI63: potions, food and poisons are drunk/eaten, not worn... */       \
         X(ActUse, "use")                                                                                    \
         X(ActDrop, "drop")                                                                                  \
-        /* ★Distinct from ActDrop: that one puts the item on the ground,                            \
+        /* Distinct from ActDrop: that one puts the item on the ground,                             \
            this one puts it in the open bin. Two disposals, and a player                            \
            reading one word must not have to guess which. */                                        \
         X(ActTrash, "discard")   /* RMB while the trash window is open */                           \
@@ -254,13 +267,15 @@ namespace FUI::Lang
         X(HintRowRevert, "Right-click: revert")                                                             \
         X(PromptMax, "all")                                                                                 \
         X(PromptTakeAll, "take all")                                                                        \
+        X(PromptSwitchSide, "switch side")   /* Q / LS: pointer to the other board (loot & barter) */       \
+        X(PromptTabs, "switch board")   /* LB/RB: walk ITEMS-QUEST-KEYS. Pad only (a mouse clicks it) */    \
         X(PromptQty, "set quantity")                                                                        \
         X(PromptSave, "save")                                                                               \
         X(PromptDrag, "drag")                                                                               \
         X(PromptWheel, "wheel")                                                                             \
         X(PromptClose, "close")   /* GI64 item descriptions. MISC records have no DESC field a... */        \
         X(PouchLine1, "· holding gold here clears its coin tiles")                                          \
-        X(PouchLine2, "· the amount still counts as gold you carry")   /* ★%s = the right-click label from UIRoot::KeyLabel, so the... */\
+        X(PouchLine2, "· the amount still counts as gold you carry")   /* %s = the right-click label from UIRoot::KeyLabel, so the...  */\
         X(PouchLine3, "· %s to withdraw")                                                                   \
         X(BagLabel, "Bag")                                                                                  \
         X(BagCells, "%d x %d = %d cells")                                                                   \
@@ -279,7 +294,9 @@ namespace FUI::Lang
         X(WheelKeyPress, "press keys...")   /* ...and hold as many as you want */                   \
         X(WheelGroup, "group")   /* quick menu: mouse up/down moves between the two fans */          \
         X(WheelPick, "pick")                                                                        \
-        X(WheelApply, "release to apply")
+        X(WheelApply, "release to apply") \
+        X(WheelPage, "page")   /* quick menu: W/S, only shown when there IS another page */ \
+        X(WheelClose, "press again to close")   /* ...when a TAP left it standing */
 
     enum class Str : int
     {
@@ -332,18 +349,20 @@ namespace FUI::Lang
     // title-bar button label and a window title. A button wants caps; a title
     // wants to match the bag titles beside it, and those come from item names
     // so they can never be capitalised.
-    // ★Done by transforming, not by adding a second key: a new key would be
-    // missing from every language file already in the wild and those users
-    // would get English. Case does not exist in CJK, so a Korean or Japanese
-    // title passes through untouched, and a translator who already wrote
-    // sentence case keeps exactly what they wrote.
-    // ★All-caps is a DISPLAY style, not a translation — so it belongs here and
-    // not in the strings. A built-in string that already reads "ARMOR" is
-    // silently replaced by whatever en.ini says (rule 91: the file wins), and
-    // the shipped en.ini says "Armor" — which is why the stats panel kept
-    // coming out sentence case no matter what the DLL held. Applying the case
-    // at the draw site makes the panel look the same with any language file,
-    // including one the player edited. ASCII only, so CJK passes through.
+    // This is done by transforming the string rather than by adding a second
+    // key. A new key would be missing from every language file already in the
+    // wild, and those users would get English. Case does not exist in CJK, so a
+    // Korean or Japanese title passes through untouched, and a translator who
+    // already wrote sentence case keeps exactly what they wrote.
+    //
+    // All-caps is a DISPLAY style rather than a translation, so it belongs here
+    // and not in the strings themselves. A built-in string that already reads
+    // "ARMOR" is silently replaced by whatever en.ini says (rule 91: the file
+    // wins), and the shipped en.ini says "Armor" -- which is why the stats
+    // panel kept coming out in sentence case no matter what the DLL held.
+    // Applying the case at the draw site makes the panel look the same with any
+    // language file, including one the player has edited. ASCII only, so CJK
+    // passes through unchanged.
     [[nodiscard]] inline std::string UpperCase(const char* a_s)
     {
         std::string out(a_s ? a_s : "");

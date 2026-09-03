@@ -32,39 +32,43 @@ namespace FUI
         // Where the sprite sits inside its footprint, in CELL WIDTHS, so one
         // value reads the same on a 1x1 and a 2x4.
         //
-        // ★★Both axes, and both icon styles. It began as a horizontal-only
-        // nudge for DRAWN icons — rotating a drawing moves its visual centre of
+        // Both axes, and both icon styles. This began as a horizontal-only
+        // nudge for DRAWN icons: rotating a drawing moves its visual centre of
         // mass, and tiles are laid out in rows, so sideways was where that
-        // showed. Free-form footprints made the other half necessary: an
-        // L-shaped print wants its haft down the left column and a T wants the
-        // head across the top, and no automatic centre can reach either. The
-        // auto rule (occupied-box middle) is right for every symmetric shape;
-        // this exists for the ones that are not.
+        // showed. Free-form footprints made the vertical half necessary too --
+        // an L-shaped footprint wants its haft down the left column and a T
+        // wants its head across the top, and no automatic centring can produce
+        // either. The automatic rule (the middle of the occupied box) is right
+        // for every symmetric shape; this exists for the ones that are not.
         float fx = 0.0f;       // icon offset X, in cells
         float fy = 0.0f;       // icon offset Y, in cells
-        // ★★1.0.5: the capture scene has exactly ONE light (measured: a warm
-        // point lamp up and to the screen-left of the item), so how bright an
-        // item reads depends on which face it happens to turn toward it — the
+        // 1.0.5: the capture scene has exactly one light -- measured as a warm
+        // point lamp, up and to the screen-left of the item -- so how bright an
+        // item reads depends on which face it happens to turn towards it. The
         // same book is legible at one rotation and a dark slab at another.
-        // These nudge the lamp for THIS item, as an OFFSET from the global
-        // default rather than an absolute angle: 0 means "wherever the default
-        // is", so retuning the default later moves every item that never
-        // needed a special case, and 0/0 costs nothing in the ini.
+        //
+        // These nudge the lamp for THIS item, expressed as an OFFSET from the
+        // global default rather than as an absolute angle. 0 therefore means
+        // "wherever the default is", so retuning the default later moves every
+        // item that never needed a special case, and 0/0 costs nothing in the
+        // ini.
         float lightAz = 0.0f;  // azimuth offset, degrees (+ = toward screen right)
         float lightEl = 0.0f;  // elevation offset, degrees (+ = higher)
         int   bag = 0;       // 1 = bag item: right-click opens its own grid window
         int   bw = 4;        // bag grid size (columns x rows)
         int   bh = 4;
-        // ★Typed bags (PLAN_TYPED_BAGS.md): the BagFilter id this bag accepts —
-        // "ore", "alchemy", ... EMPTY = the general-purpose bag this mod has
-        // always shipped, which takes anything that overflows. Empty must stay
-        // the default: every bag already in a player's save has no accept token
-        // and has to keep behaving exactly as before.
+        // Typed bags (PLAN_TYPED_BAGS.md): the BagFilter id this bag accepts --
+        // "ore", "alchemy", and so on. EMPTY means the general-purpose bag this
+        // mod has always shipped, which takes anything that overflows. Empty
+        // has to remain the default, because every bag already in a player's
+        // save carries no accept token and must keep behaving exactly as
+        // before.
         std::string accept;
         int   stack = 0;     // G3: per-item stack cap (0 = category default)
-        // ★Multi-pouch: this item is a GOLD POUCH holding up to N (0 = not a
-        // pouch). The shipped pouch (0x804) is builtin at 10,000; a future
-        // pouch form only needs an ESP record and a "pouchcap:N" here.
+        // Multi-pouch: this item is a GOLD POUCH holding up to N coins, where 0
+        // means it is not a pouch. The shipped pouch (0x804) is built in at
+        // 10,000; any future pouch form needs only an ESP record and a
+        // "pouchcap:N" line here.
         int   pouchCap = 0;
     };
 
@@ -115,14 +119,14 @@ namespace FUI
 
         inline constexpr float kNoClamp = 1.0e9f;
         inline constexpr DefField kDefFields[] = {
-            // ★★A CEILING, THE SAME ONE THE BAG BLOCK USES. These two were the
+            // A ceiling, the same one the bag block uses. These two were the
             // only fields in the table left open-ended, and h is the one that
             // reaches memory unchecked: MaskOf trims w to the board's column
-            // count (Grid::BaseCols) and then does rows.assign(h, ...).
-            // A preset with `h:500000` -- and sharing
-            // presets is a shipped feature, so the file need not be ours --
-            // costs tens of megabytes per item, on every rebuild. The tallest
-            // real item is 4 cells.
+            // count (Grid::BaseCols) and then calls rows.assign(h, ...). A
+            // preset with `h:500000` therefore costs tens of megabytes per
+            // item, on every rebuild -- and sharing presets is a shipped
+            // feature, so the file need not be one of ours. The tallest real
+            // item is 4 cells.
             { "w",     nullptr,         &ItemDef::w,     1.0f,     16.0f,    0, DefRule::kCoreDims },
             { "h",     nullptr,         &ItemDef::h,     1.0f,     16.0f,    0, DefRule::kCoreDims },
             { "rx",    &ItemDef::rx,    nullptr,        -kNoClamp, kNoClamp, 0, DefRule::kCore },
@@ -130,9 +134,10 @@ namespace FUI
             { "rz",    &ItemDef::rz,    nullptr,        -kNoClamp, kNoClamp, 0, DefRule::kCore },
             { "scale", &ItemDef::scale, nullptr,        -kNoClamp, kNoClamp, 2, DefRule::kCore },
             { "bag",   nullptr,         &ItemDef::bag,   0.0f,     1.0f,     0, DefRule::kBagBlock },
-            // ★16, not 10: the Mysterious Bag is 10x14 and a 10-row ceiling
-            // silently cropped it to 10x10 — a def that parses, saves and looks
-            // fine while quietly being a different item than the one authored.
+            // The ceiling is 16 rather than 10: the Mysterious Bag is 10x14,
+            // and a 10-row ceiling silently cropped it to 10x10 -- producing a
+            // def that parses, saves and looks fine while quietly describing a
+            // different item from the one that was authored.
             { "bw",    nullptr,         &ItemDef::bw,    1.0f,     16.0f,    0, DefRule::kBagBlock },
             { "bh",    nullptr,         &ItemDef::bh,    1.0f,     16.0f,    0, DefRule::kBagBlock },
             { "stack", nullptr,         &ItemDef::stack, 0.0f,     999.0f,   0, DefRule::kIfPositive },

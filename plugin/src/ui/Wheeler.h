@@ -113,23 +113,19 @@ namespace FUI::Wheeler
     // centre, which is the only way "flick a direction" feels right.
     bool OnMouseMove(const RE::MouseMoveEvent* a_event);
 
-    // ★★Silence an event the wheel did not claim, IN PLACE, while it is open.
-    // Nothing but the wheel's own controls should reach the game -- not
-    // movement, not sprint, not the console.
+    // ★★SILENCING IS NOT DONE HERE, and this note is the second half of the one
+    // in main.cpp's input sink. A Mute() lived at this spot and blanked events
+    // inside OUR sink -- but an event is one object shared by the whole chain,
+    // so blanking it there also blanked it for every listener downstream, and
+    // which side of us the game sits on is not ours to decide.
     //
-    // ★★It zeroes the VALUE rather than dropping the event, and that choice is
-    // what makes it safe. The engine reads a button through three predicates
-    // built from value and held-duration, so value = 0 lands each case exactly
-    // where it should:
-    //     just pressed  (held == 0) -> neither down, held nor up: ignored
-    //     already held  (held  > 0) -> reads as UP: the game LETS GO
-    // Dropping the event instead would strand whatever was held when the wheel
-    // opened -- walk, open the wheel, and the character walks forever. This way
-    // the engine tidies itself up on the first frame.
-    //
-    // Mouse and stick motion are zeroed for the same reason: the camera must
-    // not drift while the wheel owns the hand.
-    void Mute(RE::InputEvent* a_event);
+    // It is done at PlayerControls' and MenuControls' entry points instead
+    // (InputLock / MenuLock in the cpp), which blank, call the original, and
+    // put the value back -- no blank without a restore. That discipline is what
+    // keeps a key from sticking: the engine reads a button through predicates
+    // built from value and held-duration, so a blank that is never restored
+    // strands whatever was held when the wheel opened, and the character walks
+    // forever. Blanking a copy the game has already been shown does not.
 
     // ---- frame -----------------------------------------------------------
     // Game-update hook: advances the open/close animation and owns the
@@ -162,15 +158,13 @@ namespace FUI::Wheeler
     [[nodiscard]] const char* ComboText(bool a_pad);
 
     // ---- rebinding -------------------------------------------------------
-    // While capture is on, OnButton RECORDS what is pressed instead of acting
-    // on it, and consumes it so nothing else in the game sees the keys.
-    // ★The set is taken when the last key comes UP, not on the first key down:
-    // that is what makes "hold three keys, let go, they are all bound" work
-    // without asking the player to confirm anything.
-    void BeginCapture(bool a_pad);
-    void CancelCapture();          // Esc, or the settings panel closing
-    [[nodiscard]] bool Capturing();
-    [[nodiscard]] const char* CaptureText();   // live preview while held
+    // ★IN-GAME KEY CAPTURE IS GONE, deliberately. It recorded a held set and
+    // bound it when the last key came up -- correct machinery that nothing
+    // could start: the settings row that armed it went away with the
+    // Favorites-key move, and AdoptFavoritesKey overwrote whatever it produced.
+    // Its own note said to delete it if that day did not come, and it did not.
+    // Rebinding lives in GridInventory_ui.ini (`!wheelkey` / `!wheelkeypad`);
+    // git history has the capture code if a combination is ever wanted.
 
     // ★★A tab was deleted, so every tab above it just changed number. The
     // wheel's own arrangement stores those numbers, and this is the ONE change
@@ -221,6 +215,22 @@ namespace FUI::Wheeler
     // between. The act has to report itself.
     void ForgetFavorite(RE::FormID a_form);
 
+    // ★★★...AND THE MOMENT ONE GOES ON, which is the only moment the ORDER of
+    // starring is knowable at all.
+    //
+    // The engine records that a thing is starred and never when. Asked later,
+    // the inventory answers in the order of the forms' ADDRESSES -- so a wheel
+    // filled from scratch came out shuffled however carefully the player had
+    // starred things one at a time. Spells escaped it by accident:
+    // MagicFavorites is an array the engine appends to, so it already carries
+    // the history that items never had.
+    //
+    // Called as the star is made, this gives items the same history. Stars that
+    // predate it -- or that were made in the vanilla favourites menu, which
+    // does not pass through here -- are still seated in whatever order they are
+    // first seen; there is nothing left to ask by then.
+    void NoteStarred(RE::FormID a_form);
+
     // ---- assets ----------------------------------------------------------
     // ★★Drop the wheel's own drawn-icon cache. The medallions come out of the
     // same fallback folder the grid draws from -- "the folder IS the surface
@@ -239,6 +249,21 @@ namespace FUI::Wheeler
     // has taken that menu's place, so it answers to that key and follows the
     // player when they rebind it in the game's own controls.
     void AdoptFavoritesKey();
+    // ★...unless the player has put the wheel somewhere of its own (!wheelkey
+    // in the ui ini). 0 restores "follow the game". Set before the first
+    // AdoptFavoritesKey and re-applied by every later one, so a rebind of the
+    // game's Favourites key can no longer drag the wheel back on top of it.
+    // Exists because Inventory rebound onto that key became unopenable: the
+    // wheel blanks its hotkey before any menu can see it.
+    // ★★A TAP HOLDS THE WHEEL OPEN. Under this many milliseconds a press is a
+    // tap and the wheel stays up until the key is pressed again; over it the
+    // press is the hold it always was and letting go applies. The two coexist,
+    // so nobody has to choose and nobody's habit breaks.
+    void          SetTapMs(int a_ms);
+    [[nodiscard]] int TapMs();
+
+    void          SetKeyOverride(bool a_pad, std::uint32_t a_code);
+    [[nodiscard]] std::uint32_t KeyOverride(bool a_pad);
 
     // ---- persistence -----------------------------------------------------
     // ★The arrangement the player dragged every wheel into. Per save, like the
@@ -253,7 +278,10 @@ namespace FUI::Wheeler
     // still load -- each version reads as far as it goes and the rest is
     // rebuilt or defaulted on the next open.
     inline constexpr std::uint32_t kRecordType = 'GWHL';
-    inline constexpr std::uint32_t kVersion = 3;
+    // 4: the player's own wheels. A slot is written as a LIST so that
+    //    several things in one place can arrive later without a second
+    //    migration -- see SaveGame.
+    inline constexpr std::uint32_t kVersion = 4;
 
     void SaveGame(SKSE::SerializationInterface* a_intfc);
     void LoadRecord(SKSE::SerializationInterface* a_intfc, std::uint32_t a_version);

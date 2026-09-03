@@ -1,7 +1,7 @@
 ﻿#include "ui/IconCache.h"
 #include "ui/Grid.h"
 #include "ui/Equip.h"
-#include "ui/GridMenu.h"   // NoPause/SetNoPause -- the "!nopause" test switch
+#include "ui/GridMenu.h"   // NoPause/SetNoPause -- the "!nopause" setting
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
 #include "ui/Theme.h"
@@ -242,6 +242,60 @@ namespace FUI
         return a_default;
     }
 
+    int WinManager::ReadWheelTapMs(int a_default)
+    {
+        std::ifstream in(kUiIniPath);
+        if (!in) return a_default;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            auto key = line.substr(0, eq);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key != "!wheeltapms") continue;
+            try {
+                const int v = std::stoi(line.substr(eq + 1));
+                // ★Bounded rather than trusted. Under ~60ms no human press is
+                // a tap and every hold would toggle; over ~2s a hold is being
+                // read as a tap and the wheel sticks open by surprise.
+                if (v < 60 || v > 2000) return a_default;
+                return v;
+            } catch (...) {
+                return a_default;
+            }
+        }
+        return a_default;
+    }
+
+    std::uint32_t WinManager::ReadWheelKey(bool a_pad)
+    {
+        // Same shape and the same reason as ReadWheelEnabled: the hotkey has to
+        // be right before the first press, which is long before any window
+        // exists to load the rest of this file.
+        const char* want = a_pad ? "!wheelkeypad" : "!wheelkey";
+        std::ifstream in(kUiIniPath);
+        if (!in) return 0;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            auto key = line.substr(0, eq);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key != want) continue;
+            try {
+                const int v = std::stoi(line.substr(eq + 1));
+                // Negative is nonsense and 0xFF is the engine's "not bound" --
+                // either would bind the wheel to nothing, which is worse than
+                // following the game.
+                if (v <= 0 || v == 0xFF) return 0;
+                return static_cast<std::uint32_t>(v);
+            } catch (...) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
     void WinManager::Load()
     {
         // ★★★RE-READ ONLY WHAT HAS CHANGED. UIRoot::OnShow calls this on EVERY
@@ -379,6 +433,13 @@ namespace FUI
                 DeltaWatch::SetEnabled(rest == "1" || rest == "true");
                 continue;
             }
+            // Input-state trace: what is holding the player still. OFF by
+            // default -- see UIRoot::SetMovementWatch and the [MOVEWATCH] note
+            // in main.cpp.
+            if (key == "!movewatch") {
+                UIRoot::SetMovementWatch(rest == "1" || rest == "true");
+                continue;
+            }
             // Typed-bags phase 0. OFF by default because the sweep it runs is
             // the first open's biggest single cost -- see BagFilter.h.
             if (key == "!bagdump") {
@@ -428,6 +489,11 @@ namespace FUI
                 Equip::SetDrawerOpen(rest == "1" || rest == "true");
                 continue;
             }
+            // Test switch, not a setting: see UIRoot::SetNpcVanilla.
+            if (key == "!npcvanilla") {
+                UIRoot::SetNpcVanilla(rest == "1" || rest == "true");
+                continue;
+            }
             // Test switch, not a setting: see Grid::SetRebuildDrop.
             if (key == "!rbdrop") {
                 Grid::SetRebuildDrop(rest.c_str());
@@ -456,6 +522,13 @@ namespace FUI
                     try { v[n] = std::stoi(tok); } catch (...) {}
                 }
                 Grid::SetBaseSize(v[0], v[1]);
+                continue;
+            }
+            // ★W3: does carry weight add rows at all? The switch, separate
+            // from the three numbers below -- see Grid.h. Read before them or
+            // after them, it makes no difference: nothing here measures.
+            if (key == "!cwrows") {
+                Grid::SetCwRows(!(rest == "0" || rest == "false"));
                 continue;
             }
             // ★W3: carry-weight bonus -> extra cells. Three values: CW per
@@ -601,6 +674,24 @@ namespace FUI
             }
             if (key == "!wheelon") {        // quick wheel on/off
                 try { Wheeler::SetEnabled(std::stoi(rest) != 0); } catch (...) {}
+                continue;
+            }
+            // ★The wheel's own key. Re-applied on every load precisely BECAUSE
+            // this file is re-read on every inventory open: the override has to
+            // outlive that, or the game's Favourites binding takes the wheel
+            // back the first time the player opens a bag.
+            if (key == "!wheeltapms") {
+                try { Wheeler::SetTapMs(std::stoi(rest)); } catch (...) {}
+                continue;
+            }
+            if (key == "!wheelkey" || key == "!wheelkeypad") {
+                const bool pad = key == "!wheelkeypad";
+                try {
+                    const int v = std::stoi(rest);
+                    Wheeler::SetKeyOverride(
+                        pad, (v > 0 && v != 0xFF) ? static_cast<std::uint32_t>(v) : 0u);
+                } catch (...) {}
+                Wheeler::AdoptFavoritesKey();   // resolve it now, either way
                 continue;
             }
             if (key == "!merchgoldinf") {   // F3: unlimited merchant gold
@@ -938,10 +1029,12 @@ namespace FUI
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
         if (BagFilter::DumpsEnabled()) out << "!bagdump = 1\n";
-        // ★A measurement mode, not a setting -- written only while ON so an
-        // ordinary install never carries the line, and preserved across a save
-        // so a tester who rearranges a window mid-experiment does not silently
-        // fall back to a paused board halfway through the A/B.
+        if (UIRoot::MovementWatch()) out << "!movewatch = 1\n";
+        // ★The unpaused-board setting (GridMenu.h). Written only while ON: the
+        // code default is paused, so a file without the line already says
+        // what an absent line means, and a shipped ui.ini that carries
+        // "!nopause = 1" keeps it across every rewrite. A player who sets it
+        // to 0 sees the line drop out, which is the same default again.
         if (GridInventoryMenu::NoPause()) out << "!nopause = 1\n";
         // ★Inverted since their promotions: ON is the default, so the line is
         // written only while OFF -- the escape hatch survives a restart, and
@@ -957,6 +1050,7 @@ namespace FUI
         }
         if (Equip::DrawerOpen())   out << "!accdrawer = 1\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
+        if (UIRoot::NpcVanilla())  out << "!npcvanilla = 1\n";
         // The main board's size, in cells
         // 기본 인벤토리 격자 크기
         // ★★WRITTEN UNCONDITIONALLY, like !cwcells and unlike the test
@@ -964,7 +1058,12 @@ namespace FUI
         // key that is only read and never written is a key the next settings
         // change silently deletes -- the player's board would quietly revert
         // the first time they touched the SCALE slider.
-        out << "; !basegrid = main board columns, rows (default "
+        // ★(1.6) ...and it is the ONLY way to set the board now: the GRID SIZE
+        // sliders are gone from the settings window, so this line is what a
+        // player is pointed at. It sizes all three boards -- ITEMS, QUEST and
+        // KEYS are one shape.
+        out << "; !basegrid = board columns, rows -- ITEMS / QUEST / KEYS "
+               "all take this shape (default "
             << Grid::kDefCols << ", " << Grid::kDefRows << "; cols "
             << Grid::kMinCols << "-" << Grid::kMaxCols << ", rows "
             << Grid::kMinBoardRows << "-" << Grid::kMaxBoardRows << ")\n";
@@ -974,6 +1073,15 @@ namespace FUI
             << Grid::BaseRowsSetting() << "\n";   // the REQUEST — see Grid.h
         // Carry Weight bonus -> extra inventory cells
         // 소지 중량 보너스의 칸 환전
+        // ★The switch, written UNCONDITIONALLY next to the numbers it governs
+        // -- the same reasoning as !basegrid. Save() truncates and rewrites the
+        // whole file, so a key that is only ever read is a key the next
+        // settings change deletes; and this one is meant to be found by a
+        // player reading their ini, which the inverted test-switch pattern
+        // above (write only while OFF) would hide until it was already set.
+        out << "; !cwrows = 1 to let carry weight add rows, 0 to switch it off\n";
+        out << "; !cwrows = 소지 중량으로 칸을 늘릴지 여부 (1 = 켬, 0 = 끔)\n";
+        out << "!cwrows = " << (Grid::CwRows() ? 1 : 0) << "\n";
         out << "; !cwcells = CW per cell (0 = off), baseline (0 = auto: race base), max bonus cells\n";
         out << "; !cwcells = 칸당 CW (0 = 끔), 기준선 (0 = 자동: 종족 기본치), 보너스 칸 상한\n";
         out << "!cwcells = " << Grid::CwPerCell() << ", " << Grid::CwBase()
@@ -990,9 +1098,32 @@ namespace FUI
         out << "!wheelon = " << (Wheeler::Enabled() ? 1 : 0) << "\n";
         out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";
         out << "!merchbuyall = " << (LootBarter::MerchantBuysAll() ? 1 : 0) << "\n";
-        // ★No wheel hotkey written any more -- see the reader above. It lives
-        // in the game's own controls, and writing a second copy here is what
-        // let an old value climb back in.
+        // ★The wheel's key: the OVERRIDE, never the resolved value. Writing
+        // what the wheel is currently on is what let an old number climb back
+        // over the player's rebind, which is why the previous entry was
+        // removed. This one is only ever what the player typed here.
+        out << "\n";
+        out << "; Wheel hotkey. 0 = follow the game's Favourites binding (default).\n";
+        out << ";   Set a DirectInput scan code to give the wheel a key of its own --\n";
+        out << ";   needed if you put Inventory on the Favourites key, since the wheel\n";
+        out << ";   hides that key from the game and the bag would never open.\n";
+        out << ";   Common codes: Q=16 E=18 R=19 F=33 G=34 V=47 X=45 Z=44 CapsLock=58\n";
+        out << "; 휠 단축키. 0이면 게임의 즐겨찾기 키를 따라갑니다 (기본값).\n";
+        out << ";   DirectInput 스캔 코드를 넣으면 휠이 그 키를 씁니다. 즐겨찾기 키에\n";
+        out << ";   인벤토리를 배정했다면 반드시 옮겨야 합니다 -- 휠이 그 키를 게임에서\n";
+        out << ";   감추기 때문에 가방이 아예 열리지 않습니다.\n";
+        out << ";   자주 쓰는 코드: Q=16 E=18 R=19 F=33 G=34 V=47 X=45 Z=44 CapsLock=58\n";
+        out << "!wheelkey = " << Wheeler::KeyOverride(false) << "\n";
+        out << "; Gamepad button, same rule. 0 = follow the game.\n";
+        out << "; 게임패드 버튼, 규칙 동일. 0이면 게임을 따라갑니다.\n";
+        out << "!wheelkeypad = " << Wheeler::KeyOverride(true) << "\n";
+        out << "; A press SHORTER than this is a tap: the wheel stays open until\n";
+        out << ";   you press again. Longer is the hold it always was -- let go\n";
+        out << ";   and it applies. Milliseconds, 60 to 2000.\n";
+        out << "; 이 시간보다 짧게 누르면 탭입니다. 다시 누를 때까지 휠이\n";
+        out << ";   열린 채로 있습니다. 그보다 길면 종전과 같습니다 -- 놓는 순간\n";
+        out << ";   적용됩니다. 밀리초 단위, 60~2000.\n";
+        out << "!wheeltapms = " << Wheeler::TapMs() << "\n\n";
         for (const auto& w : m_wins) {
             if (!w.posKnown) continue;
             out << w.key << " = "

@@ -98,12 +98,46 @@ namespace GridInvAPI
     // the request came from a MOD rather than from the game reads this one.
     //
     // The grid stays OPEN throughout: its board, the item on the cursor and
-    // every sub-window survive, and IsMenuOpen("GridInventoryMenu") keeps
-    // answering true. What stops is drawing and input.
+    // every sub-window survive, and IsMenuOpen() keeps answering true --
+    // it reports the SESSION, not whether the board is on screen, so it does
+    // not move when you suppress. (1.5.1 answered liveness there by mistake,
+    // which told a client its own suppression was the player closing the
+    // inventory; fixed in 1.5.2.)
     //
-    // ★Release it when your window closes. The host restores itself if
-    // nothing is left above it, but that costs a fraction of a second of
-    // nobody being able to see either window.
+    // ★★YOU OWN THE HOLD. This message is not the same as kHide in one way
+    // that matters: the host's safety net recovers a kHide by watching the
+    // MENU STACK, and your window may not be on it at all -- an overlay
+    // drawn outside the menu system is invisible to any such test, and the
+    // net used to revoke those suppressions about a fifth of a second in.
+    // A hold taken with this message is not second-guessed that way, and the
+    // host's own kShow will not break it either.
+    //
+    // ★★AND THERE IS NO TIMER BEHIND IT. The hold does not expire. What that
+    // buys costs one obligation, and it is absolute:
+    //
+    //   RELEASE IT (suppress = 0) ON EVERY PATH THAT CLOSES YOUR WINDOW.
+    //
+    // Not just the normal one. The cancel, the error return, the hotkey that
+    // closes it, the load that happens while it is up -- every exit. While
+    // you hold this the player cannot see the inventory and cannot reach it,
+    // so a path that forgets is a soft lock, and no timer is coming: a build
+    // of this host did carry a ten-minute backstop and it was removed,
+    // because nobody sits in front of a frozen game for ten minutes. They
+    // kill the process at two.
+    //
+    // The only other things that take the hold back are the ones that end the
+    // session your window was living over anyway: our own close, a save load,
+    // and a new game.
+    //
+    // ★SEND IT WHILE THE INVENTORY IS OPEN. There is nothing to step aside
+    // from otherwise, and a hold banked against a session that has not started
+    // would surface at the next open as a board that never draws. So one taken
+    // with the inventory closed is refused, with a line in our log saying so.
+    // Check IsMenuOpen() first, or just send it when your window opens over us.
+    //
+    // ★DISPATCH FROM ANY THREAD. It is parked and applied on the next game
+    // frame, so the grid goes quiet a frame after you ask rather than inside
+    // your Dispatch call. Nothing here touches the engine on your thread.
     inline constexpr std::uint32_t kMsgSuppressUI      = 0x47495355;  // 'GISU'
 
     // ---- limits -----------------------------------------------------------
@@ -231,8 +265,14 @@ namespace GridInvAPI
         // any thread; the host only sets a flag.
         void (*RequestRebuild)();
 
-        // True while the grid menu is open. A provider that mutates inventory
-        // should check this before doing anything the user could be looking at.
+        // True while the grid MENU SESSION is open: its board, the item on the
+        // cursor and every sub-window are alive. Suppression (kMsgSuppressUI)
+        // does NOT move this -- a hidden grid is still an open one, and a
+        // client reading its own suppression back as a close is what this
+        // answering liveness caused in 1.5.1. A provider that mutates
+        // inventory should check this first; the session is what makes a
+        // mutation dangerous, not whether pixels are on screen.
+        // Main/game thread only (reads RE::UI's menu map, which is unlocked).
         bool (*IsMenuOpen)();
 
         // Grant-time tile snapshot: how many grid cells `base` occupies RIGHT NOW

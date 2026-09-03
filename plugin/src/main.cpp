@@ -2,10 +2,10 @@
 #include "game/BagFilter.h"
 #include "game/Census.h"
 #include "game/Costume.h"
+#include "game/DualRing.h"
 #include "game/DeltaWatch.h"
 #include "game/Ledger.h"
 #include "game/WornLedger.h"
-#include "game/DualRing.h"
 #include "game/GoldCoins.h"
 #include "game/Lotd.h"
 #include "ui/Editor.h"
@@ -124,11 +124,115 @@ namespace
     // ★★SAVE THE WORD THE ENGINE ACTUALLY HAD, and put that back. A blanket
     // re-enable on close is not a restore: a quest, a cutscene or another mod
     // may have disabled controls for its own reasons before we ever opened, and
-    // handing them all back would be us ending someone else's scene. That is
-    // what GetControlsState/SetControlsState are for.
+    // handing them all back would be us ending someone else's scene.
+    //
+    // ★★★AND ONE WRITE AT OPEN IS NOT A MASK, IT IS A WISH.
+    //
+    // Reported: the block holds for the inventory and does nothing when the
+    // grid comes up over a chest or a corpse. The log says the mask WAS laid
+    // down on that open, at the same point in the same callback as every other
+    // open ([INPUT] gameplay controls masked, 3ms after the ContainerMenu
+    // close) -- so the mask is not missing, it is being overwritten.
+    //
+    // Which is exactly the shape the loot/barter door has and the inventory
+    // door does not. The container is reached by ACTIVATING a reference: the
+    // engine's own activation bookkeeping runs on the far side of the close
+    // event we open from, and whatever it hands back to enabledControls lands
+    // after our write. Same for the barter screen (dialogue) and the
+    // pickpocket/steal modes, which are the same ContainerMenu.
+    //
+    // The same log carries the second half of it. The word we saved decayed
+    // across the session -- 0xffffffff, then 0xffffffdf (kPOVSwitch), then
+    // 0xffffff9f (kPOVSwitch + kFighting) -- because a lockpicking menu's own
+    // disable was still outstanding when we saved, and SetControlsState wrote
+    // that whole stale word back at close. We were freezing OTHER people's
+    // transient disables permanently.
+    //
+    // So both halves stop being whole-word one-shots:
+    //
+    //   * the mask is RE-ASSERTED every unpaused frame it is meant to hold
+    //     (ReassertGameplayInput, driven from the Update hook, the same
+    //     treatment and the same reason as SetMoveInput above), which does not
+    //     care who overwrites it or when; and
+    //   * we remember the bits WE actually turned off and give back only
+    //     those. A bit that was already off at open is somebody else's to
+    //     restore, and one they turn off during our session stays off.
     std::uint32_t g_savedEnabled = 0;
-    std::uint32_t g_savedStored  = 0;
+    std::uint32_t g_savedStored  = 0;   // the engine's stash AS FOUND at open
+    std::uint32_t g_maskedBits   = 0;   // bits this mask actually took down
     bool          g_gameplayOff  = false;
+    bool          g_maskHealing  = false;   // a heal is in flight (log it once)
+
+    // ★kMenu and kConsole are DELIBERATELY absent. kMenu is the channel our own
+    // menu is fed on (Creator sets the kInventory context for exactly that
+    // reason), so masking it would silence the grid along with the world; and
+    // the console is a separate window the player must keep being able to
+    // raise -- ProcessScaleformEvent already stands aside for it rather than
+    // fighting it.
+    // ★★★kFighting AND kSneaking ARE DELIBERATELY ABSENT TOO, and they cost
+    // more to leave out than the two above.
+    //
+    // Reported, twice, in the same shape. First: opening the inventory -- or
+    // the grid over a body -- always sheathes the player's weapons. Then, with
+    // that fixed: it still stands them up out of sneak.
+    //
+    // Nothing in this plugin sheathes or unsneaks anything; the engine does,
+    // and it does it because of these two bits. Taking them down is the same
+    // door Papyrus's DisablePlayerControls(abFighting, abSneaking) goes
+    // through, and putting the weapon away and standing the player up is part
+    // of what that door DOES. Under kPausesGame nobody ever saw either one,
+    // because the mask did not exist there; the mask arrived with "!nopause"
+    // and brought both with it.
+    //
+    // ★★THE TELL, for the next bit that turns out to belong on this list: a
+    // USER_EVENT_FLAG is not always input-only. Most of them (kMovement,
+    // kLooking, kActivate, kJumping...) only decide whether a button reaches a
+    // handler, and taking one down changes no world state at all. These two
+    // ALSO carry a piece of the player's stance, and the engine settles that
+    // stance the moment the bit drops. A flag that names a STATE the player can
+    // be in, rather than an action they can take, cannot go through ControlMap.
+    //
+    // Neither can be undone after the fact. Re-drawing or re-crouching on close
+    // is a flicker at best and a fight with the engine at worst, and neither
+    // answers the real complaint: the world is LIVE now, so a player who opens
+    // the grid mid-fight has been disarmed while they browse, and one who opens
+    // it while sneaking past a draugr has been stood up in front of it.
+    //
+    // So both bits stay up and the BUTTONS behind them are silenced one layer
+    // earlier instead -- blank-call-restore at PlayerControls' own entry point,
+    // where the wheel already does exactly this for movement (Wheeler.cpp,
+    // InputLock). enabledControls never loses either flag, so the engine is
+    // never told to change anyone's stance, and a button held across the
+    // boundary still reads as released to the handler that has to tidy it up.
+    //
+    // ★No enum operators on USER_EVENT_FLAG in this CommonLib line, so the mask
+    // is built in the underlying type and cast back at the call.
+    constexpr std::uint32_t kBlockedMask =
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kMovement)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kLooking)   |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kActivate)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kPOVSwitch) |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kMainFour)  |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kWheelZoom) |
+        static_cast<std::uint32_t>(RE::UserEvents::USER_EVENT_FLAG::kJumping);
+
+    // Takes down every masked bit that is currently up and records it as ours.
+    // Returns the bits it had to take down this time -- zero means the mask was
+    // already whole, which is what an ordinary re-assert costs.
+    std::uint32_t ApplyGameplayMask(RE::ControlMap* a_cm)
+    {
+        using UEFlag = RE::UserEvents::USER_EVENT_FLAG;
+        std::uint32_t enabled = 0, stored = 0;
+        a_cm->GetControlsState(enabled, stored);
+        const std::uint32_t up = enabled & kBlockedMask;
+        if (up == 0) return 0;
+        // a_storeState false: WE are holding the previous state, and letting
+        // the engine stack its own copy as well is two restores racing for the
+        // same word.
+        a_cm->ToggleControls(static_cast<UEFlag>(up), false, false);
+        g_maskedBits |= up;
+        return up;
+    }
 
     void SetGameplayInput(bool a_enable)
     {
@@ -138,39 +242,277 @@ namespace
 
         if (!a_enable) {
             if (g_gameplayOff) return;   // already ours; do not re-save over it
+            // ★The stash is not ours to hold, but it IS ours to remember: the
+            // repair at the far end has to be able to tell a photograph taken
+            // DURING our session from one that was already there (or from no
+            // photograph at all). See the restore branch.
             cm->GetControlsState(g_savedEnabled, g_savedStored);
-            // ★kMenu and kConsole are DELIBERATELY absent. kMenu is the channel
-            // our own menu is fed on (Creator sets the kInventory context for
-            // exactly that reason), so masking it would silence the grid along
-            // with the world; and the console is a separate window the player
-            // must keep being able to raise -- ProcessScaleformEvent already
-            // stands aside for it rather than fighting it.
-            // ★No enum operators on USER_EVENT_FLAG in this CommonLib line, so
-            // the mask is built in the underlying type and cast back once.
-            constexpr auto kBlocked = static_cast<UEFlag>(
-                static_cast<std::uint32_t>(UEFlag::kMovement)  |
-                static_cast<std::uint32_t>(UEFlag::kLooking)   |
-                static_cast<std::uint32_t>(UEFlag::kActivate)  |
-                static_cast<std::uint32_t>(UEFlag::kPOVSwitch) |
-                static_cast<std::uint32_t>(UEFlag::kFighting)  |
-                static_cast<std::uint32_t>(UEFlag::kSneaking)  |
-                static_cast<std::uint32_t>(UEFlag::kMainFour)  |
-                static_cast<std::uint32_t>(UEFlag::kWheelZoom) |
-                static_cast<std::uint32_t>(UEFlag::kJumping));
-            // a_storeState false: WE are holding the previous state above, and
-            // letting the engine stack its own copy as well is two restores
-            // racing for the same word.
-            cm->ToggleControls(kBlocked, false, false);
+            g_maskedBits  = 0;
+            g_maskHealing = false;
+            ApplyGameplayMask(cm);
             g_gameplayOff = true;
-            logger::info("[INPUT] gameplay controls masked (enabled was {:#010x})",
-                         g_savedEnabled);
+            // ★The half of the mask ControlMap cannot carry: kFighting and
+            // kSneaking stay up (they are what sheathe and un-crouch the
+            // player), so the BUTTONS behind them are blanked at
+            // PlayerControls' entry point for as long as this holds.
+            FUI::UIRoot::NoteGameplayMask(true);
+            logger::info("[INPUT] gameplay controls masked (enabled was {:#010x}, "
+                         "took down {:#010x})", g_savedEnabled, g_maskedBits);
         } else {
             if (!g_gameplayOff) return;
-            cm->SetControlsState(g_savedEnabled, g_savedStored);
+            // ★Give back exactly what we took, and nothing else. Not
+            // SetControlsState: the whole word includes bits somebody else
+            // owns, and writing our open-time copy of it is how a lockpicking
+            // menu's outstanding disable got frozen on for the rest of the
+            // session (see above). The engine's stored word is untouched
+            // because we never asked it to store one.
+            if (g_maskedBits) {
+                cm->ToggleControls(static_cast<UEFlag>(g_maskedBits), true, false);
+                // ★★★AND THE ENGINE'S OWN STASH WITH IT.
+                //
+                // enabledControls is not the only copy of that word. The engine
+                // keeps a second one -- storedControls -- and anything that
+                // calls StoreControls() takes a photograph of the live word and
+                // LoadStoredControls() prints it back over the top. A
+                // photograph taken while WE were masking is a photograph of a
+                // world that never existed: our bits are down in it, and
+                // whoever develops it later hands the player a disable that
+                // nobody owns and nothing will ever lift.
+                //
+                // We know exactly which bits were ours, so we can repair the
+                // photograph instead of the player: put them back in the stash
+                // at the same moment we put them back in the live word. A bit
+                // we never touched is left exactly as found -- this is the same
+                // "give back only what we took" rule the line above follows,
+                // applied to the other copy.
+                //
+                // ★It is done HERE rather than per-frame on purpose: a snapshot
+                // can be taken at any point in a session, including the frame
+                // the session ends on (a conversation opens, we hop out, and
+                // both happen inside the same event). The restore is the one
+                // moment guaranteed to be after every snapshot the session
+                // could have poisoned.
+                //
+                // ★★★AND YOU CANNOT REPAIR A PHOTOGRAPH NOBODY TOOK. The first
+                // version of this asked only "are our bits down in the stash",
+                // which is true of a stash that does not exist -- and the
+                // engine spells "nothing stored" as kInvalid (1 << 31), a
+                // SENTINEL, not a control word. OR-ing our bits into it made
+                // 0x80000727: no longer the sentinel, so StoreControls() then
+                // believed a stash was already outstanding and declined to take
+                // the real one, and LoadStoredControls() finally printed that
+                // fabricated word over enabledControls. Measured end to end --
+                // a plain inventory close repaired 0x80000000 to 0x80000727,
+                // the conversation two minutes later stored nothing because of
+                // it, and its exit left the player on 0x80000727: menus,
+                // fighting, sneaking, wheel-zoom and VATS all off at once. A
+                // repair that invents its own subject is worse than no repair,
+                // and this one was.
+                //
+                // So the question is asked properly: did the stash CHANGE while
+                // we held the mask? Only then was a photograph taken through
+                // it, and only then is there anything of ours to put back. An
+                // untouched stash -- sentinel or a stranger's, taken before we
+                // ever opened -- is left exactly as found, which is the same
+                // rule the live word above already follows.
+                constexpr auto kNoStash = static_cast<std::uint32_t>(UEFlag::kInvalid);
+                std::uint32_t liveNow = 0, storedNow = 0;
+                cm->GetControlsState(liveNow, storedNow);
+                const bool photographed = storedNow != g_savedStored &&
+                                          storedNow != kNoStash;
+                if (photographed && (storedNow & g_maskedBits) != g_maskedBits) {
+                    logger::warn("[INPUT] the engine's stored word was "
+                                 "photographed through our mask ({:#010x}, was "
+                                 "{:#010x} at open) -- repairing it to {:#010x}",
+                                 storedNow, g_savedStored,
+                                 storedNow | g_maskedBits);
+                    cm->SetControlsState(liveNow, storedNow | g_maskedBits);
+                }
+            }
             g_gameplayOff = false;
-            logger::info("[INPUT] gameplay controls restored to {:#010x}", g_savedEnabled);
+            FUI::UIRoot::NoteGameplayMask(false);   // the buttons come back too
+            logger::info("[INPUT] gameplay controls restored (gave back {:#010x})",
+                         g_maskedBits);
+            g_maskedBits  = 0;
+            g_maskHealing = false;
         }
     }
+
+    // Per-frame, unpaused only -- which is the only mode the mask exists in.
+    // Silent when there is nothing to do; a heal is logged ONCE per stretch so
+    // a report names the moment the world took the controls back instead of
+    // filling the log with one line per frame.
+    void ReassertGameplayInput()
+    {
+        if (!g_gameplayOff) return;
+        // ★★★A MASK CANNOT OUTLIVE THE MENU IT WAS LAID DOWN FOR.
+        //
+        // Every restore this file has is hung off ONE event: our own hide,
+        // which arrives as kForceHide and runs UIRoot::OnClose. That is fine
+        // for every close the player asks for, and it is nothing at all for a
+        // menu the ENGINE takes down on its own -- and the engine does exactly
+        // that when something else claims the screen mid-session (reported:
+        // an NPC starts a conversation while the grid is up, and after the
+        // dialogue the player cannot move).
+        //
+        // The mask does not simply linger in that case, it HEALS ITSELF: the
+        // loop below re-takes any bit the world hands back, every frame,
+        // forever. So a missed restore is not a glitch that wears off -- it is
+        // a permanent soft lock, and the player's only clue is that opening
+        // and closing the inventory again fixes it.
+        //
+        // The session is a structural question with a cheap answer, so it is
+        // asked here rather than trusted to an event: no menu, no mask. Same
+        // shape and same reasoning as the suppression net's "a hold cannot
+        // outlive the session it was taken over" (UIRoot::Tick).
+        if (!FUI::UIRoot::IsSessionOpen()) {
+            logger::warn("[INPUT] the grid is gone but its mask was still held "
+                         "-- restoring (no close ever reached us)");
+            SetGameplayInput(true);
+            return;
+        }
+        auto* cm = RE::ControlMap::GetSingleton();
+        if (!cm) return;
+        const std::uint32_t back = ApplyGameplayMask(cm);
+        if (back && !g_maskHealing) {
+            logger::info("[INPUT] gameplay controls came back ({:#010x}) while the "
+                         "grid was open -- re-masked", back);
+        }
+        g_maskHealing = back != 0;
+    }
+
+    // ★★★THE WATCHDOG THAT NAMES THE THIEF.
+    //
+    // "After a conversation the player cannot move" SURVIVED the conversation
+    // hop, and the log says the hop did its half correctly: the grid closes on
+    // the dialogue's open event and every masked bit goes back in the same
+    // millisecond ("gave back 0x00000727"). So the freeze is laid down AFTER
+    // our restore, by somebody else -- and "somebody else" has four different
+    // doors, which are four different bugs with four different fixes. Guessing
+    // which one has now cost two rounds; this prints the answer instead.
+    //
+    //   * enabledControls -- the shared bitfield our own mask writes. If it
+    //     goes back down after our restore, the mask is being re-applied by a
+    //     third party (or by us).
+    //   * storedControls -- the engine's OWN stash, written by StoreControls()
+    //     and pushed back over enabledControls by LoadStoredControls(). This is
+    //     the prime suspect: anything that stashes the word at the START of a
+    //     conversation stashes it with OUR bits already down, and hands that
+    //     stale word back when the conversation ends. This file has already
+    //     been on the other side of exactly that bug -- see the lockpicking
+    //     note in SetGameplayInput.
+    //   * the input context stack -- a context left on it outlives the menu
+    //     that pushed it, and the top of that stack decides whether a key is
+    //     movement at all.
+    //   * the movement/look handlers and blockPlayerInput -- the door that is
+    //     not ControlMap: SetMoveInput's, and Papyrus's.
+    //   * ...and WHICH MENUS ARE OPEN, added after the shop report. A player
+    //     who cannot move because a menu nobody can see is still on the stack
+    //     is not a control-state bug at all, and no amount of reading the four
+    //     words above would ever have said so. The set is compared as a hash
+    //     and spelled out only on the line that prints, so an open or a close
+    //     anywhere in the game shows up in the same timeline as the bits.
+    //
+    // One compare per unpaused frame, and a line only when something actually
+    // changed. Each line carries whether OUR menu and the dialogue were up, so
+    // the timeline reads on its own.
+    //
+    // ★★★IT ANSWERED ITS QUESTION AND IS KEPT ANYWAY, behind "!movewatch" like
+    // every other diagnostic in this project. What it caught, twice, in one
+    // session: `stored` sat at 0x80000000 -- nothing stashed -- until the
+    // moment a conversation began, and then became 0xfffff8d8, bit for bit the
+    // live word WITH OUR MASK IN IT. That is a StoreControls() at dialogue
+    // start photographing the world through the mask, and a LoadStoredControls()
+    // at dialogue end printing it back. 0xfffff8d8 is the freeze's fingerprint:
+    // movement, looking, activate, POV, main-four, wheel-zoom and jumping all
+    // down at once, owned by nobody.
+    //
+    // It also ruled things OUT, which is half of why it is worth keeping:
+    // move=1 look=1 block=0 the whole way through, and the context stack
+    // returning cleanly to [0], is what says the handlers and the context stack
+    // were never involved. The next report of this shape deserves the same
+    // timeline rather than another round of theory -- and off by default, it
+    // costs an atomic load on a frame nobody is measuring.
+    struct MoveWatch
+    {
+        std::uint32_t enabled = 0;
+        std::uint32_t stored  = 0;
+        std::uint32_t ctx     = 0;   // packed context stack (4 bits each)
+        std::uint32_t ctxN    = 0;
+        std::uint32_t menus   = 0;   // order-independent hash of the open set
+        bool          move    = true;
+        bool          look    = true;
+        bool          block   = false;
+        bool          valid   = false;
+
+        bool operator==(const MoveWatch&) const = default;
+    };
+    MoveWatch g_moveWatch;
+
+    void MovementWatchTick()
+    {
+        if (!FUI::UIRoot::MovementWatch()) {
+            // ★Dropping the baseline on the way out, so re-arming mid-session
+            // opens with a "(first)" line instead of silently comparing against
+            // whatever the world looked like the last time it was on.
+            g_moveWatch.valid = false;
+            return;
+        }
+        auto* cm = RE::ControlMap::GetSingleton();
+        auto* pc = RE::PlayerControls::GetSingleton();
+        auto* ui = RE::UI::GetSingleton();
+        if (!cm || !pc || !ui) return;
+
+        MoveWatch now;
+        now.valid = true;
+        cm->GetControlsState(now.enabled, now.stored);
+        const auto& stack = cm->GetRuntimeData().contextPriorityStack;
+        now.ctxN = static_cast<std::uint32_t>(stack.size());
+        // ★Packed rather than formatted: the compare has to be free, and only
+        // the line that actually prints pays for spelling it out. Eight deep is
+        // more than the engine ever stacks.
+        for (std::uint32_t i = 0; i < now.ctxN && i < 8; ++i) {
+            now.ctx |= (static_cast<std::uint32_t>(stack[i]) & 0xF) << (i * 4);
+        }
+        now.move  = !pc->movementHandler || pc->movementHandler->inputEventHandlingEnabled;
+        now.look  = !pc->lookHandler || pc->lookHandler->inputEventHandlingEnabled;
+        now.block = pc->blockPlayerInput;
+        // ★XOR of per-name hashes: order-independent, so the map's own
+        // iteration order (a hash map -- it has no stable one) cannot make an
+        // unchanged set look changed and fill the log with noise.
+        for (const auto& [name, entry] : ui->menuMap) {
+            if (!ui->IsMenuOpen(name)) continue;
+            std::uint32_t h = 2166136261u;
+            for (const char* c = name.c_str(); c && *c; ++c) {
+                h = (h ^ static_cast<unsigned char>(*c)) * 16777619u;
+            }
+            now.menus ^= h;
+        }
+
+        if (g_moveWatch.valid && now == g_moveWatch) return;
+        const bool first = !g_moveWatch.valid;
+        g_moveWatch = now;
+
+        std::string ctx;
+        for (std::uint32_t i = 0; i < now.ctxN && i < 8; ++i) {
+            if (!ctx.empty()) ctx += '>';
+            ctx += std::to_string((now.ctx >> (i * 4)) & 0xF);
+        }
+        if (now.ctxN > 8) ctx += ">...";
+        std::string menus;
+        for (const auto& [name, entry] : ui->menuMap) {
+            if (!ui->IsMenuOpen(name)) continue;
+            if (!menus.empty()) menus += ", ";
+            menus += name.c_str();
+        }
+        logger::info("[MOVEWATCH]{} enabled={:#010x} stored={:#010x} ctx=[{}] "
+                     "move={} look={} block={} paused={} | open: {}",
+                     first ? " (first)" : "", now.enabled, now.stored, ctx,
+                     now.move ? 1 : 0, now.look ? 1 : 0, now.block ? 1 : 0,
+                     ui->GameIsPaused() ? 1 : 0,
+                     menus.empty() ? "(none)" : menus.c_str());
+    }
+
     void LockpickReopenTick();      // defined below (lockpick auto-open fallback)
     void MenuCloseEchoTick();        // defined below (⑫ — the close nobody heard)
 
@@ -188,6 +530,13 @@ namespace
                 SetMoveInput(true);
                 g_movementOff = false;
             }
+            // ★...and the gameplay mask on the same terms, for the same reason
+            // one line up: the world hands these controls back on its own
+            // schedule (the loot/barter door does it right after our open), and
+            // a mask that is only written once is only true once. Costs a
+            // GetControlsState and a branch on a frame where it holds.
+            ReassertGameplayInput();
+            MovementWatchTick();       // ⑬ — who is holding the player still
             // apply capture defs + park the preview model BEFORE this frame
             // renders. While the menu is open (game paused) GridInventoryMenu::
             // AdvanceMovie drives Tick - this path covers unpaused frames.
@@ -220,6 +569,176 @@ namespace
     // world-pickup path. Scripted/quest AddItem is deliberately NOT blocked
     // (bouncing those would break quests); such items overflow into extra
     // grid rows instead.
+    // ★★(1.6) A WORLD REFERENCE THE QUEST BOARD WOULD CLAIM.
+    //
+    // Quest objects land on their own board now, and that board has no
+    // ceiling to hit -- so a capacity gate measuring the main grid is
+    // answering a question about somewhere the item is not going. Left in,
+    // the gate produced the worst refusal this mod can produce: a full pack
+    // and a quest item on the floor that the player has no way to make room
+    // for, because half of what is filling the board cannot be dropped
+    // either.
+    //
+    // The flag lives on the REFERENCE -- HasQuestObjectAlias is exactly what
+    // InventoryEntryData::IsQuestObject walks, and what the grid's own quest
+    // marker reads -- so the three pickup gates can ask before the item has
+    // ever been an inventory entry.
+    //
+    // ★Keys need no equivalent: KeyMaster is a form type, so
+    // Grid::MaxAcceptUnits answers for them from the base object and every
+    // gate inherits it at once.
+    bool RefIsQuestObject(RE::TESObjectREFR* a_ref)
+    {
+        return a_ref && a_ref->extraList.HasQuestObjectAlias();
+    }
+
+    int OwnedUnits(RE::PlayerCharacter* a_player, RE::TESBoundObject* a_obj)
+    {
+        if (!a_player || !a_obj) return 0;
+        int n = 0;
+        auto inv = a_player->GetInventory(
+            [&](RE::TESBoundObject& o) { return &o == a_obj; });
+        for (auto& [o, d] : inv) n = d.first;
+        return n;
+    }
+
+    // ★★★A PILE THE PACK CAN HALF HOLD IS HALF TAKEN.
+    //
+    // The capacity gates below are yes/no doors, and a stack is not a yes/no
+    // thing. Twenty-five ingots on the floor with room for eleven used to be
+    // answered "yes" -- so all twenty-five came in, the fourteen with nowhere
+    // to go landed in the growth rows, and the player collected the
+    // encumbrance debuff for a pack they never chose to overfill. Answering
+    // "no" instead is no better: it strands eleven ingots the pack could have
+    // carried. The pile divides, so it is divided.
+    //
+    //   room, and enough of it     the pickup goes through untouched
+    //   no room at all             refused exactly as before -- and this is
+    //                              still the case a full pack is meant to
+    //                              give the player
+    //   room, but not enough       the pack fills and the remainder goes
+    //                              straight back on the ground
+    //
+    // ★THE QUIVER IS THE SAME RULE, not a second one. Worn ammo's spare room
+    // lives inside MaxAcceptUnits (Grid.cpp, WornQuiverRoom), because the doll
+    // draws min(stock, cap) and the board draws the rest -- so while that
+    // stock is under the cap an arriving arrow never asks the board for a cell
+    // at all. Arrows therefore split against the back and the board together,
+    // through this one path, with nothing here that knows they are arrows.
+    //
+    // ★WHY THE PUT-BACK IS A TASK. We are standing inside the engine's own
+    // activation when we decide this, and the units are not in the inventory
+    // yet -- there is nothing to remove until the call below us has returned
+    // and the transfer has happened. Every other main.cpp consumer of an
+    // in-flight engine change marshals for the same reason; this one also gets
+    // the vanilla drop path (RemoveItem/kDropping) rather than DropObject,
+    // which is a known CTD from task context (see the world-drop callback).
+
+    // ★★★THE PUT-BACK COUNTS WHAT ARRIVED, NOT WHAT WE EXPECTED TO ARRIVE.
+    //
+    // The obvious version of this takes the surplus the split planned and
+    // removes exactly that many. It is also the version that can eat the
+    // player's own property, and the arithmetic says so plainly: the plan is
+    // `pile - keep`, and `pile` came from the world reference's ExtraCount. If
+    // that count ever reads high -- a form of ref this has not been measured
+    // against, a mod that keeps its own tally there -- then `pile` is too big,
+    // the surplus is too big, and the extra comes out of the hundred ingots
+    // already in the pack. A pickup is not allowed to cost the player things
+    // they were carrying before it.
+    //
+    // So the plan's number is never removed. The stock is measured BEFORE the
+    // engine's transfer and again here; the difference is what actually
+    // arrived, and only what arrived over the keep goes back on the ground. A
+    // pile smaller than its ref claimed simply drops nothing, which is the old
+    // whole-pile behaviour and the right thing to fall back to.
+    void PutSurplusBack(RE::FormID a_form, int a_ownedBefore, int a_keep)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(a_form);
+        if (!player || !obj) return;
+        const int owned = OwnedUnits(player, obj);
+        const int arrived = (std::max)(0, owned - a_ownedBefore);
+        const int n = (std::min)((std::max)(0, arrived - a_keep), owned);
+        if (n <= 0) return;
+        SKSE::log::info("[PICKUP] '{}' ({:08X}) -- pack took what it could, "
+                        "{} unit(s) back on the ground", obj->GetName(), a_form, n);
+        // 1.4/B0: registered, like every other drop of ours -- an unregistered
+        // delta reads as an outside one and inflates the echo figure.
+        FUI::Ledger::Submit(a_form, -n, "pickup-surplus");
+        player->RemoveItem(obj, n, RE::ITEM_REMOVE_REASON::kDropping,
+                           nullptr, nullptr);
+        // ★Notify, not FailNote: nothing was refused. The player asked for a
+        // pile and got as many as there was anywhere to put -- a silent
+        // partial take would read as the mod eating the rest.
+        FUI::Sfx::Notify(FUI::Lang::T(FUI::Lang::Str::PartialPickup));
+    }
+
+    // ★★THE SPLIT REPLACES THE BOARD GATE; IT DOES NOT SIT BEHIND ONE.
+    //
+    // CanFitNewItem asks whether ONE unit fits, and it answers yes for exactly
+    // the pickups that need splitting -- ask it first and it waves the whole
+    // pile through, growth rows and debuff and all, which is the behaviour
+    // being replaced. So a stackable is decided HERE, whole, and
+    // kPassThrough means "not my case, go and ask CanFitNewItem as you always
+    // did" -- gear, bags and the coin pouch, none of which divide.
+    enum class PickupGate
+    {
+        kPassThrough,   // stack cap 1: nothing to divide
+        kRefuse,        // not one unit of it fits anywhere
+        kTake           // let it in; any surplus is already queued to go back
+    };
+
+    PickupGate JudgePickup(RE::TESBoundObject* a_base, int a_want)
+    {
+        const auto plan = FUI::Grid::PlanPickup(a_base, a_want);
+        if (!plan.applies) return PickupGate::kPassThrough;
+        if (plan.keep <= 0) return PickupGate::kRefuse;
+        if (plan.surplus > 0) {
+            // ★The stock BEFORE the engine moves anything -- the put-back
+            // subtracts it to learn what the pickup really delivered. Read
+            // here because here is the only place it can still be read; one
+            // line further down the transfer has happened.
+            const RE::FormID fid = a_base->GetFormID();
+            const int before = OwnedUnits(RE::PlayerCharacter::GetSingleton(), a_base);
+            const int keep = plan.keep;
+            SKSE::GetTaskInterface()->AddTask([fid, before, keep]() {
+                PutSurplusBack(fid, before, keep);
+            });
+        }
+        return PickupGate::kTake;
+    }
+
+    // How many units the reference in front of the player is worth. A world
+    // stack carries its size on its own list (ExtraCount); no list means one.
+    //
+    // ★This number only ever sizes the PLAN, and nothing is removed on its
+    // authority -- PutSurplusBack re-derives the amount from the stock either
+    // side of the transfer, precisely so a ref that miscounts cannot cost the
+    // player anything. An under-count degrades to the old whole-pile
+    // behaviour; an over-count is caught there.
+    int WorldRefUnits(RE::TESObjectREFR* a_ref)
+    {
+        if (!a_ref) return 1;
+        return (std::max)(1, static_cast<int>(a_ref->extraList.GetCount()));
+    }
+
+    // ★★ONE PICKUP, ONE RULING. The Activate gate calls THROUGH to the engine,
+    // and the engine calls PickUpObject -- which PickUpHook is sitting on. Two
+    // gates asking the same yes/no question was free; two gates each queueing
+    // a put-back is not, and it would drop the surplus twice. So the outer one
+    // says it has already ruled on this form and the inner one steps aside.
+    // Main thread throughout (this is an activation), but scoped anyway: a
+    // guard that leaks on an early return is a gate that stays open.
+    RE::FormID g_pickupRuled = 0;   // the form the outer gate is mid-ruling on
+
+    struct PickupRuling
+    {
+        RE::FormID prev = 0;
+        explicit PickupRuling(RE::FormID a_form) :
+            prev(g_pickupRuled) { g_pickupRuled = a_form; }
+        ~PickupRuling() { g_pickupRuled = prev; }
+    };
+
     struct PickUpHook
     {
         static void thunk(RE::Actor* a_this, RE::TESObjectREFR* a_object, std::int32_t a_count,
@@ -232,20 +751,38 @@ namespace
                     return;
                 }
                 if (auto* base = a_object->GetBaseObject();
-                    base && !FUI::Grid::CanFitNewItem(base)) {
-                    // ⓖ PROBE. A refusal used to leave no trace at all, so a
-                    // report of "gold would not pick up" could not be told
-                    // apart from "the torch next to it would not". Gold is
-                    // supposed to be exempt (MaxAcceptUnits returns early on
-                    // IsGold), and this line is what proves whether it was.
-                    logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
-                                 "gold={} coin={} -- board full (PickUpObject)",
-                        base->GetName(), base->GetFormID(),
-                        static_cast<int>(base->GetFormType()),
-                        base->IsGold(),
-                        FUI::GoldCoins::IsCoinForm(base->GetFormID()));
-                    FUI::Sfx::FailNote(FUI::Lang::T(FUI::Lang::Str::InventoryFull));
-                    return;   // blocked: the reference stays in the world
+                    base && !RefIsQuestObject(a_object) &&
+                    g_pickupRuled != base->GetFormID()) {
+                    // ★A stackable is split here rather than judged yes/no.
+                    // a_count is what the engine is about to add; the
+                    // reference's own list is what it is worth when the caller
+                    // named no number.
+                    const int want = a_count > 0 ? static_cast<int>(a_count)
+                                                 : WorldRefUnits(a_object);
+                    const auto q = JudgePickup(base, want);
+                    if (q == PickupGate::kTake) {
+                        PickupRuling ruled(base->GetFormID());
+                        func(a_this, a_object, a_count, a_arg3, a_playSound);
+                        return;
+                    }
+                    if (q == PickupGate::kRefuse ||
+                        !FUI::Grid::CanFitNewItem(base)) {
+                        // ⓖ PROBE. A refusal used to leave no trace at all, so a
+                        // report of "gold would not pick up" could not be told
+                        // apart from "the torch next to it would not". Gold is
+                        // supposed to be exempt (MaxAcceptUnits returns early on
+                        // IsGold), and this line is what proves whether it was.
+                        logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
+                                     "gold={} coin={} -- {} (PickUpObject)",
+                            base->GetName(), base->GetFormID(),
+                            static_cast<int>(base->GetFormType()),
+                            base->IsGold(),
+                            FUI::GoldCoins::IsCoinForm(base->GetFormID()),
+                            q == PickupGate::kRefuse ? "no room for one unit of it"
+                                                     : "board full");
+                        FUI::Sfx::FailNote(FUI::Lang::T(FUI::Lang::Str::InventoryFull));
+                        return;   // blocked: the reference stays in the world
+                    }
                 }
             }
             func(a_this, a_object, a_count, a_arg3, a_playSound);
@@ -281,16 +818,32 @@ namespace
                 // capacity gate for plain MISC items, at the SAME pre-TrueHUD
                 // level as CapacityActivateHook (the sack conversion above
                 // must run first: gold ignores grid space)
-                if (!FUI::Grid::CanFitNewItem(a_this)) {
-                    // ⓖ probe: the same question at the MISC door, which is the
-                    // one gold actually walks through (Gold001 is a MISC record)
-                    logger::info("[PICKUP] refused '{}' ({:08X}) gold={} coin={} "
-                                 "-- board full (MISC activate)",
-                        a_this->GetName(), a_this->GetFormID(),
-                        a_this->IsGold(),
-                        FUI::GoldCoins::IsCoinForm(a_this->GetFormID()));
-                    NotifyInventoryFull();
-                    return false;   // blocked: the reference stays in the world
+                if (!RefIsQuestObject(a_targetRef)) {
+                    // ★And the SAME split, because this is the door the
+                    // stackables the player finds by the dozen come through:
+                    // ore, ingots, gems, hides, bones. Gold walks through here
+                    // too (Gold001 is a MISC record) and is untouched by it --
+                    // MaxAcceptUnits returns early on IsGold, so its split is
+                    // the whole pile with nothing left over.
+                    const auto q = JudgePickup(a_this, WorldRefUnits(a_targetRef));
+                    if (q == PickupGate::kTake) {
+                        PickupRuling ruled(a_this->GetFormID());
+                        return func(a_this, a_targetRef, a_activatorRef, a_arg3,
+                                    a_object, a_targetCount);
+                    }
+                    if (q == PickupGate::kRefuse || !FUI::Grid::CanFitNewItem(a_this)) {
+                        // ⓖ probe: the same question at the MISC door, which is the
+                        // one gold actually walks through (Gold001 is a MISC record)
+                        logger::info("[PICKUP] refused '{}' ({:08X}) gold={} coin={} "
+                                     "-- {} (MISC activate)",
+                            a_this->GetName(), a_this->GetFormID(),
+                            a_this->IsGold(),
+                            FUI::GoldCoins::IsCoinForm(a_this->GetFormID()),
+                            q == PickupGate::kRefuse ? "no room for one unit of it"
+                                                     : "board full");
+                        NotifyInventoryFull();
+                        return false;   // blocked: the reference stays in the world
+                    }
                 }
             }
             return func(a_this, a_targetRef, a_activatorRef, a_arg3, a_object, a_targetCount);
@@ -496,14 +1049,34 @@ namespace
                           RE::TESBoundObject* a_object, std::int32_t a_targetCount)
         {
             if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
-                !FUI::Grid::CanFitNewItem(a_this)) {
-                // ⓖ probe: the last of the four gates to get a voice
-                logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
-                             "-- board full (activate)",
-                    a_this->GetName(), a_this->GetFormID(),
-                    static_cast<int>(a_this->GetFormType()));
-                NotifyInventoryFull();
-                return false;   // blocked: the reference stays in the world
+                !RefIsQuestObject(a_targetRef)) {
+                // ★THIS is the door most world piles come through -- arrows,
+                // potions, ingredients, soul gems, scrolls. The split answers
+                // FIRST and it answers alone; see JudgePickup for why it
+                // cannot sit behind CanFitNewItem.
+                //
+                // ★The count comes off the REFERENCE, not a_targetCount. A
+                // pile in the world carries its size on its own list, and that
+                // is the number the whole pile is worth; the surplus we plan
+                // has to be measured against the same one the engine is about
+                // to hand over.
+                const auto q = JudgePickup(a_this, WorldRefUnits(a_targetRef));
+                if (q == PickupGate::kTake) {
+                    PickupRuling ruled(a_this->GetFormID());
+                    return func(a_this, a_targetRef, a_activatorRef, a_arg3,
+                                a_object, a_targetCount);
+                }
+                if (q == PickupGate::kRefuse || !FUI::Grid::CanFitNewItem(a_this)) {
+                    // ⓖ probe: the last of the four gates to get a voice
+                    logger::info("[PICKUP] refused '{}' ({:08X}) type={} -- {} "
+                                 "(activate)",
+                        a_this->GetName(), a_this->GetFormID(),
+                        static_cast<int>(a_this->GetFormType()),
+                        q == PickupGate::kRefuse ? "no room for one unit of it"
+                                                 : "board full");
+                    NotifyInventoryFull();
+                    return false;   // blocked: the reference stays in the world
+                }
             }
             return func(a_this, a_targetRef, a_activatorRef, a_arg3, a_object, a_targetCount);
         }
@@ -615,6 +1188,12 @@ namespace
                 {
                     const RE::FormID deltaForm = a_event->baseObj;
                     SKSE::GetTaskInterface()->AddTask([deltaForm]() {
+                        // ★A quiver correction used to run here first, taking
+                        // the over-cap surplus back off the player's back
+                        // before the board was told. The board draws the quiver
+                        // as a capful now rather than making it into one, so
+                        // there is nothing to correct and this is just the
+                        // delta again (Equip.h, where the note lives).
                         if (!FUI::Grid::OnFormDelta(deltaForm)) {
                             FUI::Grid::RequestRebuild();
                         }
@@ -696,6 +1275,52 @@ namespace
         spdlog::set_pattern("[%H:%M:%S] [%l] %v");
     }
 
+    // ★Moved to UIRoot when the wheel needed the same question asked (its
+    // cancel key). Two copies of a control-map scan is two chances for the two
+    // to disagree about what a binding is; the reasoning lives with the one
+    // that survived.
+    using FUI::UIRoot::MappedScanCode;
+
+    // ★★★AND THE EVENT WAS THE WRONG ONE ALL ALONG. "Inventory" is the TWEEN
+    // MENU's entry -- the gamepad path -- and it carries NO keyboard binding,
+    // which is precisely the 0xFF the old note recorded and then worked around.
+    // The key a PC player actually presses is "Quick Inventory".
+    //
+    // The giveaway was sitting in the workaround: 0x17 is Quick Inventory's own
+    // default, and 0x19 is Quick Magic's. The fallbacks were right for the
+    // default binding and wrong for every other one, so nothing looked broken
+    // until somebody rebound the key -- and then the key that opened the grid
+    // could not close it. (Reported.)
+    //
+    // Both events are asked, quick first, because a pad player's binding really
+    // does live on the other one. The hardcoded default stays as a last resort:
+    // a wrong guess here is better than no way out of the menu at all.
+    [[nodiscard]] std::uint32_t InventoryScanCode()
+    {
+        auto* ue = RE::UserEvents::GetSingleton();
+        if (!ue) return 0x17;
+        std::uint32_t k = MappedScanCode(ue->quickInventory);
+        if (!k) k = MappedScanCode(ue->inventory);
+        if (!k) k = 0x17;   // I -- Quick Inventory's own default
+        static std::uint32_t s_said = 0;
+        if (s_said != k) {
+            s_said = k;
+            logger::info("[INV] close key resolves to scan 0x{:02X} "
+                         "(quick='{}' tween='{}')", k,
+                         ue->quickInventory.c_str(), ue->inventory.c_str());
+        }
+        return k;
+    }
+
+    [[nodiscard]] std::uint32_t MagicScanCode()
+    {
+        auto* ue = RE::UserEvents::GetSingleton();
+        if (!ue) return 0x19;
+        std::uint32_t k = MappedScanCode(ue->quickMagic);
+        if (!k) k = MappedScanCode("Magic");
+        return k ? k : 0x19;   // P -- Quick Magic's own default
+    }
+
     // ---- Input sink ----
     class InputSink : public RE::BSTEventSink<RE::InputEvent*>
     {
@@ -766,6 +1391,8 @@ namespace
                     }
                 }
 
+                // (InventoryScanCode is defined above the sink -- see there for
+                // why one context is not enough.)
                 // A real mouse event hands the pointer back from the pad.
                 // This is the ONLY reliable signal — see UIRoot::NoteMouseInput.
                 if (e->GetDevice() == RE::INPUT_DEVICE::kMouse) {
@@ -838,13 +1465,17 @@ namespace
                 // raw key while kMenuMode swallows the user event.
                 // hidden behind someone's window: the key is not ours to read
                 if (FUI::UIRoot::IsBoardLive()) {
-                    auto* cm = RE::ControlMap::GetSingleton();
-                    // NOTE: GetMappedKey returns 0xFF here (confirmed in
-                    // the log) - fall back to the default I scancode.
-                    auto scan = cm ? cm->GetMappedKey(
-                        RE::UserEvents::GetSingleton()->inventory,
-                        RE::INPUT_DEVICE::kKeyboard) : 0xFF;
-                    if (scan == 0xFF || scan == 0xFFFFFFFF) scan = 0x17;   // default I
+                    // ★★ASK EVERY CONTEXT, not just the default one.
+                    //
+                    // The old call took GetMappedKey's default context and got
+                    // 0xFF back, so it fell through to the hardcoded I -- and
+                    // a player who rebinds Inventory then cannot close the
+                    // grid with the key that opened it. GetMappedKey searches
+                    // controlMap[context] and nothing else, so "not in THIS
+                    // context" reads exactly like "not bound anywhere".
+                    // Reported alongside the wheel-key collision; the two
+                    // together are why rebinding Inventory looked broken.
+                    const auto scan = InventoryScanCode();
                     if (btn->GetIDCode() == scan) {
                         // input thread: defer state changes to the UI task
                         SKSE::GetTaskInterface()->AddUITask([]() {
@@ -864,10 +1495,7 @@ namespace
                     // kItemMenu context never translates this key into a user
                     // event, so it is read raw here exactly like the
                     // Inventory key above (same 0xFF fallback story).
-                    static const RE::BSFixedString s_magicEvent("Magic");
-                    auto mscan = cm ? cm->GetMappedKey(s_magicEvent,
-                        RE::INPUT_DEVICE::kKeyboard) : 0xFF;
-                    if (mscan == 0xFF || mscan == 0xFFFFFFFF) mscan = 0x19;   // default P
+                    const auto mscan = MagicScanCode();
                     if (btn->GetIDCode() == mscan) {
                         SKSE::GetTaskInterface()->AddUITask([]() {
                             if (FUI::UIRoot::IsTextInputActive()) {
@@ -919,6 +1547,54 @@ namespace
             file ? a_form->GetLocalFormID() : a_form->GetFormID());
         return key + buf;
     }
+
+    // ★★★ONE RECORD, TWO GROUND MODELS, AND ONLY EVER ONE ANGLE.
+    //
+    // An armour record carries a world model per sex, and 268 of 4386 in this
+    // load order carry two DIFFERENT ones. The tuning key is the FORM, so both
+    // sexes were handed the same rx/ry/rz -- and where the two nifs are laid
+    // out differently, an angle chosen while looking at one of them is simply
+    // wrong on the other. The shipped file was tuned on a female character, so
+    // it is male players who would see those items come out askew.
+    //
+    // The icon PIXELS were already dealt with: these records are left out of
+    // the shipped pak, so every install photographs its own character's model.
+    // That fixed the picture and left the angle behind, which is this.
+    //
+    // ★Both models must exist. Thousands of records fill only one side, and
+    // the game shows that one to everybody -- one model cannot disagree with
+    // itself, so those are not split and must not pay for this.
+    [[nodiscard]] bool SexSplitArmour(RE::TESBoundObject* a_obj)
+    {
+        auto* armo = a_obj ? a_obj->As<RE::TESObjectARMO>() : nullptr;
+        if (!armo) return false;
+        // ★Cached: this is a property of the RECORD and cannot change, while
+        // the ask sits under DefFor, which runs per tile.
+        static std::unordered_map<RE::FormID, bool> s_split;
+        const auto id = a_obj->GetFormID();
+        if (const auto it = s_split.find(id); it != s_split.end()) return it->second;
+        const char* m = armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
+        const char* f = armo->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
+        const bool split = m && *m && f && *f && _stricmp(m, f) != 0;
+        s_split.emplace(id, split);
+        return split;
+    }
+
+    // "|F" / "|M" for a split record, nullptr for everything else. ★Read live
+    // rather than cached: showracemenu can change the answer mid-session, and
+    // two pointer hops are cheaper than being wrong until a reload.
+    [[nodiscard]] const char* SexSuffix(RE::TESBoundObject* a_obj)
+    {
+        if (!SexSplitArmour(a_obj)) return nullptr;
+        auto* pc = RE::PlayerCharacter::GetSingleton();
+        auto* base = pc ? pc->GetActorBase() : nullptr;
+        if (!base) return nullptr;
+        return base->GetSex() == RE::SEX::kFemale ? "|F" : "|M";
+    }
+
+    // ★Set at load if the file carries even one sex-suffixed line. On a fresh
+    // install nothing does, and DefFor's whole branch costs one bool test.
+    bool g_haveSexDefs = false;
 
     RE::TESBoundObject* FormFromKey(const std::string& a_key)
     {
@@ -1066,6 +1742,11 @@ namespace
         std::sort(keys.begin(), keys.end(),
             [](const std::string* a, const std::string* b) { return *a < *b; });
         for (const auto* k : keys) {
+            // ★Sex-suffixed lines do not donate. ModelPathOf reads the MALE
+            // model, so a female-only angle entering this map would be handed
+            // to every sibling sharing that male nif -- the same leak this
+            // whole mechanism exists to close, coming back by the side door.
+            if (k->find('|', k->find('|') + 1) != std::string::npos) continue;
             auto* obj = FormFromKey(*k);
             if (!obj) continue;
             auto mp = ModelPathOf(obj);
@@ -1249,8 +1930,28 @@ namespace
 
     // Upsert (or remove, when a_def==nullptr) one item's line in the override ini —
     // the in-game editor writes through this, so hand-edits elsewhere are preserved.
-    void UpsertDefLine(const std::string& a_key, const ItemDef* a_def, const std::string& a_name)
+    // One edit to the overrides file. `def == nullptr` erases the key.
+    struct DefEdit
     {
+        std::string    key;
+        const ItemDef* def = nullptr;
+        std::string    name;
+    };
+
+    // ★★EVERY EDIT IN ONE PASS OF THE FILE (REVIEW_1.6.0 C-3).
+    //
+    // This read the whole file, changed one line and wrote the whole file back
+    // -- fine for one key, and a reset needs TWO (the sex-suffixed line and the
+    // plain one, in that order), so clearing a single item read and rewrote the
+    // overrides twice. The file carries an entry per edited item, so it is not
+    // small by the time anyone is resetting things.
+    //
+    // ★The edits still apply in the order given, which is what the reset needs:
+    // the sex line first, then the plain one, so the plain key is not left
+    // behind looking like the reset did nothing.
+    void UpsertDefLines(const std::vector<DefEdit>& a_edits)
+    {
+        if (a_edits.empty()) return;
         std::vector<std::string> lines;
         {
             std::ifstream in(kDefsPath);
@@ -1260,47 +1961,72 @@ namespace
         if (lines.empty()) {
             lines.push_back("; GridInventory item overrides (edited in-game via the EDIT mode)");
             lines.push_back("; key = w:, h:, rx:, ry:, rz:, scale:   or   shape:11|10|10 (rows of 1/0)");
+            lines.push_back(";");
+            lines.push_back("; An armour whose male and female ground models are DIFFERENT nifs can take a");
+            lines.push_back("; second line ending in |F or |M, which applies only to that sex; the plain key");
+            lines.push_back("; stays the default for both.");
         }
-        bool done = false;
-        for (auto it = lines.begin(); it != lines.end(); ++it) {
-            const auto eq = it->find('=');
-            if (eq == std::string::npos) continue;
-            std::string k = it->substr(0, eq);
-            k.erase(0, k.find_first_not_of(" \t"));
-            k.erase(k.find_last_not_of(" \t") + 1);
-            if (k != a_key) continue;
-            if (a_def) {
-                *it = FormatItemDef(a_key, *a_def);
-            } else {
-                // ★Take the "; Name" comment written directly above with it.
-                // Erasing the entry alone leaves the comment behind, where it
-                // then reads as the label of the NEXT, unrelated item — 211 of
-                // those had piled up in the shipped file. Index >= 2 keeps the
-                // two header comments safe.
-                auto first = it;
-                if (it != lines.begin()) {
-                    const auto prev = std::prev(it);
-                    if (std::distance(lines.begin(), prev) >= 2 &&
-                        !prev->empty() && prev->front() == ';') {
-                        first = prev;
+        for (const auto& ed : a_edits) {
+            bool done = false;
+            for (auto it = lines.begin(); it != lines.end(); ++it) {
+                const auto eq = it->find('=');
+                if (eq == std::string::npos) continue;
+                std::string k = it->substr(0, eq);
+                k.erase(0, k.find_first_not_of(" \t"));
+                k.erase(k.find_last_not_of(" \t") + 1);
+                if (k != ed.key) continue;
+                if (ed.def) {
+                    *it = FormatItemDef(ed.key, *ed.def);
+                } else {
+                    // ★Take the "; Name" comment written directly above with it.
+                    // Erasing the entry alone leaves the comment behind, where it
+                    // then reads as the label of the NEXT, unrelated item — 211 of
+                    // those had piled up in the shipped file. Index >= 2 keeps the
+                    // two header comments safe.
+                    auto first = it;
+                    if (it != lines.begin()) {
+                        const auto prev = std::prev(it);
+                        if (std::distance(lines.begin(), prev) >= 2 &&
+                            !prev->empty() && prev->front() == ';') {
+                            first = prev;
+                        }
                     }
+                    lines.erase(first, std::next(it));
                 }
-                lines.erase(first, std::next(it));
+                done = true;
+                break;
             }
-            done = true;
-            break;
-        }
-        if (!done && a_def) {
-            if (!a_name.empty()) lines.push_back("; " + a_name);
-            lines.push_back(FormatItemDef(a_key, *a_def));
+            if (!done && ed.def) {
+                if (!ed.name.empty()) lines.push_back("; " + ed.name);
+                lines.push_back(FormatItemDef(ed.key, *ed.def));
+            }
         }
         if (std::ofstream out(kDefsPath, std::ios::trunc); out) {
             for (const auto& l : lines) out << l << "\n";
         }
     }
 
+    void UpsertDefLine(const std::string& a_key, const ItemDef* a_def, const std::string& a_name)
+    {
+        UpsertDefLines({ { a_key, a_def, a_name } });
+    }
+
     ItemDef DefFor(RE::TESBoundObject* a_obj)
     {
+        // ★★A SEX-SPECIFIC LINE WINS, AND THE PLAIN ONE IS STILL THE DEFAULT.
+        // Purely additive: until somebody tunes a split record while playing
+        // one sex, nothing here matches and every item resolves exactly as it
+        // did. That is the point -- the file already shipped with a value for
+        // all 268 of these, and starting them over at the factory angle would
+        // trade a sometimes-wrong picture for a reliably-wrong one.
+        if (g_haveSexDefs) {
+            if (const char* sfx = SexSuffix(a_obj)) {
+                if (auto it = g_itemDefs.find(FormKey(a_obj) + sfx);
+                    it != g_itemDefs.end()) {
+                    return it->second;
+                }
+            }
+        }
         if (auto it = g_itemDefs.find(FormKey(a_obj)); it != g_itemDefs.end()) {
             return it->second;
         }
@@ -1350,11 +2076,11 @@ namespace
             if (const auto eq = key.find('='); eq != std::string::npos) {
                 std::string val = key.substr(eq + 1);
                 key.erase(eq);
-                val.erase(0, val.find_first_not_of(" 	"));
+                val.erase(0, val.find_first_not_of(" \t"));
                 on = !val.empty() && val[0] != '0';
             }
-            key.erase(0, key.find_first_not_of(" 	"));
-            if (const auto e = key.find_last_not_of(" 	"); e != std::string::npos) {
+            key.erase(0, key.find_first_not_of(" \t"));
+            if (const auto e = key.find_last_not_of(" \t\r"); e != std::string::npos) {
                 key.erase(e + 1);
             } else {
                 continue;
@@ -1383,6 +2109,12 @@ namespace
                 std::string key = line.substr(0, eq);
                 key.erase(0, key.find_first_not_of(" \t"));
                 key.erase(key.find_last_not_of(" \t") + 1);
+                // ★A second '|' is the sex marker ("Skyrim.esm|0x0136D5|F").
+                // Noting it here is what lets DefFor skip the whole lookup on
+                // every install that has never written one.
+                if (key.find('|', key.find('|') + 1) != std::string::npos) {
+                    g_haveSexDefs = true;
+                }
                 // shared metatable parser (ui/ItemDef.h) over factory defaults
                 g_itemDefs[key] = ParseItemDef(line.substr(eq + 1), ItemDef{});
             }
@@ -1697,6 +2429,58 @@ namespace
         return false;   // let everything else see the event too
     }
 
+    // ★★★A CONVERSATION IS NOT A GUEST EITHER, and it is the one hop the
+    // player does not choose.
+    //
+    // Reported: the grid is open, an NPC walks up and starts talking, and when
+    // the conversation ends the player cannot move. Under "!nopause" the world
+    // is live while the board is up, so a forcegreet can land in the middle of
+    // a session -- which is a state nothing in this file was written for.
+    //
+    // Two separate faults meet in that window and the hop answers both:
+    //
+    //   * the grid stays on the stack under a screen it cannot be reached
+    //     from, still masking movement every frame (ReassertGameplayInput);
+    //     and
+    //   * the mask is a whole-word ToggleControls on state EVERYBODY shares,
+    //     so any mod that snapshots enabledControls at the start of a
+    //     conversation and writes it back at the end -- which is what a
+    //     conversation camera does -- snapshots it with OUR bits already
+    //     down and restores that word over the top of our restore. Then
+    //     nobody owns the disable and nothing ever lifts it. (This file has
+    //     already been on the other side of exactly that bug: see the
+    //     lockpicking note in SetGameplayInput.)
+    //
+    // ★THE RESTORE IS DONE HERE, NOT LEFT TO THE CLOSE. UIRoot::Close() gets
+    // there eventually -- it posts kForceHide, which is processed later -- and
+    // "later" is on the far side of whoever else is handling this same event.
+    // Giving the controls back synchronously, in the handler, is the earliest
+    // moment we can possibly reach; SetGameplayInput is idempotent, so the
+    // close's own call is then a no-op.
+    //
+    // ★★kNormal ONLY. A shop is REACHED through a conversation: the engine
+    // closes the dialogue a frame before BarterMenu opens (see the speaker
+    // lookup in HandleBarterMenuIntercept) and puts it back when the trade
+    // ends, so a merchant session would be torn down by the very screen that
+    // opened it. A plain inventory is what the report is about and what has no
+    // conversation of its own to protect.
+    bool HandleDialogueHop(const RE::MenuOpenCloseEvent& a_event)
+    {
+        if (!a_event.opening) return false;
+        if (a_event.menuName != RE::DialogueMenu::MENU_NAME) return false;
+        auto* ui = RE::UI::GetSingleton();
+        if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return false;
+        if (FUI::LootBarter::CurrentMode() != FUI::LootBarter::Mode::kNormal) {
+            logger::info("[INV] dialogue opened over a loot/trade session -- "
+                         "left alone (the shop was opened from it)");
+            return false;
+        }
+        logger::info("[INV] dialogue opened -> closing the grid (conversation hop)");
+        SetGameplayInput(true);   // before anyone else reads enabledControls
+        FUI::UIRoot::Close();
+        return false;   // let everything else see the event too
+    }
+
     bool HandleOverlayAside(const RE::MenuOpenCloseEvent& a_event)
     {
         // "Tutorial Menu" is the whole kHelp* family -- barter, lockpicking,
@@ -1995,6 +2779,17 @@ namespace
                 return false;
             }
             const auto cmode = menu->GetContainerMode();
+            // ★TEST ONLY ("!npcvanilla"): give the FOLLOWER's trade container
+            // back to the engine and keep every other screen. Asked here, after
+            // the mode is known, because that is the only place the follower
+            // can be told apart from a chest. See UIRoot.h for the report this
+            // exists to narrow.
+            if (cmode == RE::ContainerMenu::ContainerMode::kNPCMode &&
+                FUI::UIRoot::NpcVanilla()) {
+                logger::warn("[LOOT] !npcvanilla -- follower trade left to the "
+                             "engine, not intercepted");
+                return false;
+            }
             FUI::LootBarter::Mode gmode;
             switch (cmode) {
             case RE::ContainerMenu::ContainerMode::kLoot:
@@ -2112,6 +2907,7 @@ namespace
                 // one handler per menu concern; true = event fully handled
                 HandleLockpickAutoReopen(*a_event);   // observation only
                 HandleMenuHopClose(*a_event) ||
+                HandleDialogueHop(*a_event) ||
                 HandleOverlayAside(*a_event) ||
                     HandleTextInputHotkeyBlock(*a_event) ||
                     HandleFavoritesMenuIntercept(*a_event) ||
@@ -2192,25 +2988,48 @@ namespace
             FUI::Editor::Hooks hooks;
             hooks.getEffective = [](RE::TESBoundObject* o) { return DefFor(o); };
             hooks.getDefault = [](RE::TESBoundObject* o) { return DefaultDef(o); };
-            hooks.hasOverride = [](RE::TESBoundObject* o) {
-                return g_itemDefs.contains(FormKey(o));
+            // ★★EDITING A SPLIT RECORD WRITES FOR THE BODY IN FRONT OF YOU.
+            // The angle was chosen against the model this character wears, so
+            // that is the only body it can be claimed for. Everything else --
+            // the 3357 records with one model, and every non-armour -- keeps
+            // the plain key it has always had.
+            const auto editKey = [](RE::TESBoundObject* o) {
+                std::string k = FormKey(o);
+                if (const char* sfx = SexSuffix(o)) k += sfx;
+                return k;
             };
-            hooks.setOverride = [](RE::TESBoundObject* o, const FUI::Editor::FullDef& f,
-                                   bool a_persist) {
-                const std::string key = FormKey(o);
+            hooks.hasOverride = [editKey](RE::TESBoundObject* o) {
+                return g_itemDefs.contains(editKey(o)) || g_itemDefs.contains(FormKey(o));
+            };
+            hooks.setOverride = [editKey](RE::TESBoundObject* o,
+                                          const FUI::Editor::FullDef& f, bool a_persist) {
+                const std::string key = editKey(o);
                 ItemDef d = f;
                 DeriveShapeBounds(d);   // the editor may have repainted the mask
                 g_itemDefs[key] = d;   // live: the resolvers see it immediately
+                if (key.size() != FormKey(o).size()) g_haveSexDefs = true;
                 g_modelDefsDirty = true;
                 if (a_persist) {
                     UpsertDefLine(key, &d, o->GetName() ? o->GetName() : "");
                 }
             };
-            hooks.resetOverride = [](RE::TESBoundObject* o) {
-                const std::string key = FormKey(o);
-                g_itemDefs.erase(key);
+            hooks.resetOverride = [editKey](RE::TESBoundObject* o) {
+                // ★Both, and in that order. Reset means "stop overriding this
+                // item", and leaving the plain line behind after clearing the
+                // sex-specific one would look like the reset did nothing.
+                const std::string key = editKey(o);
+                const std::string base = FormKey(o);
+                std::vector<DefEdit> edits;
+                if (key != base) {
+                    g_itemDefs.erase(key);
+                    edits.push_back({ key, nullptr, {} });
+                }
+                g_itemDefs.erase(base);
                 g_modelDefsDirty = true;
-                UpsertDefLine(key, nullptr, "");
+                edits.push_back({ base, nullptr, {} });
+                // ★One pass of the file for both keys (C-3): this used to read
+                // and rewrite the whole overrides file once per key.
+                UpsertDefLines(edits);
             };
             hooks.saveAsCategory = [](RE::TESBoundObject* o, const FUI::Editor::FullDef& f) {
                 ItemDef d = f;
@@ -2426,9 +3245,10 @@ namespace
                 // off: measured under "!nopause", the player could still swing,
                 // shout and activate while navigating the board, and any grid
                 // key sharing a button with a gameplay binding did both things
-                // at once (user report). Masked only in that mode -- the paused
-                // path is exactly as A3 left it, and an ordinary install never
-                // reaches this call. See SetGameplayInput.
+                // at once (user report). Masked only while unpaused -- the
+                // paused path is exactly as A3 left it, because kPausesGame
+                // already keeps those bindings from the gameplay layer. See
+                // SetGameplayInput.
                 if (FUI::GridInventoryMenu::NoPause()) SetGameplayInput(false);
             },
             []() {   // menu hidden
@@ -2473,8 +3293,11 @@ namespace
         SetGameplayInput(true);
         g_planBPendingOpen = false;
         // ★suppression does not survive a load either: the window that
-        //  asked for it belongs to the session being left
-        FUI::UIRoot::Suppress(false, "session reset");
+        //  asked for it belongs to the session being left -- kOverride,
+        //  because a client hold refuses everything softer and its owner
+        //  is not there to release it.
+        FUI::UIRoot::Suppress(false, "session reset",
+                              FUI::UIRoot::SuppressBy::kOverride);
         // ★★★A DEBT OWED TO A SAVE THAT IS GONE. g_echoMenu names a vanilla
         // menu whose close we still have to announce; left set across a load,
         // MenuCloseEchoTick fires it on the FIRST unpaused frame of the new
@@ -2561,9 +3384,11 @@ namespace
             // Costume::NoteGameLoaded: the engine rebuilds the actor for a
             // while after this message, and every rebuild undoes it.
             FUI::Costume::NoteGameLoaded();
-            // ★The equip survived the save; the LOAN did not -- the engine
-            // re-read the carrier from the plugin. Re-lend before the player
-            // can notice a second ring that stopped working.
+            // The equip survived the save; the LOAN did not -- the engine
+            // re-reads the carrier's record from the plugin on every load, so
+            // its borrowed enchantment and slot mask come back as authored.
+            // Re-lend before the player can notice a second ring that has
+            // stopped working.
             FUI::DualRing::OnLoad();
             // ⓛ probe: the museum index. Deferred like the rest -- the display
             // references have to exist before their state means anything.
@@ -2640,8 +3465,9 @@ namespace
     }
 }
 
+
 SKSEPluginInfo(
-    .Version              = { 1, 5, 1, 0 },
+    .Version              = { 1, 0, 0, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)

@@ -6,6 +6,7 @@
 #include "ui/ItemDef.h"
 #include "ui/Lang.h"
 #include "ui/Theme.h"
+#include "ui/UnitRef.h"
 
 #include <functional>
 #include <string>
@@ -109,6 +110,11 @@ namespace FUI::Grid
     // for square footprints, where pressing them does nothing.
     [[nodiscard]] bool HeldCanRotate();
 
+    // ★Is the cursor over the player's own board or a bag window this frame?
+    // Asked by the container's take-all, which must not fire where R already
+    // means "drop one".
+    [[nodiscard]] bool PlayerBoardHovered();
+
     // GI63: what the tooltip is describing THIS FRAME, for the prompt bar.
     // ★Recorded by DrawItemTooltip, which every board shares (grid, doll,
     // partner), so the bar needs to know nothing about who is hovering what.
@@ -185,10 +191,17 @@ namespace FUI::Grid
     // a_count: how many units ride the cursor. One for anything worn a copy at
     // a time — but a quiver is unequipped whole, so the carry has to be whole
     // too, or the rest of it lands in the pack the instant it comes off.
-    // a_fromCarrier: lifted from the SECOND ring slot -- never engine-worn,
-    // so the carry must not claim a worn list (see Held::fromCarrier).
-    void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
-                    std::uint16_t a_sig = 0, int a_hand = 0,
+    // a_fromCarrier: lifted from the SECOND ring slot, which is never
+    // engine-worn, so the carry must not claim a worn list (see
+    // Held::fromCarrier).
+    //
+    // uid and sig stay mandatory here. They were defaulted once, and the
+    // identity work upstream removed those defaults for the reason it removed
+    // them everywhere: `a_uid = 0` does not mean "this unit is plain", it means
+    // "I did not look", and a caller who did look could omit it by accident and
+    // still compile.
+    void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                    std::uint16_t a_sig, int a_hand = 0,
                     bool a_swappedOut = false, int a_count = 1,
                     bool a_fromCarrier = false);
 
@@ -201,10 +214,13 @@ namespace FUI::Grid
     // take/buy moves THAT unit and not whichever one the engine fancies.
     // GI62: a_rot = the quarter-turn the cell sits at on the partner board, so
     // the carry (and any drop back into the inventory) keeps it.
+    // ★a_unit.sig is carried but NOT YET READ by the body -- this call has
+    // never had a signature to work with, and giving it one is a behaviour
+    // change that wants its own round. The field being there is the point: the
+    // gap is visible now instead of implied by an argument that is missing.
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
-                           float a_offX = -1.0f, float a_offY = -1.0f,
-                           std::uint16_t a_uid = 0, int a_xlIdx = -1, int a_ord = 0,
-                           int a_rot = 0);
+                           const UnitRef& a_unit, int a_ord = 0, int a_rot = 0,
+                           float a_offX = -1.0f, float a_offY = -1.0f);
 
     // Deferred rebuild (safe to request mid-draw; runs at FinishFrame).
     // ★B3-c: who asked, without touching thirty call sites. Before the board
@@ -273,6 +289,30 @@ namespace FUI::Grid
                           std::uint16_t a_sig, int a_hand = 0,
                           const std::string& a_srcKey = {}, int a_units = 1,
                           int a_xlIdx = -1);
+
+    // ★★★THE UNIT COMING BACK, NAMED WHILE WE CAN STILL SEE IT.
+    //
+    // NotePendingEquip's mirror. That one says "this unit is LEAVING the
+    // board"; this one says "this unit is ARRIVING on it, and here is what it
+    // is" -- recorded by the action that displaces it, before the engine has
+    // moved anything.
+    //
+    // ★Why it has to be recorded rather than derived: OnFormDelta is an
+    // ENGINE-EVENT applier. The event carries a FormID and nothing else
+    // ("uniqueID is always zero, so it never names the unit"), so the board
+    // re-walks the form and works out what is new -- which is the right answer
+    // for a script, another mod, or the engine's own slot-conflict removal,
+    // and the WRONG one when the player just told us exactly what they did.
+    // Measured 2026-09-01: right-clicking a plain dagger displaced the TEMPERED
+    // one, the re-walk named the returning unit `sig 0000`, and every dagger on
+    // the board went on to read "Iron Dagger" -- the tempered one included.
+    //
+    // ★★Consumed by the next partial add for this form, and only when that add
+    // has exactly ONE fresh tile: one note, one arrival, no guessing. Anything
+    // else drops the note and lets the re-walk stay the authority -- a wrong
+    // name is worse than an ugly one (the rule SoleUnitEntry already follows).
+    void NoteReturningUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                           std::uint16_t a_sig);
     // Right-click on a book or note: show it in the game's OWN Book Menu.
     // Queued here, opened on the Tick — the menu must not be raised from
     // inside the render pass. While it is up, UIRoot stands down completely
@@ -359,7 +399,46 @@ namespace FUI::Grid
     // Phase 7: how many units (<= a_want) the inventory can accept right now —
     // partial-stack room + new tiles on the hard board + new tiles in open
     // bags. Stack buy/take sliders clamp their max to this.
+    // ★...and the room left in the quiver on the player's back, which
+    // is room of the same kind: arrows arriving into it never ask the board
+    // for a cell. See WornQuiverRoom in Grid.cpp for the whole of it.
     [[nodiscard]] int MaxAcceptUnits(RE::TESBoundObject* a_obj, int a_want);
+
+    // ★★★A PILE IS NOT ONE THING, AND A PICKUP GATE THAT SAYS YES OR NO IS
+    // ANSWERING THE WRONG QUESTION ABOUT IT.
+    //
+    // Twenty-five iron ingots on the floor and room for eleven is not a yes
+    // and it is not a no. The old gate had to pick one of the two, and picked
+    // yes -- so the whole pile came in, the fourteen that had nowhere to go
+    // landed in the growth rows, and the player got the encumbrance debuff for
+    // arriving at a full pack they never chose to overfill. A stack CAN be
+    // divided, so it is: the pack fills to what it will hold and the remainder
+    // stays where it was.
+    //
+    // The arithmetic is entirely MaxAcceptUnits'. This adds no rule of its own
+    // -- it reads that one answer as a SPLIT, because a pickup can be
+    // part-taken and a bool cannot say so. Which also means the quiver comes
+    // along for free: worn ammo's room is inside MaxAcceptUnits already, so
+    // arrows split against the back and the board together.
+    //
+    // `applies` is false for anything whose stack cap is 1 -- gear, bags, the
+    // coin pouch -- and the caller then asks CanFitNewItem exactly as before.
+    // Those arrive as single units anyway, so there is nothing there to
+    // divide.
+    //
+    //   keep == 0             refuse the pickup outright — the old behaviour,
+    //                         intact, and still what a genuinely full pack
+    //                         gives the player
+    //   surplus > 0           let it through, then put that many straight back
+    //                         into the world; what the pack could not hold
+    //                         never was the player's
+    struct PickupSplit
+    {
+        bool applies = false;
+        int  keep    = 0;
+        int  surplus = 0;
+    };
+    [[nodiscard]] PickupSplit PlanPickup(RE::TESBoundObject* a_obj, int a_want);
 
     // Post-add capacity check (container-take bounce): the item is ALREADY in
     // the inventory — place everything on the hard board and report whether
@@ -377,6 +456,15 @@ namespace FUI::Grid
     // ★W3: carry-weight bonus -> owned cells past the hard board. Settings
     // (!cwcells = perCell, baseline, maxCells; perCell 0 = off) + the live
     // bonus for the panel.
+    // ★★AND AN ON/OFF OF ITS OWN ("!cwrows"), separate from the three numbers.
+    // Turning the feature off used to mean setting perCell to 0, which is a
+    // disable spelled as a tuning value: it is not obvious from reading the
+    // line, and it destroys the player's baseline and cap on the way past --
+    // they have to be typed again to turn it back on. The switch and the
+    // numbers are different questions, so they get different keys. OFF wins
+    // over any perCell.
+    void SetCwRows(bool a_on);
+    [[nodiscard]] bool CwRows();
     void SetCwCells(int a_perCell, int a_base, int a_maxCells);
     [[nodiscard]] int CwPerCell();
     [[nodiscard]] int CwBase();
@@ -403,7 +491,46 @@ namespace FUI::Grid
     // names a tile: the board can be rebuilt between the ask and the answer.
     void DropTileUnits(const std::string& a_key, int a_count);
 
-    // Draw the main tetris grid inside the current ImGui window.
+    // ★★(1.6) THE THREE BOARDS BEHIND ONE GRID AREA.
+    //
+    // Quest items and keys are the two things the player never chose to
+    // carry. They arrive on their own, they cannot be dropped (a quest item)
+    // or sold for anything (a key), and until now they sat on the main board
+    // taking squares away from the loot the player did choose -- a sack of
+    // fifty dungeon keys is a permanent tax on a 9x4 grid, and shedding it
+    // is not something the game allows.
+    //
+    // So they get boards of their own, reached by a tab strip over the grid.
+    // Each tab board is the SAME cols x rows as the main one, and each grows
+    // its own overflow rows -- but those rows never reach the encumbrance
+    // sum. Being unable to put something down must not be the thing that
+    // slows you to a walk. The main board is untouched: same size, same
+    // overflow rows, same crimson boundary, same forced walk past it.
+    //
+    // Routing is automatic and runs on EVERY rebuild, so a load, a script
+    // handover and a hand-picked key all land the same way -- and an item
+    // that stops being a quest object walks back out to the main board by
+    // the same rule that walked it in.
+    enum class Tab
+    {
+        kMain = 0,
+        kQuest,
+        kKeys,
+        kCount
+    };
+    [[nodiscard]] Tab  ActiveTab();
+    void               SetActiveTab(Tab a_tab);
+    // How many tiles a tab board is holding -- the strip shows it beside the
+    // name, because a tab whose whole point is that you did not put anything
+    // there needs to say when something arrived.
+    [[nodiscard]] int  TabTileCount(Tab a_tab);
+    // ★A tab board has something the player has not looked at yet (the same
+    // NEW mark the grid draws). The strip lights the tab, so an arrival on a
+    // board that is not on screen is still announced.
+    [[nodiscard]] bool TabHasNew(Tab a_tab);
+
+    // Draw the main tetris grid inside the current ImGui window. Draws
+    // whichever board ActiveTab() names -- all three share the area.
     void Draw();
 
     // ★★WHERE THE FIRST CELL IS, so the pointer can start on it.
@@ -420,6 +547,14 @@ namespace FUI::Grid
     // session (another window layout, another resolution) is never used.
     [[nodiscard]] bool FirstSlotCenter(ImVec2& a_out);
     void ForgetSlotCenter();
+
+    // ★The board's VISIBLE rect -- the scrolling child's own -- stamped by the
+    // same draw pass. Two questions need it: "is the pointer on the player's
+    // side or the container's?", which is what the switch-sides key asks, and
+    // where the first-slot centre has to be clamped to when the board is
+    // scrolled down into its overflow rows (the first cell is off-screen then,
+    // and sending the pointer to it would send it outside the window).
+    [[nodiscard]] bool BoardRect(ImVec2& a_min, ImVec2& a_max);
 
     [[nodiscard]] int GoldAmount();   // v9: UIRoot draws the GOLD bar
 
@@ -525,15 +660,18 @@ namespace FUI::Grid
     // divider" cannot work for a mark that snaps to whole pixels.
     void DrawInkLattice(ImDrawList* a_dl, const ImVec2& a_base, int a_cols, int a_rows);
 
-    void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue = -1,
-                         int a_price = -1, bool a_isBuy = false,
+    // ★★★WHICH UNIT IS BEING DESCRIBED -- ahead of everything optional, so
+    // it cannot be forgotten. It was four loose arguments in the middle of
+    // eleven, and the player's own grid passed a literal 0 where it held the
+    // signature: every plain dagger then borrowed the tempered one's NAME while
+    // the numbers beside it stayed right (2026-09-01). a_unit.hand carries what
+    // kWorn needs -- with a copy in each hand "the worn list of this form" is
+    // ambiguous, and the doll knows which slot it drew.
+    void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count,
+                         const UnitRef& a_unit, ExtraScope a_scope,
+                         int a_coinValue = -1, int a_price = -1,
+                         bool a_isBuy = false,
                          RE::TESObjectREFR* a_owner = nullptr,
-                         ExtraScope a_scope = ExtraScope::kAny,
-                         std::uint16_t a_uid = 0, int a_xlIdx = -1,
-                         // kWorn only: WHICH worn unit. With one copy in each
-                         // hand "the worn list of this form" is ambiguous, so the
-                         // doll passes the identity its slot recorded.
-                         std::uint16_t a_sig = 0, int a_hand = 0,
                          const TileContext& a_tile = {});
 
     // ★An item's name as the GAME would print it. Quest items name themselves
@@ -730,22 +868,11 @@ namespace FUI::Grid
                 a_armo->HasKeywordID(kClothingRing));
     }
 
-    // GI1: one entry's units, in a stable order, each bound to the sub-stack it
-    // belongs to. uid = ExtraUniqueID (0 when the engine assigned none),
-    // xlIdx = position in entry->extraLists (-1 = a plain unit with no list).
-    struct UnitRef
-    {
-        std::uint16_t uid = 0;     // ExtraUniqueID, 0 = the engine assigned none
-        std::uint16_t sig = 0;     // GI14 content signature, 0 = a plain unit
-        int           xlIdx = -1;  // position in entry->extraLists, -1 = plain
-        // GI41: what the WALK knew and used to throw away. Asking again later
-        // means asking by xlIdx, and a position stops being true the moment a
-        // list is added or removed -- planting an item on a pickpocket mark
-        // moved the "worn" answer onto a different cell, so the lock jumped to
-        // an item the target was not wearing. Carry it instead.
-        bool          worn = false;
-        int           hand = 0;    // 1 right, 2 left (0 = not worn)
-    };
+    // GI1: one entry's units, in a stable order, each bound to the sub-stack
+    // it belongs to. ★The type itself lives in ui/UnitRef.h now -- the
+    // transfer and trade calls need to name a unit too, and one shared type
+    // is the point. Aliased so `Grid::UnitRef` keeps meaning what it meant.
+    using UnitRef = FUI::UnitRef;
 
     // Walk an entry into per-unit refs. a_skipWorn=false keeps the body-worn
     // unit (corpses and pickpocket targets show what the NPC wears).
@@ -778,9 +905,15 @@ namespace FUI::Grid
                                                       RE::TESBoundObject* a_obj);
 
     // GI1: the sub-stack named by (uid, xlIdx). uid wins when the engine
-    // assigned one; otherwise the recorded position, revalidated against the
-    // CURRENT list. nullptr = a plain unit, or that instance is gone.
+    // assigned one; otherwise the recorded position, TAKEN ON TRUST.
+    // nullptr = a plain unit, or that instance is gone.
     // NEVER store the result -- the engine reallocates and frees these.
+    //
+    // ★An earlier version of this comment said the position was "revalidated
+    // against the CURRENT list". It never was, and a caller reading that would
+    // trust a check nobody wrote -- which is how a stale index came to draw
+    // another item's name and enchantment on the partner board. Prefer
+    // ExtraForUnit below, which does what this used to claim.
     [[nodiscard]] RE::ExtraDataList* ExtraForInstance(RE::InventoryEntryData* a_entry,
                                                       std::uint16_t a_uid, int a_xlIdx);
 
@@ -789,6 +922,30 @@ namespace FUI::Grid
     // later, by which time a captured position can be stale.
     [[nodiscard]] RE::ExtraDataList* ExtraForPool(RE::InventoryEntryData* a_entry,
                                                   std::uint16_t a_uid, std::uint16_t a_sig);
+
+    // The two above, in the order a DISPLAY wants them: the recorded position
+    // first but only while it still holds a unit of this pool, then the pool by
+    // name. This is ResolveExitUnit's rule (position as a verified refinement,
+    // never as the authority) for the read-only side -- tooltips, tints, glow
+    // bits, prices -- and it is what every such caller should use.
+    //
+    // A cell that remembers a position across frames (every ContCell does, and
+    // its position even survives the co-save) cannot use ExtraForInstance
+    // safely: the engine's AddExtraList prepends, so one item stored into a
+    // container renumbers every unit already in it.
+    //
+    // Unlike ExtraForPool this may return a WORN list, because a partner board
+    // deliberately shows a corpse's or a mark's equipped gear. Read-only.
+    //
+    // a_namePlainPool: may the PLAIN pool (uid 0, sig 0) be resolved by name?
+    // TRUE gives GI39's answer -- sig 0 never meant "no list", and a plain
+    // unit's ownership stamp lives in the one it shares. FALSE answers nullptr
+    // instead, which is what a caller wants when "this tile resolves to
+    // nothing" is itself a signal (the tooltip's merged-row rule).
+    [[nodiscard]] RE::ExtraDataList* ExtraForUnit(RE::InventoryEntryData* a_entry,
+                                                  std::uint16_t a_uid, int a_xlIdx,
+                                                  std::uint16_t a_sig,
+                                                  bool a_namePlainPool);
 
     // GI36: resolve the sub-stack that is really LEAVING the bag and strip its
     // favourite star in the same call. Outbound sinks (sell / store / plant /
@@ -918,6 +1075,13 @@ namespace FUI::Grid
     // occupy no board space; deletion is confirmed when the window (or the
     // whole menu) closes, oldest-first when the board needs room (FIFO).
     [[nodiscard]] bool IsTrashOpen();
+
+    // ★Is one of the player's own surfaces currently ASKING something -- the
+    // trash confirm, the pouch withdraw, the recharge picker? Asked by the
+    // container's take-all, which must not fire past a question. This is the
+    // companion to PlayerBoardHovered: boards answer by hover, questions
+    // answer by being open at all.
+    [[nodiscard]] bool PlayerPopupOpen();
     void ToggleTrash();          // the trash-can button
     bool CloseTrash();           // I/ESC layering: confirm-all + close if open
     // ---- find by name -------------------------------------------------------
@@ -994,8 +1158,17 @@ namespace FUI::Grid
     // rows bounded by limRows), so a tile whose seat no longer exists falls
     // through to first-fit. Shrinking the board reflows it; it does not strand
     // anything, and the cosave record needs no version bump.
-    inline constexpr int kDefCols = 9;
-    inline constexpr int kDefRows = 4;
+    // ★★NOT A SETTINGS ROW ANY MORE. The GRID SIZE sliders are gone from the
+    // settings window (1.6): three boards answer to these numbers now -- the
+    // main board and the two tab boards -- so a mid-drag apply re-placed
+    // three grids and resized the window under the hand holding it, and the
+    // held-value dance that used to hide that was already the most delicate
+    // row in the panel. It remains a SETTING, just not a slider:
+    // "!basegrid = cols, rows" in GridInventory_ui.ini is still read, still
+    // clamped, and still written back, so a player who wants another board
+    // has one file to edit and nothing to hunt for in a menu.
+    inline constexpr int kDefCols = 10;
+    inline constexpr int kDefRows = 8;
     // ★THE COLUMN FLOOR IS NOT COSMETIC. MaskOf trims a footprint's width to
     // the column count, so a board narrower than an item silently CROPS it —
     // a greatsword that parses, saves and draws while being a different item

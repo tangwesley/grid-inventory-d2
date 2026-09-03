@@ -14,21 +14,21 @@ namespace FUI::Fallback
     //   - icon theme "flat": every item draws its category icon
     //   - icon theme "real": only items whose 3D capture permanently failed
     //
-    // ★The folder is the customisation surface — no tool, no manifest. Drop a
-    // PNG named after the key and it wins; the shipped set is PNG for exactly
-    // that reason, so "what do I name it" is answered by looking at what is
-    // already there. Resolution order:
+    // The folder itself is the customisation surface -- there is no tool and no
+    // manifest. Drop in a PNG named after the key and it wins. The shipped set
+    // is PNG for exactly that reason, so "what do I name it?" is answered by
+    // looking at what is already there. Resolution order:
     //
     //   item\<Plugin.esp_0xLocalID>.png   one form only
     //   <key>@<variant>.png               e.g. wpn_sword@steel
     //   <key>.png                         e.g. wpn_sword
     //   <key>@<variant>.fic  /  <key>.fic  1.0.4 leftovers, still read
     //
-    // ★The whole PNG layer outranks the whole .fic layer. Ranking them
-    // key-by-key instead would mean a player who drops in wpn_sword.png to
+    // The entire PNG layer outranks the entire .fic layer. Ranking them
+    // key-by-key instead would mean that a player who drops in wpn_sword.png to
     // change "all swords" finds steel swords unchanged, because our shipped
-    // wpn_sword@steel.fic is the more specific match — a rule that is correct
-    // and useless.
+    // wpn_sword@steel.fic is the more specific match. That rule is correct and
+    // useless.
     //
     // Returns null when no matching file exists (caller falls through).
     [[nodiscard]] const IconCache::Icon* Get(RE::TESBoundObject* a_obj);
@@ -63,17 +63,20 @@ namespace FUI::Fallback
     };
     [[nodiscard]] Assignment Classify(RE::TESBoundObject* a_obj);
 
-    // ★★★ARROW OR BOLT, and the only place that answers it. TESAmmo::IsBolt()
-    // is UNUSABLE: CommonLibSSE-NG reads the DATA member directly while its
-    // real offset moves between SE (0x110) and AE (0x100), so on AE it looks 16
-    // bytes past the record. Measured across a full load order: 40 of 41 ammo
-    // forms reported flags = 0xCD (uninitialised fill), which makes every bolt
-    // an arrow and leaves Bound Arrow -- whose garbage happened to read 0 --
-    // as the one "bolt". The category assignment in main.cpp was calling it.
-    // ★The MESH leads, and the record only breaks a tie: every bolt in the game
-    // is Bolt.nif and every arrow Arrow.nif, and a path survives a mod setting
-    // the flag wrong. GetRuntimeData() is what relocates correctly when the
-    // path says nothing.
+    // Arrow or bolt, and the only place that answers the question.
+    //
+    // TESAmmo::IsBolt() is unusable. CommonLibSSE-NG reads the DATA member
+    // directly, while its real offset moves between SE (0x110) and AE (0x100),
+    // so on AE it reads 16 bytes past the record. Measured across a full load
+    // order, 40 of 41 ammo forms reported flags = 0xCD (uninitialised fill),
+    // which makes every bolt an arrow and leaves Bound Arrow -- whose garbage
+    // happened to read 0 -- as the only "bolt". The category assignment in
+    // main.cpp was calling it.
+    //
+    // So the MESH leads and the record only breaks a tie: every bolt in the
+    // game is Bolt.nif and every arrow is Arrow.nif, and a path survives a mod
+    // setting the flag wrong. GetRuntimeData() is what relocates correctly in
+    // the cases where the path says nothing.
     [[nodiscard]] bool IsBoltAmmo(RE::TESAmmo* a_ammo);
 
     // GI60: a drawn transform that belongs to the ICON, not to the item.

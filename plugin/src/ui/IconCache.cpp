@@ -628,8 +628,78 @@ namespace FUI
     // Items with ALTERNATE TEXTURES (same nif, different pixels) and items
     // without a model path keep the per-FormID slot. A stale hit would need a
     // full 64-bit collision incl. the rotation hash — effectively impossible.
-    static std::uint32_t ModelSlot32(RE::TESBoundObject* a_obj)
+    // ★★★A SPELL HAS NO MODEL, AND THE ENGINE ALREADY KNOWS WHAT TO SHOW.
+    //
+    // MDOB (BGSMenuDisplayObject) is the bound object the vanilla magic menu
+    // stands in its own 3D scene for a spell: a flame for Flames, a ward for a
+    // ward. SpellItem carries one and so does every magic EFFECT, which is
+    // where the game actually keeps most of them.
+    //
+    // Measured on a real load order before any of this was built: of 940
+    // pickable spells, 706 have their own MDOB with a model and 102 inherit
+    // one from their first effect. The 132 with none are script and creature
+    // spells -- "Bleeding Damage", "Werewolf Feed Victim" -- that never reach
+    // a wheel, so the real coverage of what a player can pick is effectively
+    // whole.
+    //
+    // ★★So the capture pipeline needs no new kind of asset. It needs to be
+    // told, in ONE place, that the thing to PHOTOGRAPH is not always the thing
+    // being asked about. Every site that reaches for a model asks this first:
+    // the key, the renderability probes, and the capture request itself. They
+    // have to agree -- a key taken from the spell and a capture taken from the
+    // flame would file the picture under a name nothing ever looks up.
+    //
+    // ★Spells sharing a display object share an icon, and that is correct
+    // rather than merely cheap: two spells the engine draws identically are
+    // two spells that look identical, and the wheel would be lying to show
+    // them apart. It also means Flames and its stronger cousins may come up
+    // the same picture, which is the honest cost of using the game's own art.
+    //
+    // Returns the object itself when there is nothing better -- so an item is
+    // untouched, and a spell with no display object falls through to the drawn
+    // category icon exactly as it does today.
+    static RE::TESBoundObject* CaptureSourceOf(RE::TESBoundObject* a_obj)
     {
+        auto* sp = a_obj ? a_obj->As<RE::SpellItem>() : nullptr;
+        if (!sp) return a_obj;
+        // ★★A SCROLL ANSWERS YES TO THAT CAST, AND MUST NOT BE SUBSTITUTED.
+        //
+        // RE::ScrollItem DERIVES FROM SpellItem (see its base list), so every
+        // scroll arrives here as a spell -- and the substitution below is
+        // exactly backwards for one. A spell has no body and borrows its MDOB;
+        // a scroll IS a physical object, carrying its own nif on
+        // TESModelTextureSwap, and its MDOB is the picture the MAGIC MENU puts
+        // in the spell list rather than the thing lying in the bag.
+        //
+        // In vanilla that MDOB is 'Clutter\Books\TestBook01HighPoly.nif' -- cut
+        // content that ships in no archive -- and EVERY scroll record shares
+        // it. So every scroll was keyed and photographed as a book that does
+        // not exist: MeshMissing skipped it, nothing recorded the skip, and the
+        // grid re-queued it on the very next frame. Measured: 13,626 identical
+        // 'mesh not found' lines in one session. What the player sees is a
+        // precache that ends at "1 left" and an inspect that spins for ever.
+        if (a_obj->Is(RE::FormType::Scroll)) return a_obj;
+        const auto renderable = [](RE::TESBoundObject* a_o) -> RE::TESBoundObject* {
+            if (!a_o) return nullptr;
+            const auto* m = a_o->As<RE::TESModel>();
+            return (m && m->GetModel() && m->GetModel()[0]) ? a_o : nullptr;
+        };
+        if (auto* own = renderable(sp->GetMenuDisplayObject())) return own;
+        // ★FIRST effect only, which is what the magic menu itself shows -- and
+        // a spell's identity in a list is its primary effect. Walking the rest
+        // would hand a fire spell the picture of the fear it also carries.
+        for (const auto* e : sp->effects) {
+            if (!e || !e->baseEffect) break;
+            if (auto* fx = renderable(e->baseEffect->GetMenuDisplayObject())) return fx;
+            break;
+        }
+        return a_obj;
+    }
+
+    static std::uint32_t ModelSlot32(RE::TESBoundObject* a_in)
+    {
+        // Key the PICTURE, not the asker -- see CaptureSourceOf.
+        RE::TESBoundObject* a_obj = CaptureSourceOf(a_in);
         const char* p = nullptr;
         const char* p2 = nullptr;   // armour: the OTHER sex's ground model
         std::uint32_t altCount = 0;
@@ -697,6 +767,40 @@ namespace FUI
         if (p2 && *p2) {
             h = (h ^ 0x1Fu) * 16777619u;
             fold(p2);
+            // ★★★AND WHEN THE TWO PATHS DIFFER, WHICH BODY IS WEARING IT.
+            //
+            // The line above says this key names the picture. For a record
+            // whose two ground models are different nifs, the sex is PART of
+            // which picture it is: we do not choose the model, the engine does,
+            // and it draws the one belonging to the character standing there.
+            // One slot for both therefore held whichever sex photographed it
+            // first -- fine while a character keeps the body they started with,
+            // wrong the moment showracemenu says otherwise, and wrong for the
+            // items ini's own new |F / |M lines whenever the two angles happen
+            // to agree (equal rotations hash equal, so the tuning alone could
+            // not tell the two pictures apart).
+            //
+            // ★Only when they DIFFER. Thousands of records name the same nif
+            // twice or fill one side, and the engine shows that one model to
+            // everybody -- splitting those would double their captures to
+            // store the same pixels under two names.
+            // ★★AND IT FOLDS EVEN WHEN NOBODY IS THERE TO ASK. Skipping the
+            // fold on a null player was a THIRD key -- neither the male one nor
+            // the female one -- so a capture taken in that moment is written to
+            // disk under a name no later lookup can produce, and the item is
+            // re-shot forever. main.cpp's SexSuffix already answers this
+            // question the other way, falling back to the plain (both-sexes)
+            // line, and the two must not disagree about the same record.
+            //
+            // ★Male is the right default for BOTH of them, because ModelPathOf
+            // reads the male path -- the same rule the model-level def map
+            // follows (main.cpp, "Sex-suffixed lines do not donate").
+            if (_stricmp(p, p2) != 0) {
+                auto* pc = RE::PlayerCharacter::GetSingleton();
+                auto* base = pc ? pc->GetActorBase() : nullptr;
+                const bool female = base && base->GetSex() == RE::SEX::kFemale;
+                h = (h ^ (female ? 0xF1u : 0x4Du)) * 16777619u;
+            }
         }
         // ★★1.0.5 — the base-form ENCHANTMENT deliberately does NOT join this
         // hash, though it looks like it should: Iron Sword and Iron Sword of
@@ -1404,6 +1508,332 @@ namespace FUI
         SKSE::log::info("[ICONS] disk cache reset (retexture refresh)");
     }
 
+    namespace
+    {
+        // ★The SAME normalisation the key folds with, or every answer here
+        // would disagree with the thing it is answering about: a record whose
+        // two paths differ only by "meshes\" or a slash is ONE picture to the
+        // key, and must not be treated as two.
+        [[nodiscard]] std::string NormModelPath(const char* a_p)
+        {
+            std::string s(a_p ? a_p : "");
+            if (_strnicmp(s.c_str(), "meshes", 6) == 0 &&
+                (s.size() > 6 && (s[6] == '\\' || s[6] == '/'))) {
+                s.erase(0, 7);
+            }
+            for (auto& c : s) {
+                if (c >= 'A' && c <= 'Z') c += 32;
+                if (c == '/') c = '\\';
+            }
+            return s;
+        }
+
+        // Two ground models that are BOTH present and DIFFERENT: the picture
+        // depends on who is wearing it, and one cached icon cannot serve both.
+        // One side empty is not two pictures -- the engine falls back to the
+        // model that exists and both sexes see it.
+        [[nodiscard]] bool IsSexSpecific(RE::TESObjectARMO* a_armo)
+        {
+            if (!a_armo) return false;
+            const std::string m = NormModelPath(
+                a_armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel());
+            const std::string f = NormModelPath(
+                a_armo->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel());
+            return !m.empty() && !f.empty() && m != f;
+        }
+
+        // Can this record's icon ever be shown? NOT Capturable(), which is the
+        // capture QUEUE's gate and answers false for the entire flat style --
+        // the question here is what a PAK would ship, not what one player's
+        // style draws.
+        [[nodiscard]] bool ShippableItem(RE::TESBoundObject* a_obj)
+        {
+            if (!a_obj || !a_obj->GetPlayable() || IsUnobtainable(a_obj)) return false;
+            const char* nm = a_obj->GetName();
+            return nm && *nm;
+        }
+
+        // ★★★WHOSE ITEM IS THIS, and it is asked because a shipped pak is
+        // built on ONE machine's load order.
+        //
+        // A full precache photographs everything the author happens to have
+        // installed, so the bundle that goes out carries icons for armour packs
+        // and gear mods most downloaders do not own. They pay for those in
+        // megabytes and can never see them. Measured on this build: 4649 icons
+        // against the 2364 of the version before, and nearly all of the
+        // difference was one machine's private list.
+        //
+        // So the shipping pak keeps only what everybody has: the base game, its
+        // official add-ons, Creation Club content (official, and free with the
+        // Anniversary edition), and our own plugin. Anyone running something
+        // else captures it themselves on first sight, which is what already
+        // happens today for anything the author did not own either.
+        [[nodiscard]] bool ShippableSource(RE::TESForm* a_form)
+        {
+            const auto* file = a_form ? a_form->GetFile(0) : nullptr;
+            if (!file) return false;   // dynamic / runtime form: nobody else has it
+            const std::string_view name = file->GetFilename();
+            static constexpr std::string_view kBase[] = {
+                "Skyrim.esm", "Update.esm", "Dawnguard.esm",
+                "HearthFires.esm", "Dragonborn.esm",
+            };
+            for (const auto& b : kBase) {
+                if (name.size() == b.size() &&
+                    _strnicmp(name.data(), b.data(), b.size()) == 0) {
+                    return true;
+                }
+            }
+            // ★Creation Club ships as cc<code>-<name>.esl/.esm. Official, and
+            // the free ones arrive with every Anniversary install.
+            if (name.size() > 2 && _strnicmp(name.data(), "cc", 2) == 0) return true;
+            return name.starts_with("Grid Inventory.");
+        }
+
+        // Model slots reachable from a form ANY downloader could have. A slot
+        // used by even one such form stays -- it is the same picture whoever
+        // asks for it.
+        [[nodiscard]] std::unordered_set<std::uint32_t> ShippableSlots(int* a_forms)
+        {
+            std::unordered_set<std::uint32_t> keep;
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (!dh) return keep;
+            int n = 0;
+            const auto sweep = [&](const auto& a_arr) {
+                for (auto* form : a_arr) {
+                    auto* obj = form ? form->template As<RE::TESBoundObject>() : nullptr;
+                    if (!obj || !ShippableSource(form)) continue;
+                    ++n;
+                    keep.insert(ModelSlot32(obj));
+                }
+            };
+            sweep(dh->GetFormArray<RE::TESObjectWEAP>());
+            sweep(dh->GetFormArray<RE::TESObjectARMO>());
+            sweep(dh->GetFormArray<RE::TESAmmo>());
+            sweep(dh->GetFormArray<RE::AlchemyItem>());
+            sweep(dh->GetFormArray<RE::IngredientItem>());
+            sweep(dh->GetFormArray<RE::TESObjectBOOK>());
+            sweep(dh->GetFormArray<RE::TESObjectMISC>());
+            sweep(dh->GetFormArray<RE::TESSoulGem>());
+            sweep(dh->GetFormArray<RE::TESKey>());
+            sweep(dh->GetFormArray<RE::ScrollItem>());
+            sweep(dh->GetFormArray<RE::SpellItem>());
+            if (a_forms) *a_forms = n;
+            return keep;
+        }
+
+        // The upper half of every icon key (see KeyFor) -- so one entry here
+        // retires a record's icon in EVERY rotation it was ever captured at.
+        [[nodiscard]] std::unordered_set<std::uint32_t> SexSpecificSlots(int* a_count)
+        {
+            std::unordered_set<std::uint32_t> out;
+            auto* dh = RE::TESDataHandler::GetSingleton();
+            if (!dh) return out;
+            int n = 0;
+            for (auto* armo : dh->GetFormArray<RE::TESObjectARMO>()) {
+                auto* obj = armo ? armo->As<RE::TESBoundObject>() : nullptr;
+                if (!ShippableItem(obj) || !IsSexSpecific(armo)) continue;
+                ++n;
+                out.insert(ModelSlot32(obj));
+            }
+            if (a_count) *a_count = n;
+            return out;
+        }
+    }
+
+    void IconCache::ReportSexSpecificArmour()
+    {
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        if (!dh) return;
+
+        int total = 0, differ = 0, oneSided = 0;
+        std::string sample;
+        int shown = 0;
+        for (auto* armo : dh->GetFormArray<RE::TESObjectARMO>()) {
+            auto* obj = armo ? armo->As<RE::TESBoundObject>() : nullptr;
+            if (!ShippableItem(obj)) continue;
+            ++total;
+            const std::string m = NormModelPath(
+                armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel());
+            const std::string f = NormModelPath(
+                armo->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel());
+            if (m == f) continue;
+            if (m.empty() || f.empty()) { ++oneSided; continue; }
+            ++differ;
+            if (shown < 12) {
+                ++shown;
+                sample += "\n           ";
+                sample += armo->GetName();
+                sample += " (";
+                sample += std::to_string(armo->GetFormID());
+                sample += ")";
+            }
+        }
+        SKSE::log::info(
+            "[ICONS] sex-specific armour: {} of {} capturable ARMO have two "
+            "DIFFERENT ground models ({} more have only one side, which is "
+            "fine -- both sexes see it).{}{}",
+            differ, total, oneSided,
+            differ ? "  First few:" : "", sample);
+    }
+
+    void IconCache::ReportSpellDisplayObjects()
+    {
+        auto* dh = RE::TESDataHandler::GetSingleton();
+        if (!dh) return;
+
+        // A model path is what a capture needs; an MDOB pointing at something
+        // with no nif is coverage on paper only.
+        const auto hasModel = [](RE::TESBoundObject* a_o) {
+            if (!a_o) return false;
+            const auto* m = a_o->As<RE::TESModel>();
+            return m && m->GetModel() && m->GetModel()[0];
+        };
+
+        int shown = 0, own = 0, viaEffect = 0, none = 0;
+        std::string sample;
+        int listed = 0;
+        for (auto* sp : dh->GetFormArray<RE::SpellItem>()) {
+            if (!sp) continue;
+            // Only what a player can actually pick in the wheel. Abilities,
+            // diseases and enchantments are carried by other things and never
+            // appear as a choice, so counting them would flatter the answer.
+            const auto t = sp->GetSpellType();
+            if (t != RE::MagicSystem::SpellType::kSpell &&
+                t != RE::MagicSystem::SpellType::kPower &&
+                t != RE::MagicSystem::SpellType::kLesserPower) {
+                continue;
+            }
+            const char* nm = sp->GetName();
+            if (!nm || !*nm) continue;
+            ++shown;
+
+            if (hasModel(sp->GetMenuDisplayObject())) { ++own; continue; }
+            // ★The spell's own MDOB is usually EMPTY in vanilla -- the picture
+            // lives on the magic EFFECT, which is what the magic menu falls
+            // back to. First effect: that is the one the menu shows, and a
+            // spell's identity in a list is its primary effect anyway.
+            bool viaFx = false;
+            for (const auto* e : sp->effects) {
+                if (!e || !e->baseEffect) continue;
+                if (hasModel(e->baseEffect->GetMenuDisplayObject())) { viaFx = true; }
+                break;   // FIRST effect only, like the menu
+            }
+            if (viaFx) { ++viaEffect; continue; }
+            ++none;
+            if (listed < 12) {
+                ++listed;
+                sample += "\n           ";
+                sample += nm;
+            }
+        }
+        SKSE::log::info(
+            "[ICONS] spell display objects: {} pickable spells -- {} have their "
+            "own MDOB with a model, {} inherit one from their first effect, {} "
+            "have none.{}{}",
+            shown, own, viaEffect, none,
+            none ? "  Without:" : "", sample);
+    }
+
+    void IconCache::QueueFavouriteSpells()
+    {
+        auto* fav = RE::MagicFavorites::GetSingleton();
+        if (!fav) return;
+        int asked = 0;
+        for (auto* form : fav->spells) {
+            // ★Shouts live in this list too and are NOT bound objects (TESShout
+            // is a TESForm), so they cannot be photographed by this path at
+            // all. They keep their drawn icon; asking would be a null deref.
+            auto* obj = form ? form->As<RE::TESBoundObject>() : nullptr;
+            if (!obj || !obj->As<RE::SpellItem>()) continue;
+            // Capturable() already refuses one with no display object, so the
+            // 132 script spells cost nothing but this loop.
+            QueueCapture(obj);
+            ++asked;
+        }
+        if (asked > 0) {
+            SKSE::log::info("[ICONS] {} favourite spell(s) offered to the "
+                            "capture queue", asked);
+        }
+    }
+
+    bool IconCache::ExportShippingPak(const char* a_path)
+    {
+        // ★★★THE PAK THAT GOES TO OTHER PEOPLE, minus the icons that are only
+        // right for the character who captured them.
+        //
+        // Measured on a real load order: 268 of 4386 shippable armours have two
+        // different ground models. Those 268 cannot be shipped -- one cached
+        // icon per record, rendered as whoever pressed the button -- so they
+        // are left out and each install captures them on its OWN character,
+        // where the engine picks the right one for free. The cost is one
+        // capture per record the player actually sees, appended to their own
+        // pak, so it does not repeat.
+        //
+        // The other 4118 are unaffected: a shared ground model looks the same
+        // on everybody, and dropping those would be pure waste.
+        ClosePakHandle();
+        std::error_code ec;
+        if (!std::filesystem::exists(kPakPath, ec)) {
+            SKSE::log::error("[ICONS] shipping export: no capture pak here");
+            return false;
+        }
+        if (!g_pakScanned) ScanPak();
+
+        int  records = 0, shipForms = 0;
+        const auto drop = SexSpecificSlots(&records);
+        const auto keep = ShippableSlots(&shipForms);
+
+        std::ofstream out(a_path, std::ios::binary | std::ios::trunc);
+        std::ifstream in(kPakPath, std::ios::binary);
+        if (!out || !in) {
+            SKSE::log::error("[ICONS] shipping export: cannot open files");
+            return false;
+        }
+        std::vector<std::uint8_t> px;
+        std::size_t kept = 0, dropped = 0, foreign = 0;
+        // Same record layout CompactPak writes -- this IS that loop with one
+        // condition added, and the two must not drift apart.
+        for (const auto& [key, en] : g_pakIndex) {
+            const auto slot = static_cast<std::uint32_t>(key >> 32);
+            if (drop.contains(slot)) {
+                ++dropped;
+                continue;
+            }
+            // ★...and anything only THIS machine's load order can reach.
+            if (!keep.contains(slot)) {
+                ++foreign;
+                continue;
+            }
+            px.resize(en.len);
+            in.seekg(static_cast<std::streamoff>(en.off + en.hdrSize()));
+            if (!in.read(reinterpret_cast<char*>(px.data()), en.len)) {
+                SKSE::log::error("[ICONS] shipping export: short read at key {:016X}", key);
+                return false;
+            }
+            const std::uint32_t magic = en.hasRot ? kIconMagicRot : kIconMagic;
+            out.write(reinterpret_cast<const char*>(&magic), 4);
+            out.write(reinterpret_cast<const char*>(&key), 8);
+            out.write(reinterpret_cast<const char*>(&en.w), 4);
+            out.write(reinterpret_cast<const char*>(&en.h), 4);
+            out.write(reinterpret_cast<const char*>(&en.fmt), 4);
+            if (en.hasRot) out.write(reinterpret_cast<const char*>(en.rot), 36);
+            out.write(reinterpret_cast<const char*>(&en.len), 4);
+            out.write(reinterpret_cast<const char*>(px.data()), en.len);
+            if (!out) {
+                SKSE::log::error("[ICONS] shipping export: write failed");
+                return false;
+            }
+            ++kept;
+        }
+        in.close();
+        out.close();
+        SKSE::log::info("[ICONS] shipping pak written: {} kept, {} dropped "
+                        "({} sex-specific armour records), {} left out as "
+                        "third-party ({} shippable forms seen) -> {}",
+                        kept, dropped, records, foreign, shipForms, a_path);
+        return true;
+    }
+
     bool IconCache::ExportPakTo(const char* a_path)
     {
         ClosePakHandle();   // flush pending appends before the copy
@@ -1636,8 +2066,12 @@ namespace FUI
         // engine's NewInventoryMenuItemLoadTask deref a null model and CTD.
         // The grid never draws them (name/playable filtered), but Prefetch
         // walks raw GetInventory() output — gate every queue entry here.
-        bool Capturable(RE::TESBoundObject* a_obj)
+        bool Capturable(RE::TESBoundObject* a_in)
         {
+            // ★Judge the thing that will actually be rendered. A spell asked
+            // about itself answers "no model" and is refused for ever; asked
+            // about its display object it answers with a flame.
+            RE::TESBoundObject* a_obj = CaptureSourceOf(a_in);
             if (!a_obj || a_obj->Is(RE::FormType::LeveledItem)) return false;
             // GI52 flat style: nothing is ever drawn from a capture, so don't
             // spend a single engine render on one. This is what makes the
@@ -1682,8 +2116,12 @@ namespace FUI
         // rendered perfectly from its WNAM every run -- until a first draft of
         // this probe judged it on MODL alone and threw the working icon away.
         // ARMO likewise keeps its paths on TESBipedModelForm, one per sex.
-        void ModelPathsOf(RE::TESBoundObject* a_obj, std::vector<const char*>& a_out)
+        void ModelPathsOf(RE::TESBoundObject* a_in, std::vector<const char*>& a_out)
         {
+            // Same substitution the key makes -- a spell's nif is its display
+            // object's (CaptureSourceOf).
+            RE::TESBoundObject* a_obj = CaptureSourceOf(a_in);
+            if (!a_obj) return;
             const auto add = [&a_out](const char* p) {
                 if (p && p[0]) a_out.push_back(p);
             };
@@ -1756,6 +2194,49 @@ namespace FUI
             }
             return true;
         }
+
+        // ★★★SAY IT ONCE -- AND STOP MAKING THE QUEUE FIND OUT.
+        //
+        // The probe above was consulted in exactly ONE place, the queue drain,
+        // and its verdict was written NOWHERE. Every other outcome in this
+        // pipeline lands somewhere a later caller can see it -- m_icons,
+        // m_failed, m_queued -- and a bare `continue` lands in none of them. So
+        // QueueCapture's six gates all read clear on the very next frame and
+        // the entry came straight back:
+        //
+        //   draw a tile -> Get() is null -> QueueCapture -> push
+        //     -> drain pops, m_queued.erase, mesh missing, warn, continue
+        //     -> draw the same tile next frame -> ...
+        //
+        // A draw loop asks per tile per frame, so the note below's "re-deciding
+        // every SESSION costs nothing" -- the right intention -- was really
+        // re-deciding at frame rate. Measured: 1345 of one session's 1629 lines
+        // were this one message, burying the diagnostics it was competing with
+        // (it is what made the rotation investigation unreadable).
+        //
+        // ★No cache is needed for the ANSWER. PathMissing memoises per path, as
+        // its own note says, so asking again is a hash lookup. The only thing
+        // that has to be remembered is whether we have SAID it.
+        //
+        // ★And deliberately NOT the persisted fail list, for exactly the reason
+        // the drain gives: install the missing mesh and the item should heal.
+        // A set that dies with the process keeps that -- one restart, not a
+        // cache wipe.
+        //
+        // ★Keyed by FORM, not by icon key: the message names the record and its
+        // nif, and neither of those moves when a def is edited. An icon key
+        // carries the rotation, so keying on it would say the same thing again
+        // the first time somebody turned the item in EDIT.
+        bool MeshMissingQuiet(RE::TESBoundObject* a_obj)
+        {
+            if (!a_obj || !MeshMissing(a_obj)) return false;
+            static std::unordered_set<RE::FormID> s_said;
+            if (s_said.insert(a_obj->GetFormID()).second) {
+                SKSE::log::warn("[ICONS] '{}' skipped: mesh not found ('{}')",
+                    a_obj->GetName(), ModelPathOf(a_obj));
+            }
+            return true;
+        }
     }
 
     void IconCache::QueueCapture(RE::TESBoundObject* a_obj)
@@ -1790,6 +2271,18 @@ namespace FUI
             return;
         }
 
+        // ★★★AFTER THE DISK, NEVER BEFORE IT. This gate is "do not QUEUE a
+        // capture that cannot succeed", not "this item has no picture" -- and
+        // the two are different for exactly the case the shipped pak exists to
+        // serve: an icon rendered on a machine that HAD the mesh. Asked above
+        // the LoadFromDisk lines, it would throw that icon away and report a
+        // skip about an item the player can see perfectly well.
+        //
+        // ★So it belongs here, where the drain's copy effectively sat all
+        // along: an entry only ever reached the drain after the disk had been
+        // asked and had nothing.
+        if (MeshMissingQuiet(a_obj)) return;
+
         // ★GI51: FRONT of the queue. QueueCapture means "something on screen
         // right now has no sprite" — Prefetch means "we may need this later".
         // Draining them in insertion order filled the cache with items the
@@ -1819,6 +2312,9 @@ namespace FUI
             legacy != key && g_pakIndex.contains(legacy)) {
             return;
         }
+        // ★Below the pak checks for the same reason QueueCapture's copy is
+        // below the disk ones: a shipped icon outranks a missing mesh.
+        if (MeshMissingQuiet(a_obj)) return;
         m_queue.push_back({ a_obj, a_obj->GetFormID(), key, a_evictAfter });
         m_queued.insert(key);
     }
@@ -1851,6 +2347,32 @@ namespace FUI
         sweep(dh->GetFormArray<RE::TESSoulGem>());
         sweep(dh->GetFormArray<RE::TESKey>());
         sweep(dh->GetFormArray<RE::ScrollItem>());
+        // ★★SPELLS TOO, and by their own rules rather than the sweep's.
+        //
+        // The generic filter asks GetPlayable() and looks for a world model,
+        // neither of which means anything for a spell: what gets photographed
+        // is its MDOB (CaptureSourceOf), and what makes it worth photographing
+        // is that a player can pick it. Abilities, diseases and enchantments
+        // are carried BY things rather than chosen, so they never reach a
+        // wheel and would be pure capture cost.
+        //
+        // ★Every spell, not the ones this character happens to know. The pak
+        // is built once and shipped to people whose spell lists we cannot see,
+        // and an icon missing from it is a capture THEY wait for. Capturable()
+        // refuses the ~130 with no display object, so the ones without cost
+        // nothing but this loop.
+        for (auto* sp : dh->GetFormArray<RE::SpellItem>()) {
+            if (!sp) continue;
+            const auto t = sp->GetSpellType();
+            if (t != RE::MagicSystem::SpellType::kSpell &&
+                t != RE::MagicSystem::SpellType::kPower &&
+                t != RE::MagicSystem::SpellType::kLesserPower) {
+                continue;
+            }
+            const char* nm = sp->GetName();
+            if (!nm || !nm[0]) continue;
+            if (auto* obj = sp->As<RE::TESBoundObject>()) Prefetch(obj, true);
+        }
         const size_t queued = m_queue.size() - before;
         SKSE::log::info("[ICONS] precache: {} queued ({} already on disk)",
             queued, g_pakIndex.size());
@@ -1904,6 +2426,23 @@ namespace FUI
                 }
                 return;   // nothing dropped; the next frame simply asks again
             }
+            // ★★★THE PROBE THE QUEUE HAS ALWAYS DONE, WHICH THIS ARM NEVER DID.
+            // MeshMissing was called from one place in the whole file, and it
+            // was not this one -- so an inspect of a record whose nif is not
+            // there armed anyway, waited out kTimeoutFrames, and was abandoned.
+            // The abandon releases the slot without recording anything (an
+            // inspect carries no cache key, correctly), UnloadCurrent nulls
+            // m_current, and InspectShotStale answers "stale" forever while
+            // m_inspectValid is false -- so the next frame armed it again.
+            //
+            // ★This one is dearer than the queue's version of the same fault.
+            // The note above names what is being repeated: "the most expensive
+            // request this plugin makes, a 900px model at 3x scale, going into
+            // the same engine NIF loader the reported crash died inside."
+            //
+            // ★Same function, same one-shot report, so the message reads
+            // identically whichever side reached it first.
+            if (m_inspect && MeshMissingQuiet(m_inspect)) return;
             if (InspectShotStale()) {
                 m_pending = Pending{ m_inspect, m_inspect ? m_inspect->GetFormID() : 0u, 0 };
                 m_pendingInspect = true;
@@ -1977,11 +2516,11 @@ namespace FUI
                 // fail list on purpose: the probe is instant, so re-deciding
                 // every session costs nothing and the item heals itself the
                 // moment the missing mesh is installed.
-                if (MeshMissing(p.obj)) {
-                    SKSE::log::warn("[ICONS] '{}' skipped: mesh not found ('{}')",
-                        p.obj->GetName(), ModelPathOf(p.obj));
-                    continue;
-                }
+                // ★The queueing side now asks the same question first, so this
+                // is a net rather than the decision -- it catches whatever a
+                // future queueing path forgets to ask. Reporting moved into
+                // MeshMissingQuiet so the two sites cannot say it twice.
+                if (MeshMissingQuiet(p.obj)) continue;
                 if (!m_icons.contains(p.key)) {
                     m_pending = p;
                     m_pendingInspect = false;
@@ -2060,7 +2599,12 @@ namespace FUI
         const float screenCap =
             ImGui::GetIO().DisplaySize.y / ItemPreview::kSafetyMargin - 8.0f;
         if (screenCap > 64.0f) boxPx = (std::min)(boxPx, screenCap);
-        pv->Request(m_pending.obj, ImVec2(0.0f, 0.0f),
+        // ★The LAST of the four sites that must agree (see CaptureSourceOf):
+        // the key, the two renderability probes, and the render itself. A key
+        // taken from the spell with a picture taken from the flame would file
+        // the capture under a name nothing ever looks up, and the icon would
+        // be re-photographed every single time it was asked for.
+        pv->Request(CaptureSourceOf(m_pending.obj), ImVec2(0.0f, 0.0f),
             ImVec2(boxPx, boxPx), -1.0f, 0.0f, 0.0f, &def);
         if (m_pending.boost > 0.0f) {
             pv->BoostCapture(m_pending.boost);   // B4: resume the clip-boost ladder
@@ -2797,6 +3341,99 @@ namespace FUI
             }
         }
 
+        // ★★★CENTRE WHAT THE EYE SEES, for spells only.
+        //
+        // Everything that draws a sprite centres its BOUNDING BOX, which is
+        // the right answer for a solid object: the box IS the object, and a
+        // bottle should sit in its cell the way it sits on a table. It stops
+        // being the right answer when the content is a LIGHT. A flame with a
+        // faint plume up one side has a box that reaches the plume, and the
+        // part anyone actually looks at then sits off to the other side of the
+        // box's middle. Measured on the ring: 'Flames' put its luminous weight
+        // at 0.60 of its own height where every other spell measured 0.50, and
+        // it was the one icon that looked wrong (reported).
+        //
+        // ★Not the centroid, though the centroid is what found this. A mean
+        // gets dragged by a wide dim halo, and that halo is exactly the part
+        // nobody sees. What is centred here is the BOX OF THE VISIBLE CORE:
+        // pixels carrying at least a quarter of the brightest one. That is a
+        // "where does the shape look like it is" answer rather than a "where
+        // is its mass" one, and for a two-part model -- a dim flame above a
+        // bright orb -- it lands between them, which is where an eye puts it.
+        //
+        // ★Done by PADDING rather than by moving the crop: the crop is bounded
+        // by the capture, and a core near an edge would need pixels that were
+        // never rendered. Transparent rows cost nothing and the draw centres
+        // the result for free -- no draw-side change, no per-form ini, and the
+        // correction rides in the shipped pak.
+        //
+        // ★ITEMS ARE LEFT ALONE, deliberately. A wine bottle measures 0.48 /
+        // 0.64 because it is heavy at the base, and "correcting" that would
+        // float it in its cell. Its box is honest; a spell's is not.
+        if (m_pending.obj->As<RE::SpellItem>() && trimW > 0 && trimH > 0) {
+            const auto vOf = [](const std::uint8_t* a_px) {
+                const double lum = (a_px[0] * 0.299 + a_px[1] * 0.587 +
+                                    a_px[2] * 0.114) / 255.0;
+                return (a_px[3] / 255.0) * lum;
+            };
+            double vmax = 0.0;
+            for (int y = 0; y < trimH; ++y) {
+                const auto* row = sprite.data() + static_cast<size_t>(y) * trimW * 4;
+                for (int x = 0; x < trimW; ++x) vmax = (std::max)(vmax, vOf(row + x * 4));
+            }
+            if (vmax > 0.0) {
+                const double thr = vmax * 0.25;
+                int x0 = trimW, y0 = trimH, x1 = -1, y1 = -1;
+                for (int y = 0; y < trimH; ++y) {
+                    const auto* row = sprite.data() + static_cast<size_t>(y) * trimW * 4;
+                    for (int x = 0; x < trimW; ++x) {
+                        if (vOf(row + x * 4) < thr) continue;
+                        x0 = (std::min)(x0, x); x1 = (std::max)(x1, x);
+                        y0 = (std::min)(y0, y); y1 = (std::max)(y1, y);
+                    }
+                }
+                if (x1 >= x0 && y1 >= y0) {
+                    const int cx = (x0 + x1 + 1) / 2;
+                    const int cy = (y0 + y1 + 1) / 2;
+                    // Pad the side the content is NEAREST, so its core lands on
+                    // the new middle. (Derivation: with padL added on the left,
+                    // the core sits at cx+padL and the middle at (trimW+padL)/2;
+                    // equal when padL = trimW - 2*cx.)
+                    int padL = (std::max)(0, trimW - 2 * cx);
+                    int padR = (std::max)(0, 2 * cx - trimW);
+                    int padT = (std::max)(0, trimH - 2 * cy);
+                    int padB = (std::max)(0, 2 * cy - trimH);
+                    // ★A core hard against one edge would otherwise ask to
+                    // double the sprite, spending memory and resolution on
+                    // emptiness. Past this the picture is simply lopsided and
+                    // half-correcting it is better than paying for the rest.
+                    const int capW = trimW * 3 / 5, capH = trimH * 3 / 5;
+                    padL = (std::min)(padL, capW); padR = (std::min)(padR, capW);
+                    padT = (std::min)(padT, capH); padB = (std::min)(padB, capH);
+                    if (padL || padR || padT || padB) {
+                        const int nw = trimW + padL + padR;
+                        const int nh = trimH + padT + padB;
+                        std::vector<std::uint8_t> padded(
+                            static_cast<size_t>(nw) * nh * 4, 0);
+                        for (int y = 0; y < trimH; ++y) {
+                            std::memcpy(
+                                padded.data() +
+                                    (static_cast<size_t>(y + padT) * nw + padL) * 4,
+                                sprite.data() + static_cast<size_t>(y) * trimW * 4,
+                                static_cast<size_t>(trimW) * 4);
+                        }
+                        SKSE::log::info(
+                            "[ICONS] '{}' centred: core box middle was {} / {} "
+                            "of {}x{} -- padded L{} R{} T{} B{}",
+                            m_pending.obj->GetName(), cx, cy, trimW, trimH,
+                            padL, padR, padT, padB);
+                        sprite = std::move(padded);
+                        trimW = nw;
+                        trimH = nh;
+                    }
+                }
+            }
+        }
 
         // ★Store at the size the TILE can actually show, not the size we
         // captured at. Rendering the model large is what buys the detail

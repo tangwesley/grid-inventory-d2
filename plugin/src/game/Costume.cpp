@@ -269,6 +269,19 @@ namespace FUI::Costume
 
     namespace
     {
+        // CoversSlot as a bitmask, so a costume piece's own claim can be
+        // compared against a carrier's in one operation. ★Derived from
+        // CoversSlot rather than written out, so the shield exclusion keeps
+        // exactly one home.
+        [[nodiscard]] std::uint32_t CoverMask()
+        {
+            std::uint32_t m = 0;
+            for (std::uint32_t i = 0; i < kSlots; ++i) {
+                if (CoversSlot(SlotOf(i))) m |= 1u << i;
+            }
+            return m;
+        }
+
         // The costume addon a WORN armour will lend its list to, by the one rule
         // both the anchor planner and the dressing loop must agree on: the
         // lowest slot the armour claims that the costume has a piece for.
@@ -515,6 +528,13 @@ namespace FUI::Costume
 
         std::vector<RE::TESObjectARMO*> worn;          // anchors belong here
         std::uint32_t                   wornMask = 0;  // ...but not in here
+        // ★★A SECOND mask, and the difference matters. wornMask answers "would
+        // an anchor displace real gear?", so anchors are excluded from it.
+        // `occupied` answers "is this slot free for a carrier to claim?", and
+        // there an anchor -- or DualRing's carrier -- is every bit as much in
+        // the way as a cuirass. Taking a slot something else already holds is
+        // how a carrier ends up standing in for a garment it was never lent.
+        std::uint32_t                   occupied = 0;
         for (const auto& [obj, data] : player->GetInventory(
                  [](RE::TESBoundObject& o) { return o.IsArmor(); })) {
             if (data.first <= 0 || !data.second) continue;
@@ -529,14 +549,21 @@ namespace FUI::Costume
             // stale case repairs itself on the next tick.
             const int ai = AnchorIndexOf(a);
             if (ai >= 0) {
-                // ★★AnchorIndexOf now answers for 32 records but anc[] holds 31
-                // -- index 31 is DualRing's carrier, which this system must
+                // AnchorIndexOf answers for 32 records while anc[] holds 31 --
+                // index 31 is DualRing's carrier, which this system must
                 // neither track nor touch. It still `continue`s, so the carrier
                 // stays out of wornMask exactly like an anchor: the costume
                 // must not treat it as gear occupying a slot.
+                //
+                // It DOES count towards `occupied`, though. A worn carrier
+                // really is sitting on a biped slot, and a costume piece that
+                // ignored it would be dressed into a slot already taken -- which
+                // is what left hair missing under a preset.
+                const auto mask = static_cast<std::uint32_t>(a->GetSlotMask().get());
+                if (data.second->IsWorn()) occupied |= mask;
                 if (ai < kAnchorCount) {
                     anc[ai].held = true;
-                    anc[ai].mask = static_cast<std::uint32_t>(a->GetSlotMask().get());
+                    anc[ai].mask = mask;
                     if (data.second->IsWorn()) { anc[ai].worn = true; worn.push_back(a); }
                 }
                 continue;
@@ -546,6 +573,7 @@ namespace FUI::Costume
             // ★wornMask answers "would an anchor displace something?", so the
             // anchors themselves must not count -- they would look like rivals.
             wornMask |= static_cast<std::uint32_t>(a->GetSlotMask().get());
+            occupied |= static_cast<std::uint32_t>(a->GetSlotMask().get());
         }
 
         // ---- anchors: fill the slots the costume wants and nothing occupies --
@@ -733,18 +761,64 @@ namespace FUI::Costume
                     continue;
                 }
 
-                // ★★★A carrier must stop claiming slots the costume piece does
-                // not use. Swapping the appearance leaves the CLAIM behind: a
-                // hood is Hair+Circlet, a circlet-only costume piece needs just
-                // Circlet, and the leftover Hair claim kept the player bald --
-                // the crown rendered correctly and the hair never came back.
+                // ★★★A carrier claims what the COSTUME PIECE claims, not what
+                // it claims itself. The slot mask is not decoration around the
+                // 3D -- it is what the engine reads to decide which head parts
+                // survive -- so lending the appearance without lending the
+                // claim dresses the body in one item and hides hair like
+                // another.
+                //
+                // Both directions are real and both were bugs:
+                //
+                //  DROP -- a hood is Hair+Circlet, a circlet-only costume piece
+                //  needs just Circlet, and the leftover Hair claim kept the
+                //  player bald: the crown rendered correctly and the hair never
+                //  came back.
+                //
+                //  TAKE -- the mirror image, and the one that survived longer
+                //  because nothing about it looks broken until you know what to
+                //  look for. Wear a helmet that lets hair through (Head+Circlet,
+                //  no Hair) and dress it as one that does not (Head+Hair): the
+                //  costume helmet rendered, the Hair slot stayed free because
+                //  the carrier never claimed it, and the hair grew straight
+                //  through the mesh.
+                //
+                // ★The ANCHOR path has always done this. An anchor is raised on
+                // every slot its costume piece wants that is free, hair
+                // included -- which is why the same outfit hides hair correctly
+                // on a bare head and failed only when a real helmet carried it.
+                // This is the carrier path catching up, not a new rule.
+                //
+                // ★★A slot is only taken when nothing else holds it. That guard
+                // is the whole difference between this and the widening that
+                // was tried and reverted below: a carrier that claims a slot
+                // another garment is wearing takes that garment's place for the
+                // length of the rebuild.
                 if (fromCostume) {
-                    const std::uint32_t keep = covered & donorMask[at];
-                    if (keep && keep != covered) {
-                        SKSE::log::info("[COSTUME]     carrier drops slots 0x{:08X} the "
-                                        "costume piece does not use", covered & ~keep);
-                        reclaim(armo, (full & ~covered) | keep);
-                        covered = keep;
+                    const std::uint32_t piece = donorMask[at] & CoverMask();
+                    const std::uint32_t keep = covered & piece;   // ...of ours
+                    const std::uint32_t take = piece & ~covered & ~occupied;
+                    const std::uint32_t claim = keep | take;
+                    // `at` is a slot both the carrier and the piece claim, so
+                    // `claim` is never empty and the carrier never vanishes.
+                    if (claim != covered) {
+                        if (const auto dropped = covered & ~claim) {
+                            SKSE::log::info("[COSTUME]     carrier drops slots 0x{:08X} the "
+                                            "costume piece does not use", dropped);
+                        }
+                        if (take) {
+                            SKSE::log::info("[COSTUME]     carrier takes slots 0x{:08X} the "
+                                            "costume piece claims and nothing holds", take);
+                            // ★Mark them held before the next carrier is asked.
+                            // Two worn armours can map to the same costume piece
+                            // (a hood and a crown both dressed as one helmet),
+                            // and without this both would claim the same free
+                            // slot -- the second silently taking the first's
+                            // place for the rebuild.
+                            occupied |= take;
+                        }
+                        reclaim(armo, (full & ~covered) | claim);
+                        covered = claim;
                     }
                 }
 
