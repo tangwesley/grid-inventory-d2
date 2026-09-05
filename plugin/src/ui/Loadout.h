@@ -80,10 +80,26 @@ namespace FUI::Loadout
     // FORGED vanished from the board and from the capacity sum -- unreachable,
     // since the vanilla inventory is suppressed.
     [[nodiscard]] int ReservedCount(RE::FormID a_id);
-    // The signatures of those reserved units, so the grid can hold back the
+    // The identities of those reserved units, so the grid can hold back the
     // RIGHT one. Without this the generic "plain pool first" rule hid the plain
     // dagger while the preset was actually wearing the tempered one.
-    [[nodiscard]] std::vector<std::uint16_t> ReservedSigs(RE::FormID a_id);
+    //
+    // Both halves of the identity, not the signature alone. A unit the engine
+    // has given a uniqueID is the sole member of its own pool, and nothing in
+    // the grid will answer a signature-only question with such a unit -- so
+    // a tab that remembered only the signature could neither hide its unit
+    // from the board nor put it back on. Two Hide Bracers, one enchanted and
+    // one plain, both with uniqueIDs: switching back to EQUIP asked for
+    // "signature 1816", got nothing, and let the engine pick -- which put the
+    // preset's plain bracer on the body while the enchanted one sat in the
+    // pack (2026-09-04, from the log). The plain one, reserved by "signature
+    // 0", matched no unit either, so it stayed drawn as well.
+    struct ReservedUnit
+    {
+        std::uint16_t uid = 0;
+        std::uint16_t sig = 0;
+    };
+    [[nodiscard]] std::vector<ReservedUnit> ReservedUnits(RE::FormID a_id);
     [[nodiscard]] bool IsReserved(RE::FormID a_id);
 
     // The forms a tab is holding, for the costume system to read an outfit out

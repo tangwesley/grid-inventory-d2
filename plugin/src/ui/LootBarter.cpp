@@ -2922,6 +2922,16 @@ namespace FUI::LootBarter
         const bool keyOk = !fresh && Sfx::ConfirmKey();
         const bool okClick = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0)) &&
                              !fresh;
+        // ★A pad opens onto the question with the pointer wherever the sale
+        // was clicked -- on the goods, a long drive from either answer. Start
+        // it on the first option (pad only, see UIRoot::PadPointTo); the
+        // fresh-frame guard above means the press that opened the window
+        // cannot also answer it.
+        if (ImGui::IsWindowAppearing()) {
+            const ImVec2 lo = ImGui::GetItemRectMin();
+            const ImVec2 hi = ImGui::GetItemRectMax();
+            UIRoot::PadPointTo(ImVec2((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f));
+        }
         ImGui::SameLine(0.0f, 8.0f * S);
         const bool cancel = (Sfx::CancelButton(Lang::T(Lang::Str::Cancel),
                                                ImVec2(btnW, 0), keyOk) ||
@@ -4976,7 +4986,51 @@ namespace
                         c.count = (std::max)(0, c.count) + add;
                         diff -= add;
                     }
-                    // ...then lay out new cells for the rest
+                    // ★★★...then ADOPT before minting. An aimed store writes
+                    // its cell up front (PlaceStoredCell) under the uid the
+                    // PLAYER's inventory gave the unit -- and a uid is the
+                    // container's numbering: InventoryChanges::SetUniqueID
+                    // re-stamps a listed unit as it arrives here. So the unit
+                    // the engine now reports belongs to a pool this board has
+                    // never seen, the pool it was promised to has no engine
+                    // presence, and this pass used to mint the arrival a fresh
+                    // cell at first-fit while step 3 swept the aimed one away.
+                    // Every tempered, enchanted or renamed piece of gear stored
+                    // onto a chosen square landed where a right-click would
+                    // have put it (user report); plain stacks, having no uid,
+                    // never showed it.
+                    //
+                    // The signature is what survives the trip, so an orphan
+                    // cell of the same form, signature and worn-ness whose own
+                    // pool the engine cannot account for is THIS unit's cell,
+                    // and it is relabelled to the uid the engine settled on
+                    // rather than replaced -- the same choice the player board
+                    // makes when a whole stack changes pool (Grid.cpp, the
+                    // relabel block): the units never moved, only their name.
+                    // ★Only orphans. A cell whose pool IS present speaks for
+                    // its own units; taking it would hide one of them.
+                    // ★Adopting the cell's count as the arrival's -- an aimed
+                    // store says how many it placed. A legacy count of 0 means
+                    // "unspecified" (see the header note) and takes the fill.
+                    for (auto& [ok, oc] : a_cl.cells) {
+                        if (diff <= 0) break;
+                        if (oc.form != sp.obj->GetFormID() || oc.sig != sp.sig ||
+                            oc.worn != sp.worn || oc.uid == sp.uid) {
+                            continue;
+                        }
+                        if (seen.contains(PoolOf(oc))) continue;
+                        const int take = oc.count > 0 ? (std::min)(oc.count, diff)
+                                                      : (std::min)(cap, diff);
+                        SKSE::log::info("[LOOT] shelf cell '{}' adopts {} x{} -- uid "
+                                        "{:04X} -> {:04X} (renumbered on arrival)",
+                            ok, sp.obj->GetName(), take, oc.uid, sp.uid);
+                        oc.uid = sp.uid;
+                        oc.xlIdx = sp.xlIdx;
+                        oc.count = take;
+                        mine.push_back(ok);
+                        diff -= take;
+                    }
+                    // ...and lay out new cells for whatever is left
                     while (diff > 0) {
                         const int take = (std::min)(cap, diff);
                         ContCell  nc;
@@ -4999,7 +5053,23 @@ namespace
                         int rotWanted = 0;
                         if (sp.obj) {
                             const auto rk = OutKey(sp.obj->GetFormID(), sp.uid, sp.sig);
-                            if (const auto ri = g_inRot.find(rk); ri != g_inRot.end()) {
+                            auto ri = g_inRot.find(rk);
+                            // ★The angle was recorded under the PLAYER-side
+                            // uid, and a listed unit arrives renumbered (see
+                            // the adoption pass above). Same form, same
+                            // signature, any uid: OutKey is "FFFFFFFF@UUUU~SSSS".
+                            if (ri == g_inRot.end() && sp.uid != 0) {
+                                char sigPart[8];
+                                std::snprintf(sigPart, sizeof(sigPart), "~%04X", sp.sig);
+                                for (auto it2 = g_inRot.begin(); it2 != g_inRot.end(); ++it2) {
+                                    if (it2->first.compare(0, 8, rk, 0, 8) == 0 &&
+                                        it2->first.compare(13, 5, sigPart) == 0) {
+                                        ri = it2;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (ri != g_inRot.end()) {
                                 rotWanted = ri->second & 3;
                                 g_inRot.erase(ri);
                             }

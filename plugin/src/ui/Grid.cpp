@@ -329,6 +329,10 @@ namespace FUI::Grid
         int g_baseCols = kDefCols;
         int g_baseRows = kDefRows;         // effective (display-clamped)
         int g_baseRowsWanted = kDefRows;   // what "!basegrid" asked for
+        // "!viewrows": how many rows the board shows before it scrolls. The
+        // request, and the display-clamped cap derived from it -- see Grid.h.
+        int g_viewRows = kDefViewRows;
+        int g_viewRowsCap = kDefViewRows;
 
         bool g_overloaded = false;      // W2: hard board can't hold everything
         bool g_capacityDirty = true;    // recompute on next CapacityTick
@@ -1838,10 +1842,41 @@ namespace FUI::Grid
             // asked for never happened -- reported the moment the aimed-drop
             // decline went in.
             bool onTile = false;
+            // ★★★THE CARRIED UNIT'S NAME AS THE SOURCE KNEW IT. `pool` above is
+            // that name spelled the way the board keys pools, and for a unit
+            // with an ExtraUniqueID that spelling is `base@UID` -- the uid, and
+            // nothing else. A uid is the CONTAINER's numbering (InventoryChanges
+            // hands them out from its own counter, SetUniqueID re-stamps on
+            // arrival), so a unit lifted out of a chest turns up on the player's
+            // board under a uid the hint never heard of. Wants() then answered
+            // no, and every tempered or enchanted piece of gear -- anything the
+            // engine had given a list to -- first-fit into the front gap while
+            // the arrows dropped beside it landed where they were aimed. That
+            // is the "equippables ignore the aimed square" report, both ways
+            // (the shelf side is ReconcileContainer's adoption pass).
+            //
+            // What DOES survive the trip is the content signature: temper,
+            // enchantment, charge, poison, a typed name -- the item's own facts,
+            // hashed. So the hint carries both halves, and WantsUnit() falls
+            // back to the signature when the hint was armed by uid. sig 0 is a
+            // real answer here (a listed unit with nothing distinguishing about
+            // it), and it matches the same way.
+            std::uint16_t uid = 0;
+            std::uint16_t sig = 0;
             [[nodiscard]] bool Wants(const std::string& a_base,
                                      const std::string& a_pool) const
             {
                 return col >= 0 && baseKey == a_base && (pool.empty() || pool == a_pool);
+            }
+            // The per-UNIT question the gear paths ask: may THIS arriving unit
+            // take the hint? Exact pool first -- a unit that kept its uid, or
+            // one named by signature all along -- then the renumbered case.
+            [[nodiscard]] bool WantsUnit(const std::string& a_base, std::uint16_t a_uid,
+                                         std::uint16_t a_sig) const
+            {
+                if (!WantsForm(a_base)) return false;
+                if (pool.empty() || pool == PoolPrefix(a_base, a_uid, a_sig)) return true;
+                return uid != 0 && a_sig == sig;
             }
             // ★★THE FORM ALONE: "is an aimed drop of this thing in flight?"
             //
@@ -2083,8 +2118,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // (!simdrift) corrupt EVERY off-board identity, not just the
             // carry: a queued sale, a queued store and a trash park go through
             // the same exclusion and can be caught by the same drift.
-            // ★★A uniqueID DOES NOT DRIFT. The engine assigns it once and it
-            // stays; nothing in the game makes one vanish. Zeroing it here (the
+            // ★★A uniqueID DOES NOT DRIFT -- within one inventory. The engine
+            // assigns it once and it stays for as long as the unit stays;
+            // nothing in the game makes one vanish. (Crossing into another
+            // container is a different matter: the destination re-stamps it,
+            // which is DropHint::uid's whole subject. The off-board set is the
+            // player's own inventory, so that never applies here.) Zeroing it
+            // here (the
             // original behaviour) did not model a hostile reality -- it modelled
             // an IMPOSSIBLE one, in which an off-board unit has no identity at
             // all. Placement survives that by design (its last tier keeps the
@@ -2173,9 +2213,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             for (const auto& u : g_pendingEquip) {                     // equip queued
                 if (u.base == a_base) out.push_back(u);
             }
-            // held back by an INACTIVE preset: the preset recorded which unit
-            for (const std::uint16_t sg : Loadout::ReservedSigs(a_obj->GetFormID())) {
-                out.push_back({ a_base, 0, sg, "reserved" });
+            // held back by an INACTIVE preset: the preset recorded which unit,
+            // uid included -- a uid unit is its own pool, and a record naming
+            // only the signature never matched it (the "same pool" tier in
+            // takeOne covers a uid that arrived AFTER the record was made, not
+            // a plain uid unit, whose signature is 0 and matches nothing).
+            for (const auto& ru : Loadout::ReservedUnits(a_obj->GetFormID())) {
+                out.push_back({ a_base, ru.uid, ru.sig, "reserved" });
             }
             // engine removal queued (sold / stored / dropped) -- read from the
             // LEDGER since B4-3c: the request's own record, uid and sig
@@ -5339,6 +5383,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // store is NOT certain -- it may still fail -- so those
                     // keep the strict rule, where a wrong guess would hide
                     // something the player still owns.
+                    // ★A RESERVED unit is named by its uid when it has one, and
+                    // the uid is the one handle that cannot drift: the tab
+                    // holds THAT unit whatever its signature has done since
+                    // (a charge spent, a temper applied while the tab was
+                    // worn). The strict tier above wants both halves to agree;
+                    // this one settles for the half that is proof. It is not
+                    // the guess the held block below makes -- a uid match is
+                    // exact -- so a reserved unit never takes a sibling.
+                    if (uid != 0 && why && std::strcmp(why, "reserved") == 0) {
+                        for (auto it = insts.begin(); it != insts.end(); ++it) {
+                            if (it->uid != uid) continue;
+                            if (--it->units <= 0) insts.erase(it);
+                            trace("REMOVED by uid (reserved, signature drifted)");
+                            return;
+                        }
+                    }
                     const bool held = why &&
                         (std::strcmp(why, "held") == 0 ||
                          std::strcmp(why, "trash") == 0);
@@ -5511,10 +5571,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // which prefers the plain pool and so hid the plain dagger while the
             // preset was wearing the tempered one, swapping them on screen.
             if (surplus > 0 && a_instanceKeys && a_entry && a_entry->object) {
-                for (const std::uint16_t rs :
-                     Loadout::ReservedSigs(a_entry->object->GetFormID())) {
+                for (const auto& ru :
+                     Loadout::ReservedUnits(a_entry->object->GetFormID())) {
                     if (surplus <= 0) break;
-                    const std::string prefix = PoolPrefix(a_base, 0, rs);
+                    const std::string prefix = PoolPrefix(a_base, ru.uid, ru.sig);
                     const auto pit = pools.find(prefix);
                     if (pit == pools.end()) continue;
                     if (static_cast<int>(pit->second.size()) - hide[prefix] <= 0) continue;
@@ -5830,9 +5890,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // worse failure than a forgotten cell.
                 std::set<std::string> reserved;
                 if (a_instanceKeys && a_entry && a_entry->object) {
-                    for (const std::uint16_t rs :
-                         Loadout::ReservedSigs(a_entry->object->GetFormID())) {
-                        reserved.insert(PoolPrefix(a_base, 0, rs));
+                    for (const auto& ru :
+                         Loadout::ReservedUnits(a_entry->object->GetFormID())) {
+                        reserved.insert(PoolPrefix(a_base, ru.uid, ru.sig));
                     }
                 }
                 for (std::size_t s = 0; s < slots.size(); ++s) {
@@ -6174,10 +6234,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // answer nobody would defend. It has no ownership boundary to
             // measure against (that is the encumbrance line, and these boards
             // are outside it), so the hard board is the whole test.
+            // ★ShownRows for the tab boards: they are drawn that tall (see
+            // the tab views in Rebuild), and a tile seated in a visible row
+            // must not be uprooted by the next rebuild.
             if (it.col >= 0 && it.row >= 0 &&
                 (it.inBag.empty() ? !OwnedFootprint(it.col, it.row, it.mask)
                                   : (IsTabKey(it.inBag) &&
-                                     it.row + it.mask.h > BaseRows()))) {
+                                     it.row + it.mask.h > ShownRows()))) {
                 it.col = -1;
                 it.row = -1;
             }
@@ -6641,9 +6704,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // entry-missing test permanently false, and every dragged
                         // loot silently first-fit into the front gap instead of
                         // landing where it was dropped.
+                        // ★WantsUnit, not Wants: a partner carry's uid is the
+                        // container's numbering and does not cross over (see
+                        // DropHint::uid), so the unit is matched by signature
+                        // when it arrives renumbered.
                         if (le.col < 0 &&
-                            g_dropHint.Wants(baseKey,
-                                PoolPrefix(baseKey, u.uid, u.sig))) {
+                            g_dropHint.WantsUnit(baseKey, u.uid, u.sig)) {
                             le.col = g_dropHint.col;
                             le.row = g_dropHint.row;
                             le.bag = g_dropHint.bag;
@@ -7784,7 +7850,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 v.bagKey = tabKey;
                 v.bagName = Lang::T(t == 1 ? Lang::Str::QuestTab : Lang::Str::KeysTab);
                 v.cols = BaseCols();
-                v.minRows = BaseRows();
+                // ★As tall as the board on screen. The child is sized from
+                // ShownRows for every tab, so a tab board that stopped at the
+                // base rows would sit in a frame with a blank strip under it.
+                // These boards are outside the encumbrance line anyway (see
+                // MakeDisplayTile), so the extra rows are ordinary cells.
+                v.minRows = ShownRows();
                 v.maxRows = 4096;
                 std::vector<Item*> list;
                 for (auto& it : g_items) {
@@ -8957,8 +9028,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // the same honour CollectDisplayTiles pays it (GI21/B2). ★S3:
                 // a hint into a GENERAL bag seats there now; an occupied hint
                 // falls through to first-fit, matching the placer.
-                if (!hintTaken && g_dropHint.Wants(baseKey,
-                        PoolPrefix(baseKey, u->uid, u->sig))) {
+                // ★WantsUnit: same renumbering allowance as the rebuild's gear
+                // branch (DropHint::uid) -- the two paths must agree, or a take
+                // would land right under one and wrong under the other.
+                if (!hintTaken && g_dropHint.WantsUnit(baseKey, u->uid, u->sig)) {
                     auto* hOcc = occOf(g_dropHint.bag);
                     const int  hrot = CanRotate(gdef) ? (g_dropHint.rot & 3) : 0;
                     const Mask hm = MaskOf(gdef, hrot);
@@ -11274,6 +11347,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     int CwBase() { return g_cwBase; }
     int CwMaxCells() { return g_cwMaxCells; }
     int CwBonusCells() { return g_cwBonusCells; }
+
+    void SetViewRows(int a_rows)
+    {
+        g_viewRows = std::clamp(a_rows, kMinBoardRows, kMaxBoardRows);
+        g_viewRowsCap = g_viewRows;   // re-clamped to the display on the next frame
+    }
+    int ViewRowsSetting() { return g_viewRows; }
+
+    // The base board always shows whole; the owned bonus rows show on top of
+    // it up to the cap; anything past the cap is what scrolls.
+    int ShownRows()
+    {
+        const int cap = (std::max)(BaseRows(), g_viewRowsCap);
+        return std::clamp(OwnedRowSpan(), BaseRows(), cap);
+    }
+
+    bool ClampViewRowsToDisplay(float a_displayH, float a_chromeH)
+    {
+        const float cell = CellPx();
+        if (cell <= 0.0f || a_displayH <= 0.0f) return false;
+        const int fits = static_cast<int>((a_displayH - a_chromeH) / cell);
+        // From the REQUEST, like the base rows: lowering SCALE gives the
+        // rows back.
+        const int eff = std::clamp(fits, kMinBoardRows, g_viewRows);
+        if (eff == g_viewRowsCap) return false;
+        g_viewRowsCap = eff;
+        return true;
+    }
 
     void ClaimIncomingPouchGold()
     {
@@ -14351,7 +14452,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // back (it just did). The pixel cannot leak if it does not exist, and
         // the frame is free to sit wherever it looks right — it draws on its
         // own clip now (GI79) and no longer needs room inside the child.
-        const float boardH = BaseRows() * CellPx();
+        // ★ShownRows, not BaseRows: the owned bonus rows are drawn in full up
+        // to "!viewrows", and only the rows past that cap scroll. The window
+        // above is sized from the same number, so the two always agree.
+        const float boardH = ShownRows() * CellPx();
         // ★A child ID PER BOARD, so each tab keeps its own scroll position.
         // One shared id would have carried the main board's scroll onto a
         // KEYS board with four rows on it -- ImGui remembers scroll by id, and
@@ -14785,6 +14889,14 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (Sfx::Button(label, ImVec2(rowW, 0))) {
                 g_rechargePick = { true, r.obj->GetFormID(), r.soul, r.fromBase };
                 g_rechargeUI.open = false;   // identity fields stay for the apply
+            }
+            // ★On a pad the pointer starts on the first gem rather than on
+            // the weapon it was over when LT opened this (pad only, see
+            // UIRoot::PadPointTo). An empty list has nothing to point at.
+            if (i == 0 && ImGui::IsWindowAppearing()) {
+                const ImVec2 lo = ImGui::GetItemRectMin();
+                const ImVec2 hi = ImGui::GetItemRectMax();
+                UIRoot::PadPointTo(ImVec2((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f));
             }
         }
         ImGui::End();
@@ -15698,6 +15810,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                        g_target.col, g_target.row, v.bagKey,
                                        a_held.rot, hintCount };
                     }
+                    // ★Both halves of the name travel with the hint. The pool
+                    // string above spells a uid'd unit as `base@UID`, and that
+                    // uid is the CONTAINER's -- the player's inventory stamps
+                    // its own on arrival. WantsUnit() falls back to the
+                    // signature for exactly that case (see DropHint::uid).
+                    g_dropHint.uid = a_held.uid;
+                    g_dropHint.sig = a_held.sig;
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item
                         // and put it on the cursor (same as the C4 swap)

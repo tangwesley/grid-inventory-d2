@@ -524,6 +524,14 @@ namespace FUI
                 Grid::SetBaseSize(v[0], v[1]);
                 continue;
             }
+            // How many rows the board shows before it scrolls -- the base
+            // rows plus bonus rows up to this. See ShownRows in Grid.h.
+            if (key == "!viewrows") {
+                int v = Grid::kDefViewRows;
+                try { v = std::stoi(rest); } catch (...) {}
+                Grid::SetViewRows(v);
+                continue;
+            }
             // ★W3: does carry weight add rows at all? The switch, separate
             // from the three numbers below -- see Grid.h. Read before them or
             // after them, it makes no difference: nothing here measures.
@@ -1071,6 +1079,13 @@ namespace FUI
             << Grid::kDefCols << ", " << Grid::kDefRows << ")\n";
         out << "!basegrid = " << Grid::BaseCols() << ", "
             << Grid::BaseRowsSetting() << "\n";   // the REQUEST — see Grid.h
+        // Rows shown before the board scrolls: base rows plus carry-weight
+        // bonus rows up to this many. Written unconditionally, like !basegrid.
+        out << "; !viewrows = rows the board shows before it scrolls -- bonus rows "
+               "past this scroll (default " << Grid::kDefViewRows << ")\n";
+        out << "; !viewrows = 스크롤 없이 보이는 최대 세로 칸 수 (기본값 "
+            << Grid::kDefViewRows << ")\n";
+        out << "!viewrows = " << Grid::ViewRowsSetting() << "\n";   // the REQUEST
         // Carry Weight bonus -> extra inventory cells
         // 소지 중량 보너스의 칸 환전
         // ★The switch, written UNCONDITIONALLY next to the numbers it governs

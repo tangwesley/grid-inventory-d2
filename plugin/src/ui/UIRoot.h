@@ -243,6 +243,12 @@ namespace FUI::UIRoot
     // Should GridMenu keep asking for the vanilla Cursor Menu? False only when
     // we have taken over the pointer ourselves (see PadCursorMode).
     [[nodiscard]] bool WantsGameCursor();
+    // ★Land the PAD pointer on a widget the caller just drew -- a popup's
+    // first option, typically, so a stick does not have to drive to it.
+    // Pad only: a mouse pointer is where the hand left it and stays there
+    // (same rule as the open's homing in MouseHandler). Applied by the next
+    // frame's MouseHandler, like HandleSideSwap; the frame is invisible.
+    void PadPointTo(const ImVec2& a_pos);
 
     // ---- control hints -----------------------------------------------------
     // What to PRINT for an action in the tooltip's hint lines. While a pad is

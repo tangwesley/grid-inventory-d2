@@ -36,6 +36,22 @@ namespace FUI::Loadout
             // one, so switching tabs silently swapped them. 0 = no signature
             // (a plain unit), which still means "engine's choice".
             std::uint16_t sig = 0;
+            // ...and the engine's own name for the unit, when it has one. A
+            // uniqueID makes a unit the SOLE member of its pool (GLOSSARY:
+            // "uid"), and the grid's resolvers honour that strictly: a
+            // signature-only question is never answered with a uid unit
+            // (GI42 in ExtraForPoolImpl), and a signature-only reservation
+            // never matches one on the board. So on a save that hands out
+            // uids -- this one gives every unit one -- a tab recording only
+            // the signature could neither re-equip its unit nor hide it:
+            // EquipSet resolved nullptr, the engine picked, and switching back
+            // to EQUIP put the PRESET's plain bracer on the body while the
+            // enchanted one it had actually worn sat in the pack; the plain
+            // one, "reserved" by signature 0, matched nothing and drew on the
+            // board as well. Measured 2026-09-04 (u0007/s0000 worn after the
+            // switch, u000A/s1816 on the board). 0 = the engine never gave
+            // this unit a uid, and the signature does all the naming.
+            std::uint16_t uid = 0;
         };
         struct LO
         {
@@ -54,6 +70,11 @@ namespace FUI::Loadout
         // the equip event, cleared by the re-read it triggers.
         bool g_activeStale = false;
         bool g_switching = false;   // DoSwitch is mid-strip; do not re-read
+        // A cosave has just come in and its entries may name units by
+        // signature alone (v2 records, or a unit the engine had not stamped
+        // yet). Resolved to uids once the player's inventory is readable --
+        // see AdoptUids.
+        bool g_adoptPending = false;
 
         constexpr RE::FormID kLeftHandSlot = 0x13F43;   // BGSEquipSlot "LeftHand"
         constexpr RE::FormID kGold001 = 0x0000000F;
@@ -151,6 +172,93 @@ namespace FUI::Loadout
                    Grid::IsRing(RE::TESForm::LookupByID<RE::TESObjectARMO>(a_e.id));
         }
 
+        std::uint16_t UidOf(const RE::ExtraDataList* a_xl)
+        {
+            if (!a_xl) return 0;
+            auto* xl = const_cast<RE::ExtraDataList*>(a_xl);
+            const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+            return xu ? xu->uniqueID : 0;
+        }
+
+        // The unit a tab captured, as the grid's resolvers want it named: by
+        // uid when the engine gave one (the sole member of its pool), else by
+        // signature, and never a signature question about a uid unit. A uid
+        // that no longer resolves -- the unit has been re-stamped or is gone
+        // -- falls back to "any unit of the same signature", which is an
+        // interchangeable one by definition; and a plain, uid-less unit stays
+        // nullptr so the engine takes it from the bare count, as before.
+        RE::ExtraDataList* UnitOf(RE::PlayerCharacter* a_p, RE::TESBoundObject* a_obj,
+                                  const Entry& a_e)
+        {
+            auto* entry = Grid::LiveEntryOf(a_p, a_obj);
+            if (auto* xl = Grid::ExtraForPool(entry, a_e.uid, a_e.sig)) return xl;
+            if (a_e.uid != 0 && a_e.sig != 0) return Grid::ExtraForPool(entry, 0, a_e.sig);
+            return nullptr;
+        }
+
+        // Give every uid-less entry of an INACTIVE tab the uid of a unit that
+        // answers to it, so the tab names its unit the way the grid needs.
+        //
+        // An entry can be uid-less for two reasons: the record predates the
+        // uid (v2 cosaves), or the engine had not stamped the unit when the
+        // tab captured it. Either way the entry says "signature S" about a
+        // unit that now carries a uid, and the grid answers signature-only
+        // questions about uid units with NOTHING (a uid unit is its own pool).
+        // For a signature that is not 0 the board has a "same pool" tier that
+        // still finds it; for signature 0 -- a plain unit with a uid, which
+        // on some saves is EVERY plain unit -- there is no tier at all. The
+        // failure then hides until the count first exceeds the reservation:
+        // one unit reserved out of one is hidden as a whole entry without
+        // ever naming which, so the tab looks intact right up to the moment a
+        // second copy arrives -- taken from a chest, say -- and the walk has
+        // to choose. It cannot, and draws both: the preset's unit appears on
+        // the board as though the tab had let go of it (2026-09-04, reported
+        // as "taking an item of the same base unequipped it from the preset").
+        //
+        // Only the inactive tabs, whose units all sit unworn in the pack; the
+        // active tab is re-read from the body by CaptureWorn, uids included,
+        // and is marked stale for that alongside this. A uid claimed by one
+        // entry is not offered to another, so two tabs holding two identical
+        // daggers end up with one each. Units of one signature are
+        // interchangeable by definition, so WHICH one an entry adopts cannot
+        // be wrong. An entry that finds nothing stays uid-less, which is the
+        // engine-picks behaviour it already had.
+        void AdoptUids(RE::PlayerCharacter* a_p)
+        {
+            std::set<std::pair<RE::FormID, std::uint16_t>> claimed;
+            for (const auto& lo : g_loadouts) {
+                for (const auto& e : lo.items) {
+                    if (e.uid) claimed.insert({ e.id, e.uid });
+                }
+            }
+            int adopted = 0;
+            for (int i = 0; i < static_cast<int>(g_loadouts.size()); ++i) {
+                if (i == g_active) continue;
+                for (auto& e : g_loadouts[i].items) {
+                    if (e.uid) continue;
+                    auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(e.id);
+                    auto* entry = obj ? Grid::LiveEntryOf(a_p, obj) : nullptr;
+                    if (!entry || !entry->extraLists) continue;
+                    for (auto* xl : *entry->extraLists) {
+                        if (!xl) continue;
+                        if (xl->HasType<RE::ExtraWorn>() || xl->HasType<RE::ExtraWornLeft>()) {
+                            continue;
+                        }
+                        const std::uint16_t uid = UidOf(xl);
+                        if (!uid || Grid::InstanceSigOf(xl) != e.sig) continue;
+                        if (!claimed.insert({ e.id, uid }).second) continue;
+                        e.uid = uid;
+                        ++adopted;
+                        break;
+                    }
+                }
+            }
+            if (adopted) {
+                SKSE::log::info("[LOADOUT] {} preset entr{} adopted a uid", adopted,
+                                adopted == 1 ? "y" : "ies");
+            }
+        }
+
         std::vector<Entry> CaptureWorn(RE::PlayerCharacter* a_p)
         {
             std::vector<Entry> out;
@@ -169,9 +277,8 @@ namespace FUI::Loadout
                 // GI54: a SHIELD is armour (ExtraWorn, hand-free) -- reading
                 // hand 2 missed its list and recorded sig 0 for tempered shields.
                 const int readHand = left ? (b->Is(RE::FormType::Armor) ? 0 : 2) : 1;
-                const std::uint16_t sig = Grid::InstanceSigOf(
-                    Grid::WornExtraOf(Grid::LiveEntryOf(a_p, b), readHand));
-                out.push_back({ b->GetFormID(), left, sig });
+                auto* wxl = Grid::WornExtraOf(Grid::LiveEntryOf(a_p, b), readHand);
+                out.push_back({ b->GetFormID(), left, Grid::InstanceSigOf(wxl), UidOf(wxl) });
             };
 
             auto* right = a_p->GetEquippedObject(false);
@@ -219,7 +326,8 @@ namespace FUI::Loadout
             if (!DualRing::TakeOffPending()) {   // asked for off; do not record it
                 if (auto* second = DualRing::Second()) {
                     if (seen.insert({ second->GetFormID(), true }).second) {
-                        out.push_back({ second->GetFormID(), true, DualRing::SecondSig() });
+                        out.push_back({ second->GetFormID(), true,
+                                        DualRing::SecondSig(), DualRing::SecondUid() });
                     }
                 }
             }
@@ -323,20 +431,21 @@ namespace FUI::Loadout
                 if (e.leftHand && !obj->Is(RE::FormType::Armor)) {
                     slot = RE::TESForm::LookupByID<RE::BGSEquipSlot>(kLeftHandSlot);
                 }
-                // D4-b: name the unit the preset actually captured. Sig 0 (a
-                // plain unit) resolves to nullptr and the engine picks, which
-                // is right -- plain units are interchangeable.
-                auto* xl = Grid::ExtraForPool(Grid::LiveEntryOf(a_p, obj), 0, e.sig);
-                a_em->EquipObject(a_p, obj, xl, 1, slot, false, false, true, true);
+                // D4-b: name the unit the preset actually captured -- by uid
+                // first, see UnitOf. A plain, uid-less unit resolves to nullptr
+                // and the engine picks, which is right: those are
+                // interchangeable.
+                a_em->EquipObject(a_p, obj, UnitOf(a_p, obj, e), 1, slot,
+                                  false, false, true, true);
             }
             for (const auto& e : a_items) {
                 if (!IsRing2(e)) continue;
                 auto* ring = RE::TESForm::LookupByID<RE::TESObjectARMO>(e.id);
                 if (!ring || !StillOwned(a_p, ring)) continue;   // sold/dropped -> skip
-                // Same unit rule as above: the signature names the copy the tab
-                // captured, and 0 lets DualRing take the engine's choice.
-                auto* xl = Grid::ExtraForPool(Grid::LiveEntryOf(a_p, ring), 0, e.sig);
-                if (!DualRing::Wear(ring, xl)) {
+                // Same unit rule as above: uid, else signature, names the copy
+                // the tab captured, and a plain one lets DualRing take the
+                // engine's choice.
+                if (!DualRing::Wear(ring, UnitOf(a_p, ring, e))) {
                     // Wear says why in its own log line; this says whose set it
                     // was, which is the part that would otherwise be a mystery.
                     SKSE::log::info("[LOADOUT] second ring 0x{:08X} not restored", e.id);
@@ -481,14 +590,14 @@ namespace FUI::Loadout
         return Grid::GoldAmount();
     }
 
-    std::vector<std::uint16_t> ReservedSigs(RE::FormID a_id)
+    std::vector<ReservedUnit> ReservedUnits(RE::FormID a_id)
     {
         EnsureInit();
-        std::vector<std::uint16_t> out;
+        std::vector<ReservedUnit> out;
         for (int i = 0; i < static_cast<int>(g_loadouts.size()); ++i) {
             if (i == g_active) continue;
             for (const auto& e : g_loadouts[i].items) {
-                if (e.id == a_id) out.push_back(e.sig);
+                if (e.id == a_id) out.push_back({ e.uid, e.sig });
             }
         }
         return out;
@@ -592,6 +701,15 @@ namespace FUI::Loadout
                 g_activeStale = false;
             }
         }
+        // Same gate as the re-read: an inventory scan, on the game thread,
+        // once there is a player to scan.
+        if (g_adoptPending && !g_switching) {
+            auto* p = RE::PlayerCharacter::GetSingleton();
+            if (p && p->Is3DLoaded()) {
+                AdoptUids(p);
+                g_adoptPending = false;
+            }
+        }
     }
 
     void ResetSession()
@@ -601,18 +719,20 @@ namespace FUI::Loadout
         g_pendingSwitch = -1;
         g_pendingPurchase = false;
         g_pendingRemove = -1;
+        g_adoptPending = false;
         EnsureInit();
     }
 
     // ---- L3: cosave persistence ----
     // Record 'LODT' v1: [u32 active][u32 loadoutCount] then per loadout
     // [u32 nameLen][name bytes][u32 itemCount] { [u32 formID][u8 leftHand] }.
+    // v2 appends [u16 sig] to each item, v3 appends [u16 uid] after that.
     // FormIDs go through ResolveFormID on load — items from removed plugins
     // are silently dropped (matches EquipSet's sold/dropped skip).
 
     namespace
     {
-        constexpr std::uint32_t kVersion = 2;   // v2 adds Entry::sig
+        constexpr std::uint32_t kVersion = 3;   // v2 adds Entry::sig, v3 Entry::uid
         constexpr std::uint32_t kMaxLoadouts = 64;
         constexpr std::uint32_t kMaxName = 256;
         constexpr std::uint32_t kMaxItems = 4096;
@@ -638,6 +758,7 @@ namespace FUI::Loadout
                 const std::uint8_t lh = e.leftHand ? 1 : 0;
                 a_intfc->WriteRecordData(lh);
                 a_intfc->WriteRecordData(e.sig);   // v2
+                a_intfc->WriteRecordData(e.uid);   // v3
             }
         }
         SKSE::log::info("[LOADOUT] cosave: saved {} tabs (active {})",
@@ -648,7 +769,9 @@ namespace FUI::Loadout
     {
         // v1 records carry no signature: load them with sig 0, which behaves
         // exactly as v1 did (engine picks the copy). Refusing them outright
-        // would silently wipe every preset the player had.
+        // would silently wipe every preset the player had. v2 records carry
+        // no uid, and load with uid 0 the same way: the next time the tab is
+        // worn its re-read records the uid, so the gap closes by itself.
         if (a_version < 1 || a_version > kVersion) {
             SKSE::log::warn("[LOADOUT] cosave: unsupported record v{} (max v{}) - skipped",
                             a_version, kVersion);
@@ -682,9 +805,11 @@ namespace FUI::Loadout
                 }
                 std::uint16_t sig = 0;
                 if (a_version >= 2 && !a_intfc->ReadRecordData(sig)) { ok = false; break; }
+                std::uint16_t uid = 0;
+                if (a_version >= 3 && !a_intfc->ReadRecordData(uid)) { ok = false; break; }
                 RE::FormID resolved = 0;
                 if (a_intfc->ResolveFormID(id, resolved)) {   // plugin removed -> drop
-                    lo.items.push_back({ resolved, lh != 0, sig });
+                    lo.items.push_back({ resolved, lh != 0, sig, uid });
                 }
             }
             in.push_back(std::move(lo));
@@ -700,6 +825,11 @@ namespace FUI::Loadout
         EnsureFreePreset();
         g_active = (std::min)(static_cast<int>(active),
             static_cast<int>(g_loadouts.size()) - 1);
+        // Bring every tab's naming up to date once the player exists: the
+        // active tab from the body, the others by adoption (see AdoptUids).
+        // Both wait in ProcessPending for the 3D to load.
+        g_activeStale = true;
+        g_adoptPending = true;
         SKSE::log::info("[LOADOUT] cosave: loaded {} tabs (active {})",
             g_loadouts.size(), g_active);
     }

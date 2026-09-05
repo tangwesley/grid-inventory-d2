@@ -28,9 +28,27 @@ namespace FUI::Costume
         // in that slot right now. We dress a slot, note what ended up in it,
         // and if the engine later puts something else there it has rebuilt the
         // body from the restored lists -- which is the bald head.
-        // ★A pointer kept for COMPARISON only, never dereferenced.
-        int         g_watchSlot = -1;
-        const void* g_watchAddon = nullptr;
+        // ★Pointers kept for COMPARISON only, never dereferenced.
+        //
+        // ★★EVERY SLOT, not one. The watch used to sample a single DRESSED
+        // slot, on the theory that a rebuild remakes the whole body so any one
+        // slot tells the story. It does not when the costume piece in that
+        // slot is the SAME form the player is wearing: the engine's rebuild
+        // hangs the same ARMA there, the pointer compares equal, and the watch
+        // is blind -- while the slots that DO differ go unwatched. That is
+        // exactly a transmog that reuses the worn armour and only HIDES the
+        // helmet: the body slot never changes, the helmet slot goes from
+        // empty (claim withdrawn) back to the helmet's addon, and nothing
+        // redressed it. "My helmet keeps reappearing" (2026-09-04; the watch
+        // had fired zero times in the whole session's log).
+        //
+        // The snapshot is the body as it stands after OUR rebuild. Any slot
+        // deviating from it means the engine rebuilt from the restored lists,
+        // and the visible result is no longer the costume. A rebuild that
+        // reproduces the snapshot exactly needs no redress, so this cannot
+        // loop on its own work.
+        bool                                 g_watching = false;
+        std::array<const void*, BO::kEditorTotal> g_watch{};
 
         // Post-load re-dress schedule -- the belt to the watch's braces. The
         // watch catches a rebuild in one frame; this covers the case where a
@@ -902,28 +920,27 @@ namespace FUI::Costume
         g_lastRebuild = g_frame;
         g_appliedTab = wanted ? g_tab : -1;
 
-        // ★Sample AFTER the rebuild -- what is in the slot now is the thing a
+        // ★Sample AFTER the rebuild -- what is in the slots now is the thing a
         // later rebuild would replace. Sampling before would record the body we
         // just discarded and the watch would fire on our own work, forever.
-        // ★A slot the costume actually DRESSED. An untouched slot holds the
-        // same addon before and after, so watching one would never notice
-        // anything, and watching an empty one would compare null to null.
-        g_watchSlot = -1;
-        g_watchAddon = nullptr;
+        // ★ALL the slots, empty ones included: a slot whose claim was
+        // withdrawn is empty NOW and holds the real helmet after an engine
+        // rebuild, and that transition is the one this watch exists to see.
+        // (Update3DModel is synchronous -- were it not, RestoreAll would put
+        // the lists back before the engine read them and no costume would
+        // ever appear -- so the biped already shows our work here.)
+        g_watching = false;
+        g_watch.fill(nullptr);
         if (wanted) {
             auto* bp = player->GetActorRuntimeData().biped.get();
             if (bp) {
-                for (std::uint32_t i = 0; i < kSlots; ++i) {
-                    if (!donor[i] || !bp->objects[i].addon) continue;
-                    g_watchSlot = static_cast<int>(i);
-                    g_watchAddon = bp->objects[i].addon;
-                    break;
-                }
+                for (std::uint32_t i = 0; i < kSlots; ++i) g_watch[i] = bp->objects[i].addon;
+                g_watching = true;
             }
         }
         SKSE::log::info("[COSTUME] applied tab {}: {} redressed, {} mask edit(s) "
-                        "(watching slot {})",
-            g_appliedTab, backups.size(), edits.size(), g_watchSlot);
+                        "(watching {} slots)",
+            g_appliedTab, backups.size(), edits.size(), g_watching ? kSlots : 0u);
 
         // ★★When a costume piece does not appear and every step above still
         // reports success, the question has stopped being "did we ask
@@ -999,16 +1016,20 @@ namespace FUI::Costume
             g_dirty = true;
         }
 
-        // ★The watch. One slot is enough -- a rebuild remakes the whole body,
-        // so whichever slot we sampled tells the same story as all of them.
-        if (g_watchSlot >= 0 && !g_dirty) {
+        // ★The watch. Every slot, compared against what our own rebuild left
+        // there -- see g_watch for why one slot was not enough.
+        if (g_watching && !g_dirty) {
             auto* p = RE::PlayerCharacter::GetSingleton();
             auto* bp = (p && p->Is3DLoaded()) ? p->GetActorRuntimeData().biped.get() : nullptr;
-            if (bp && bp->objects[g_watchSlot].addon != g_watchAddon) {
-                SKSE::log::info("[COSTUME] slot {} was rebuilt from under us -- redressing",
-                    g_watchSlot);
-                g_appliedTab = -2;
-                g_dirty = true;
+            if (bp) {
+                for (std::uint32_t i = 0; i < kSlots; ++i) {
+                    if (bp->objects[i].addon == g_watch[i]) continue;
+                    SKSE::log::info("[COSTUME] slot {} was rebuilt from under us -- redressing",
+                        i);
+                    g_appliedTab = -2;
+                    g_dirty = true;
+                    break;
+                }
             }
         }
         // ★Every tick, not a window around the rebuild. The bug does not appear
@@ -1050,10 +1071,10 @@ namespace FUI::Costume
         g_appliedTab = -2;   // unknown: the next Apply must run even if -1
         g_dirty = false;
         // ★The schedule belongs to the save being left. NoteGameLoaded opens a
-        // fresh one for the save coming in. The watch goes with it: its slot
-        // and addon describe a body that is being torn down.
+        // fresh one for the save coming in. The watch goes with it: its
+        // snapshot describes a body that is being torn down.
         g_reapplyLeft = 0;
-        g_watchSlot = -1;
-        g_watchAddon = nullptr;
+        g_watching = false;
+        g_watch.fill(nullptr);
     }
 }

@@ -3997,8 +3997,18 @@ namespace FUI::UIRoot
                     Grid::MarkCapacityDirty();
                     Grid::RequestRebuild();   // the board changed shape: reflow
                 }
+                // The view cap gets the same guard. A change here moves only
+                // how tall the board is drawn, never where anything is placed
+                // -- except on the tab boards, which are drawn that tall and
+                // place into it, so they reflow.
+                if (Grid::ClampViewRowsToDisplay(io.DisplaySize.y, chromeH)) {
+                    Grid::RequestRebuild();
+                }
             }
-            const float gridBodyH = itemsLabelH + Grid::BaseRows() * Grid::CellPx() + 30.0f * S;
+            // ★ShownRows: the base board plus whatever bonus rows fit under
+            // "!viewrows". The window grows with the bonus instead of hiding
+            // every bonus row behind a scroll.
+            const float gridBodyH = itemsLabelH + Grid::ShownRows() * Grid::CellPx() + 30.0f * S;
             // left column must fit doll + stats panel + GOLD bar (S1); compact
             // reserves the GOLD-bar strip under the grid instead
             // ★The doll-to-stats gap is what's LEFT OVER, not a fixed 44.
@@ -5092,6 +5102,12 @@ namespace FUI::UIRoot
         // or unbound action still names the key, so a hint never goes blank.
         if (!g_padActive.load() || !g_padLabelReady) return kKeyboard[i];
         return g_padLabel[i] ? g_padLabel[i] : kKeyboard[i];
+    }
+
+    void PadPointTo(const ImVec2& a_pos)
+    {
+        if (!g_padActive.load()) return;
+        SendCursorTo(a_pos);
     }
 
     bool WantsGameCursor()

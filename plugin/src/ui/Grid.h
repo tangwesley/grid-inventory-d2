@@ -1212,6 +1212,26 @@ namespace FUI::Grid
     // actually get it back. Returns true when the effective rows moved.
     bool ClampBaseRowsToDisplay(float a_displayH, float a_chromeH);
 
+    // ★★HOW TALL THE BOARD IS DRAWN, which is a third row count. The base
+    // board is what the player owns outright; carry weight appends rows past
+    // it; and the board on screen used to be pinned to the base rows however
+    // many bonus rows there were, so every bonus row lived behind a scroll.
+    // Now the board grows to show the owned rows up to "!viewrows" (default
+    // 14), and only rows past THAT scroll. The window is sized from
+    // ShownRows(), so it grows and shrinks with the bonus.
+    //
+    // The setting is the cap, not a computation from the screen -- the
+    // player knows how many rows their window fits. The display check that
+    // already guards the base rows is applied to this cap as well, purely so
+    // an oversized setting cannot walk the gold bar off the bottom edge; on a
+    // screen that fits the setting it changes nothing.
+    inline constexpr int kDefViewRows = 14;
+    void SetViewRows(int a_rows);          // "!viewrows": rows shown before scrolling
+    [[nodiscard]] int ViewRowsSetting();   // the request -- persistence only
+    [[nodiscard]] int ShownRows();         // rows the board child actually shows
+    // Same contract as ClampBaseRowsToDisplay, for the view cap.
+    bool ClampViewRowsToDisplay(float a_displayH, float a_chromeH);
+
     inline constexpr float kCell    = 48.0f;   // base cell at UI scale 1.0
 
     // H′: every layout metric goes through the global UI scale.
