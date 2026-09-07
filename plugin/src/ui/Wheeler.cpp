@@ -1402,10 +1402,7 @@ namespace FUI::Wheeler
                     // ★A pool, not a list: the sig is what distinguishes the
                     // tempered pool from the plain one, which is exactly the
                     // grain the favourites system works at.
-                    std::uint16_t starUid = 0;
-                    if (const auto* xu = star->GetByType<RE::ExtraUniqueID>()) {
-                        starUid = xu->uniqueID;
-                    }
+                    const std::uint16_t starUid = Grid::PoolUidOf(obj, star);
                     // ★"worn" includes the SECOND RING: a carrier wears its
                     // effect while the ring stands in the pack, so IsWorn says
                     // no -- and the wheel then showed no check mark and

@@ -305,10 +305,10 @@ namespace FUI::Equip
                     accs.push_back({ obj, count, glow, xl, hand, PrimarySlotOf(obj) });
                     return;
                 }
-                std::uint16_t uid = 0;
-                if (xl) {
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
-                }
+                // ★PoolUidOf: a worn quiver's uid must not name the unit, or the
+                // doll's record (uid N) and the board's plain pool (uid 0) never
+                // match on the way back down
+                const std::uint16_t uid = Grid::PoolUidOf(obj, xl);
                 a_out[slot] = { obj, count, glow, uid, Grid::InstanceSigOf(xl), hand };
             };
 
@@ -331,12 +331,7 @@ namespace FUI::Equip
                     const std::string id =
                         (i < std::size(kDollAcc)) ? std::string(kDollAcc[i])
                                                   : ("acc" + std::to_string(i + 1));
-                    std::uint16_t uid = 0;
-                    if (a.xl) {
-                        if (const auto* xu = a.xl->GetByType<RE::ExtraUniqueID>()) {
-                            uid = xu->uniqueID;
-                        }
-                    }
+                    const std::uint16_t uid = Grid::PoolUidOf(a.obj, a.xl);
                     a_out[id] = { a.obj, a.count, a.glow, uid,
                                   Grid::InstanceSigOf(a.xl), a.hand };
                 }
@@ -1342,11 +1337,10 @@ namespace FUI::Equip
 
     namespace
     {
-        std::uint16_t UidOfList(RE::ExtraDataList* a_xl)
+        // The pool system's answer, not the raw ExtraUniqueID (see PoolUidOf).
+        std::uint16_t UidOfList(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl)
         {
-            if (!a_xl) return 0;
-            const auto* xu = a_xl->GetByType<RE::ExtraUniqueID>();
-            return xu ? xu->uniqueID : 0;
+            return Grid::PoolUidOf(a_obj, a_xl);
         }
     }
 
@@ -1568,7 +1562,7 @@ namespace FUI::Equip
                         auto* w2 = Grid::WornExtraOf(d2.second.get());
                         const std::uint16_t s2 = Grid::InstanceSigOf(w2);
                         const bool sameUnit = (act.sig == s2) &&
-                                              (act.uid == 0 || act.uid == UidOfList(w2));
+                                              (act.uid == 0 || act.uid == UidOfList(o2, w2));
                         if (sameUnit) continue;
                     }
                     auto* a2 = o2->As<RE::TESObjectARMO>();
@@ -1789,7 +1783,7 @@ namespace FUI::Equip
                             continue;
                         }
                         ++wornUnits;
-                        wUid = UidOfList(xl);
+                        wUid = UidOfList(obj, xl);
                         wSig = Grid::InstanceSigOf(xl);
                     }
                 }

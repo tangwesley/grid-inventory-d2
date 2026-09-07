@@ -687,6 +687,40 @@ namespace FUI::Grid
         void ReleaseWornPendingEquips(const std::string& a_baseKey,
                                       RE::InventoryEntryData* a_entry);
 
+        int EffectiveCap(RE::TESBoundObject* a_obj);   // defined with StackCapOf below
+
+        // ★★★A STACK HAS NO UNIT NAMES. The uid the POOL system sees for a list.
+        //
+        // The engine's ExtraUniqueID names ONE unit, and for gear that is the
+        // whole point of GI1: a tile is bound to the sub-stack it shows, so
+        // equipping one sword never shifts its neighbour onto the wrong cell.
+        // PoolPrefix therefore lets a uid win over everything -- "form@XXXX"
+        // is a pool of exactly one.
+        //
+        // Applied to a STACKABLE that rule is wrong, and on a save that stamps
+        // a uid on every unit it is wrong for every arrow. Seven iron arrows
+        // recovered one at a time each sat on their own list carrying nothing
+        // but a uid, and unequipping the quiver put a 38-stack on the board
+        // and then seven single-arrow tiles across the free cells (user
+        // report). Every one of those lists is interchangeable with the plain
+        // stack -- InstanceSig already says so by hashing nothing on it and
+        // answering 0 -- so the uid must not split them either.
+        //
+        // ★The gate is the form's CAP, not the list's contents: a stolen arrow
+        // (sig != 0) still pools by signature with the other stolen arrows,
+        // and never by uid. Every read of a list's uid that feeds pool
+        // identity goes through here, so the walk that mints tiles, the
+        // matchers that release a pending equip, and the resolvers that pick
+        // a list to remove all agree about what a uid means for the form.
+        std::uint16_t PoolUid(RE::TESBoundObject* a_obj, const RE::ExtraDataList* a_xl)
+        {
+            if (!a_xl) return 0;
+            if (a_obj && EffectiveCap(a_obj) > 1) return 0;
+            auto* xl = const_cast<RE::ExtraDataList*>(a_xl);
+            const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+            return xu ? xu->uniqueID : 0;
+        }
+
         // ---- GI20: pools ----------------------------------------------------
         //
         // A POOL is a set of units that are interchangeable WITH EACH OTHER:
@@ -1011,8 +1045,12 @@ namespace FUI::Grid
                 // so it can never be the answer to a sig- or plain-pool request.
                 // The star-clearing loop in ResolveExitUnit already had this
                 // filter -- same concept, one implementation now.
-                if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
-                    xu && xu->uniqueID != 0) continue;
+                // ★PoolUid, not the raw ExtraUniqueID: a stackable's uid-only
+                // list IS a plain unit (see PoolUid), and this is the resolver
+                // a plain arrow tile asks when it wants a list to hand the
+                // engine. Skipping those lists answered nullptr for a quiver
+                // whose every arrow the save had stamped.
+                if (PoolUid(a_entry->object, xl) != 0) continue;
                 return xl;
             }
             return nullptr;   // genuinely listless (or every candidate is worn)
@@ -2355,8 +2393,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (!L && !R) continue;
                     if (u.hand == 1 && !R) continue;
                     if (u.hand == 2 && !L) continue;
-                    std::uint16_t uid = 0;
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
+                    const std::uint16_t uid = PoolUid(a_entry->object, xl);
                     if (uid == u.uid && InstanceSig(xl) == u.sig) {
                         matching += (std::max)(1, xl->GetCount());
                     }
@@ -5083,10 +5120,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         xl->HasType<RE::ExtraWornLeft>()) {
                         continue;
                     }
-                    std::uint16_t xuid = 0;
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                        xuid = xu->uniqueID;
-                    }
+                    // ★PoolUid: a stackable's uid never names a pool -- its
+                    // uid-only lists are the plain remainder like any other
+                    const std::uint16_t xuid = PoolUid(a_entry->object, xl);
                     const std::string p = PoolPrefix(a_base, xuid, InstanceSig(xl));
                     if (p == a_base) continue;   // plain: the caller's remainder
                     const int n = (std::max)(1, xl->GetCount());
@@ -5164,16 +5200,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // remember WHICH units these were: the off-board pass below
                         // has to tell "this unit never entered the set" from "this
                         // unit is on the board and must come out".
-                        std::uint16_t wuid = 0;
-                        if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                            wuid = xu->uniqueID;
-                        }
+                        const std::uint16_t wuid = PoolUid(a_entry->object, xl);
                         wornUnits.push_back({ wuid, InstanceSig(xl), n, idx,
                                               xl->HasType<RE::ExtraWornLeft>() ? 2 : 1 });
                         continue;
                     }
-                    std::uint16_t uid = 0;
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
+                    const std::uint16_t uid = PoolUid(a_entry->object, xl);
                     // GI41: only reachable with a_skipWorn=false (partner boards
                     // show what the NPC wears). Record it HERE, where it is a
                     // fact, instead of leaving the consumer to guess by position.
@@ -6104,14 +6136,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         xl->HasType<RE::ExtraWornLeft>()) {
                         continue;
                     }
-                    const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+                    const std::uint16_t xuid = PoolUid(a_entry->object, xl);
                     if (it.uid != 0) {
-                        if (xu && xu->uniqueID == it.uid) { it.xlIdx = here; break; }
+                        if (xuid == it.uid) { it.xlIdx = here; break; }
                         continue;
                     }
                     // a uid unit is the sole member of its own pool, so it
-                    // can never answer a signature-pool request
-                    if (xu && xu->uniqueID != 0) continue;
+                    // can never answer a signature-pool request (PoolUid: a
+                    // stackable's uid-only list is not a uid unit)
+                    if (xuid != 0) continue;
                     if (InstanceSig(xl) == it.sig) { it.xlIdx = here; break; }
                 }
             }
@@ -6593,10 +6626,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 if (!L && !R) continue;
                                 if (o.hand == 1 && !R) continue;
                                 if (o.hand == 2 && !L) continue;
-                                std::uint16_t u = 0;
-                                if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                                    u = xu->uniqueID;
-                                }
+                                const std::uint16_t u = PoolUid(entry->object, xl);
                                 if (u == o.uid && InstanceSig(xl) == o.sig) return true;
                             }
                             return false;
@@ -9952,10 +9982,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // pointer captured before a call may be freed by it (this is
                 // what crashed: RemoveByType deleting an ExtraHotkey the engine
                 // had already reclaimed). Pool keys survive that.
-                auto poolOf = [&base](RE::ExtraDataList* a_xl) {
-                    std::uint16_t u = 0;
-                    if (const auto* xu = a_xl->GetByType<RE::ExtraUniqueID>()) u = xu->uniqueID;
-                    return PoolPrefix(base, u, InstanceSig(a_xl));
+                auto poolOf = [&base, &f](RE::ExtraDataList* a_xl) {
+                    return PoolPrefix(base, PoolUid(f.obj, a_xl), InstanceSig(a_xl));
                 };
                 // Every hotkey removal goes through the engine. We only ever ADD
                 // an ExtraHotkey ourselves -- deleting one we did not create is
@@ -10094,10 +10122,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (entry->extraLists) {
                         for (auto* x2 : *entry->extraLists) {
                             if (!x2) continue;
-                            std::uint16_t u = 0;
-                            if (const auto* xu = x2->GetByType<RE::ExtraUniqueID>()) {
-                                u = xu->uniqueID;
-                            }
+                            const std::uint16_t u = PoolUid(f.obj, x2);
                             ls += std::format("[{}{}] ",
                                 PoolPrefix(FormKey(f.obj), u, InstanceSig(x2)),
                                 x2->HasType<RE::ExtraHotkey>() ? " HOT" : "");
@@ -11813,8 +11838,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (!xl) continue;
             const bool wornHere = xl->HasType<RE::ExtraWorn>() ||
                                   xl->HasType<RE::ExtraWornLeft>();
-            const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
-            const bool plain = InstanceSig(xl) == 0 && !(xu && xu->uniqueID != 0);
+            const bool plain = InstanceSig(xl) == 0 && PoolUid(a_entry->object, xl) == 0;
             if (wornHere && !a_wornLegal) return {};   // the body's unit is grabbable
             if (!plain) ambiguous = true;
         }
@@ -11822,6 +11846,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     std::uint16_t InstanceSigOf(RE::ExtraDataList* a_xl) { return InstanceSig(a_xl); }
+    std::uint16_t PoolUidOf(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl)
+    {
+        return PoolUid(a_obj, a_xl);
+    }
 
     bool IsBagForm(RE::TESBoundObject* a_obj)
     {
@@ -11874,8 +11902,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (!L && !R) continue;
             if (a_hand == 1 && !R) continue;
             if (a_hand == 2 && !L) continue;
-            std::uint16_t uid = 0;
-            if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
+            const std::uint16_t uid = PoolUid(a_entry->object, xl);
             if (uid == a_uid && InstanceSig(xl) == a_sig) return xl;
         }
         return WornExtraOf(a_entry, a_hand);   // fall back rather than show nothing
@@ -16183,10 +16210,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             };
             const int           wornHand = engineHand(worn);
             const std::uint16_t wsig = InstanceSig(wxl);
-            std::uint16_t       wuid = 0;
-            if (wxl) {
-                if (const auto* xu = wxl->GetByType<RE::ExtraUniqueID>()) wuid = xu->uniqueID;
-            }
+            const std::uint16_t wuid = PoolUid(worn, wxl);
             // The carried unit came off the board (hand 0) or off the OTHER hand;
             // either way it is not the unit standing in this slot. Comparing only
             // form+signature called two identical daggers "the same unit", so the

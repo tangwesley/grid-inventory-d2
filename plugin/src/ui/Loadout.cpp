@@ -172,12 +172,12 @@ namespace FUI::Loadout
                    Grid::IsRing(RE::TESForm::LookupByID<RE::TESObjectARMO>(a_e.id));
         }
 
-        std::uint16_t UidOf(const RE::ExtraDataList* a_xl)
+        // The pool system's answer, not the raw ExtraUniqueID: a preset holding
+        // arrows must reserve them out of the PLAIN pool, which is the only
+        // pool a stackable ever has (see Grid::PoolUidOf).
+        std::uint16_t UidOf(RE::TESBoundObject* a_obj, const RE::ExtraDataList* a_xl)
         {
-            if (!a_xl) return 0;
-            auto* xl = const_cast<RE::ExtraDataList*>(a_xl);
-            const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
-            return xu ? xu->uniqueID : 0;
+            return Grid::PoolUidOf(a_obj, const_cast<RE::ExtraDataList*>(a_xl));
         }
 
         // The unit a tab captured, as the grid's resolvers want it named: by
@@ -244,7 +244,7 @@ namespace FUI::Loadout
                         if (xl->HasType<RE::ExtraWorn>() || xl->HasType<RE::ExtraWornLeft>()) {
                             continue;
                         }
-                        const std::uint16_t uid = UidOf(xl);
+                        const std::uint16_t uid = UidOf(obj, xl);
                         if (!uid || Grid::InstanceSigOf(xl) != e.sig) continue;
                         if (!claimed.insert({ e.id, uid }).second) continue;
                         e.uid = uid;
@@ -278,7 +278,7 @@ namespace FUI::Loadout
                 // hand 2 missed its list and recorded sig 0 for tempered shields.
                 const int readHand = left ? (b->Is(RE::FormType::Armor) ? 0 : 2) : 1;
                 auto* wxl = Grid::WornExtraOf(Grid::LiveEntryOf(a_p, b), readHand);
-                out.push_back({ b->GetFormID(), left, Grid::InstanceSigOf(wxl), UidOf(wxl) });
+                out.push_back({ b->GetFormID(), left, Grid::InstanceSigOf(wxl), UidOf(b, wxl) });
             };
 
             auto* right = a_p->GetEquippedObject(false);

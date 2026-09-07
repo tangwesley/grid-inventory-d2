@@ -1018,6 +1018,14 @@ namespace FUI::Grid
 
     // Content signature of a sub-stack (0 = none). Stable across container moves.
     [[nodiscard]] std::uint16_t InstanceSigOf(RE::ExtraDataList* a_xl);
+    // The uid the pool system sees for a list: the engine's ExtraUniqueID for
+    // gear, and ALWAYS 0 for a stackable form -- units of a stack are
+    // interchangeable, so a uid never names one of them (a save that stamps
+    // every unit would otherwise split a quiver into single-arrow tiles).
+    // Every uid read that feeds pool identity (a doll slot, a preset entry,
+    // the worn ledger, a worn-restore) must use this, or the two sides of a
+    // match disagree about the same list.
+    [[nodiscard]] std::uint16_t PoolUidOf(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl);
     // GI62: a_rot = the tile's quarter-turn, so the SILHOUETTE halo lies at the
     // same angle as the sprite it was cut from (the radial style is symmetric).
     void DrawGlow(ImDrawList* a_dl, RE::TESBoundObject* a_obj, std::uint8_t a_bits,

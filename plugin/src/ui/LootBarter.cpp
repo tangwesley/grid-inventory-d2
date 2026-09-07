@@ -1663,8 +1663,7 @@ namespace FUI::LootBarter
                 const bool wr = xl->HasType<RE::ExtraWorn>();
                 const bool wl = xl->HasType<RE::ExtraWornLeft>();
                 if (!wr && !wl) continue;
-                int u = 0;
-                if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) u = xu->uniqueID;
+                const int u = Grid::PoolUidOf(a_obj, xl);
                 out.push_back({ u, static_cast<int>(Grid::InstanceSigOf(xl)),
                                 (std::max)(1, xl->GetCount()), wl ? 2 : 1 });
             }
@@ -1791,11 +1790,10 @@ namespace FUI::LootBarter
                     // ★The identity comes off the body with the unit. Taken
                     // here and not at the restore, because by then the list
                     // has merged into the pack (see WornSave).
-                    const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
                     worn.push_back({ xl,
                         { (std::max)(1, static_cast<int>(xl->GetCount())),
                           left ? 2 : 1,
-                          xu ? xu->uniqueID : static_cast<std::uint16_t>(0),
+                          Grid::PoolUidOf(a_obj, xl),
                           Grid::InstanceSigOf(xl) } });
                 }
             }
