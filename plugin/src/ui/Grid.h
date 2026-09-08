@@ -1047,6 +1047,11 @@ namespace FUI::Grid
     [[nodiscard]] bool IsRechargeOpen();
     bool CloseRecharge();               // I/ESC layering
     void ProcessRecharge();             // UIRoot::Tick -- engine mutations
+    // ★Pad d-pad up/down while the gem list is up: the row above / below the
+    // pointer (a_dir -1 / +1), clamped to the list. a_out is the row's centre.
+    // False when the window is closed or empty -- the caller then falls back
+    // to its ordinary one-cell nudge.
+    bool RechargeRowStep(const ImVec2& a_cur, int a_dir, ImVec2& a_out);
 
     // ★(1.3.1) shelf-bag intake: the held PLAYER-side item, when it may be
     // stored into a shelf bag (not a bag itself, not a coin tile, not

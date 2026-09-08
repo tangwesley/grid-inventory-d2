@@ -912,6 +912,8 @@ namespace FUI::UIRoot
             Sfx::SelectOn();
         }
 
+        void SendCursorTo(const ImVec2& a_pos);   // defined with the pointer code below
+
         // actions -> the input this UI is already built on
         void TranslatePadButtons()
         {
@@ -1004,8 +1006,21 @@ namespace FUI::UIRoot
                 if (s_nudgeRKey) io.AddKeyEvent(ImGuiKey_RightArrow, down(kActNudgeR));
                 else if (down(kActNudgeR)) g_padNudgeX += step;
             }
-            if (edge(kActNudgeU) && down(kActNudgeU)) g_padNudgeY -= step;
-            if (edge(kActNudgeD) && down(kActNudgeD)) g_padNudgeY += step;
+            // ★Up/down over the recharge gem list walk ONE ROW, not one cell:
+            // the rows are text-height, so a cell-sized hop landed on every
+            // second gem or off the list (user report). Grid owns the row
+            // geometry and answers with the neighbouring row's centre;
+            // anywhere else the vertical nudge is the same cell it always was.
+            const auto stepY = [&](int a_dir) {
+                ImVec2 to{};
+                if (Grid::RechargeRowStep(g_padCursor, a_dir, to)) {
+                    SendCursorTo(to);
+                    return;
+                }
+                g_padNudgeY += static_cast<float>(a_dir) * step;
+            };
+            if (edge(kActNudgeU) && down(kActNudgeU)) stepY(-1);
+            if (edge(kActNudgeD) && down(kActNudgeD)) stepY(1);
 
             // ★★★HOLD A DIRECTION AND IT KEEPS WALKING.
             //
@@ -1022,12 +1037,14 @@ namespace FUI::UIRoot
             // the arrow keys, and ImGui already runs its own repeat on a held
             // key -- repeating here as well would count one hold twice.
             {
-                const struct { std::uint32_t bit; float* accum; float step; bool asKey; }
+                // vertical steps go through stepY so a held d-pad over the
+                // recharge list keeps walking rows, exactly as a press does
+                const struct { std::uint32_t bit; bool vertical; int dir; bool asKey; }
                 dirs[] = {
-                    { kActNudgeL, &g_padNudgeX, -step, s_nudgeLKey },
-                    { kActNudgeR, &g_padNudgeX,  step, s_nudgeRKey },
-                    { kActNudgeU, &g_padNudgeY, -step, false },
-                    { kActNudgeD, &g_padNudgeY,  step, false },
+                    { kActNudgeL, false, -1, s_nudgeLKey },
+                    { kActNudgeR, false,  1, s_nudgeRKey },
+                    { kActNudgeU, true,  -1, false },
+                    { kActNudgeD, true,   1, false },
                 };
                 static float s_repeatT[std::size(dirs)]{};
                 const float dt = std::clamp(io.DeltaTime, 1.0f / 240.0f, 1.0f / 20.0f);
@@ -1042,7 +1059,8 @@ namespace FUI::UIRoot
                     // the guard is for a frame long enough to owe several
                     // steps (a stall, an alt-tab): walk, do not teleport
                     for (int n = 0; s_repeatT[i] <= 0.0f && n < 4; ++n) {
-                        *d.accum += d.step;
+                        if (d.vertical) stepY(d.dir);
+                        else            g_padNudgeX += static_cast<float>(d.dir) * step;
                         s_repeatT[i] += kPadRepeatRate;
                     }
                 }

@@ -14679,8 +14679,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             std::uint16_t sig = 0;
             bool          worn = false;
             int           hand = 0;   // 1 = right (ExtraWorn), 2 = left
+            // ★Where the pointer was when T opened this -- the weapon's tile
+            // (or doll slot). On a pad the open homes the pointer onto the
+            // first gem, so the close sends it BACK here: a pointer left
+            // floating where a closed window used to be is on nothing at
+            // all, and the next press does nothing (user report).
+            bool          hasReturn = false;
+            ImVec2        returnPos{ 0.0f, 0.0f };
+            // ★The gem rows' centres as drawn last frame, top to bottom,
+            // so a d-pad press walks ONE ROW instead of one board cell
+            // (RechargeRowStep). The window is fixed-size and centred, so a
+            // frame-old reading is still where the rows are.
+            std::vector<ImVec2> rowCenters;
         };
         RechargeUI g_rechargeUI;
+
+        // every road out of the window: the pick, B/ESC, a click past its
+        // edge, the unit vanishing. One place so none forgets the pointer.
+        void CloseRechargeUI()
+        {
+            g_rechargeUI.open = false;
+            g_rechargeUI.rowCenters.clear();
+            if (g_rechargeUI.hasReturn) {
+                g_rechargeUI.hasReturn = false;
+                UIRoot::PadPointTo(g_rechargeUI.returnPos);   // pad only inside
+            }
+        }
 
         // a clicked row, applied on the Tick (engine mutations off the render
         // pass, same rule as every other transfer)
@@ -14825,6 +14849,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return;
         }
         g_rechargeUI.open = true;
+        // T is read off a hover, so the pointer is on the weapon right now;
+        // remember the spot before the open homes it onto the gem list.
+        if (ImGui::IsMousePosValid()) {
+            g_rechargeUI.hasReturn = true;
+            g_rechargeUI.returnPos = ImGui::GetIO().MousePos;
+        }
         g_rechargePick = {};
         Sfx::SelectOn();
     }
@@ -14834,7 +14864,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     bool CloseRecharge()
     {
         if (!g_rechargeUI.open) return false;
-        g_rechargeUI.open = false;
+        CloseRechargeUI();
+        return true;
+    }
+
+    bool RechargeRowStep(const ImVec2& a_cur, int a_dir, ImVec2& a_out)
+    {
+        if (!g_rechargeUI.open || a_dir == 0) return false;
+        const auto& rows = g_rechargeUI.rowCenters;
+        const int n = static_cast<int>(rows.size());
+        if (n == 0) return false;
+        // Which row the pointer sits on, as a fraction of the row pitch from
+        // the top row. A pointer parked between rows (stick drift) steps to
+        // the next whole row in the pressed direction rather than a pitch
+        // further into nowhere; one past either end stays put, so a held
+        // d-pad cannot walk the pointer off the list.
+        const float pitch = n > 1 ? rows[1].y - rows[0].y : 1.0f;
+        const float pos   = (a_cur.y - rows[0].y) / (std::max)(pitch, 1.0f);
+        int target = a_dir > 0 ? static_cast<int>(std::floor(pos + 1e-3f)) + 1
+                               : static_cast<int>(std::ceil(pos - 1e-3f)) - 1;
+        target = std::clamp(target, 0, n - 1);
+        a_out = rows[static_cast<std::size_t>(target)];
         return true;
     }
 
@@ -14843,11 +14893,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!g_rechargeUI.open) return;
         auto* p = RE::PlayerCharacter::GetSingleton();
         auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(g_rechargeUI.obj);
-        if (!p || !obj) { g_rechargeUI.open = false; return; }
+        if (!p || !obj) { CloseRechargeUI(); return; }
         auto* xl = RechargeUnitList(p, obj);
         float cur = 0.0f, max = 0.0f;
         if (!UnitCharge(obj, xl, g_rechargeUI.worn, g_rechargeUI.hand, cur, max)) {
-            g_rechargeUI.open = false;   // the unit left (sold, dropped)
+            CloseRechargeUI();   // the unit left (sold, dropped)
             return;
         }
         const auto rows = CollectFilledGems();
@@ -14888,7 +14938,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         if (!ImGui::IsWindowAppearing() &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered()) {
-            g_rechargeUI.open = false;
+            CloseRechargeUI();
             Sfx::SelectOff();
         }
 
@@ -14905,6 +14955,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             center(ImGui::CalcTextSize(none).x);
             ImGui::TextColored(sk.inkDim, "%s", none);
         }
+        g_rechargeUI.rowCenters.clear();
         for (std::size_t i = 0; i < rows.size(); ++i) {
             const auto& r = rows[i];
             const int pts = SoulChargePoints(r.soul);
@@ -14913,18 +14964,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 r.obj->GetName() ? r.obj->GetName() : "?", r.count,
                 Commas(pts).c_str(), i);
             center(rowW);
-            if (Sfx::Button(label, ImVec2(rowW, 0))) {
+            const bool picked = Sfx::Button(label, ImVec2(rowW, 0));
+            const ImVec2 lo = ImGui::GetItemRectMin();
+            const ImVec2 hi = ImGui::GetItemRectMax();
+            const ImVec2 mid((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f);
+            // the row's centre, for the d-pad's row walk (RechargeRowStep)
+            g_rechargeUI.rowCenters.push_back(mid);
+            if (picked) {
                 g_rechargePick = { true, r.obj->GetFormID(), r.soul, r.fromBase };
-                g_rechargeUI.open = false;   // identity fields stay for the apply
+                // identity fields stay for the apply; the pointer goes back
+                // to the weapon it was on (pad), see CloseRechargeUI
+                CloseRechargeUI();
             }
             // ★On a pad the pointer starts on the first gem rather than on
             // the weapon it was over when LT opened this (pad only, see
             // UIRoot::PadPointTo). An empty list has nothing to point at.
-            if (i == 0 && ImGui::IsWindowAppearing()) {
-                const ImVec2 lo = ImGui::GetItemRectMin();
-                const ImVec2 hi = ImGui::GetItemRectMax();
-                UIRoot::PadPointTo(ImVec2((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f));
-            }
+            if (i == 0 && ImGui::IsWindowAppearing()) UIRoot::PadPointTo(mid);
         }
         ImGui::End();
     }
