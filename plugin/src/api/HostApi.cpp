@@ -6,6 +6,8 @@
 #include "ui/LootBarter.h"
 #include "ui/UIRoot.h"
 
+#include <cmath>
+
 namespace FUI::HostApi
 {
     namespace
@@ -113,6 +115,13 @@ namespace FUI::HostApi
         // and holding it implies nothing about holding either of the others.
         GridInvAPI::Annotator g_annot{};
         bool                  g_haveAnnot = false;
+
+        // ---- registered pricer -------------------------------------------
+        //
+        // A fourth slot, same terms: its own handshake, and holding it says
+        // nothing about the other three. Consulted by the shop window only.
+        GridInvAPI::Pricer g_pricer{};
+        bool               g_havePricer = false;
 
         void Notify(const char* a_text)
         {
@@ -271,6 +280,46 @@ namespace FUI::HostApi
                          n->name ? n->name : "<unnamed>", who, n->abiVersion);
         }
 
+        // The price handshake. Same shape and same rigour as the three above:
+        // the listener takes every sender, so the payload is measured before
+        // a single offset in it is trusted.
+        void OnRegisterPricer(SKSE::MessagingInterface::Message* a_msg)
+        {
+            if (!a_msg->data || a_msg->dataLen < sizeof(GridInvAPI::Pricer)) {
+                logger::error("[API] PRICE REFUSED '{}': payload is {} bytes, a Pricer is {}",
+                              a_msg->sender ? a_msg->sender : "<unknown>",
+                              a_msg->data ? a_msg->dataLen : 0u,
+                              sizeof(GridInvAPI::Pricer));
+                return;
+            }
+            const auto* p   = static_cast<const GridInvAPI::Pricer*>(a_msg->data);
+            const char* who = a_msg->sender ? a_msg->sender : "<unknown>";
+
+            if (p->abiVersion != GridInvAPI::kABIVersion ||
+                p->structSize != sizeof(GridInvAPI::Pricer)) {
+                logger::error("[API] PRICE REFUSED '{}': abiVersion {} (need {}), structSize {} (need {})",
+                              who, p->abiVersion, GridInvAPI::kABIVersion,
+                              p->structSize, sizeof(GridInvAPI::Pricer));
+                Notify("Grid Inventory: price extension version mismatch - not loaded");
+                return;
+            }
+            if (!p->GetMultiplier) {
+                logger::error("[API] PRICE REFUSED '{}': null function pointer", who);
+                Notify("Grid Inventory: price extension is incomplete - not loaded");
+                return;
+            }
+            if (g_havePricer) {
+                logger::warn("[API] pricer '{}' ignored: one is already registered ('{}')",
+                             who, g_pricer.name ? g_pricer.name : "?");
+                return;
+            }
+
+            g_pricer     = *p;   // copy; the caller's pointer is borrowed only
+            g_havePricer = true;
+            logger::info("[API] pricer registered: '{}' (from '{}') abi={}",
+                         p->name ? p->name : "<unnamed>", who, p->abiVersion);
+        }
+
         // This listener sees EVERY sender, so it must only ever act on our own
         // 4CC message types -- never on a lifecycle number.
         void OnApiMessage(SKSE::MessagingInterface::Message* a_msg)
@@ -286,6 +335,10 @@ namespace FUI::HostApi
             }
             if (a_msg->type == GridInvAPI::kMsgRegisterAnnot) {
                 OnRegisterAnnot(a_msg);
+                return;
+            }
+            if (a_msg->type == GridInvAPI::kMsgRegisterPricer) {
+                OnRegisterPricer(a_msg);
                 return;
             }
             if (a_msg->type == GridInvAPI::kMsgSuppressUI) {
@@ -464,5 +517,26 @@ namespace FUI::HostApi
         const auto n = g_annot.GetLines(g_annot.self, a_base,
                                         static_cast<const void*>(a_xl), a_out, a_capacity);
         return (std::min)(n, a_capacity);
+    }
+
+    bool HasPricer()
+    {
+        return g_havePricer;
+    }
+
+    float PriceMult(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                    GridInvAPI::PriceSide a_side)
+    {
+        if (!g_havePricer || a_base == 0) return 1.0f;
+        const float m = g_pricer.GetMultiplier(g_pricer.self, a_base,
+                                               static_cast<const void*>(a_xl),
+                                               static_cast<std::uint32_t>(a_side));
+        // ★A MULTIPLIER THAT IS NOT A MULTIPLIER IS ONE. The ABI promises the
+        // extension that a bad answer degrades to plain prices, and this is
+        // where that promise is kept: zero would sell everything for the
+        // floor, a negative would pay the player to buy, and NaN poisons
+        // every lround downstream. `!(m > 0)` catches NaN as well as <= 0.
+        if (!(m > 0.0f) || !std::isfinite(m)) return 1.0f;
+        return m;
     }
 }

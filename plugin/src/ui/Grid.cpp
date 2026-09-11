@@ -1144,11 +1144,16 @@ namespace FUI::Grid
         // GI44: resolved by POOL (uid, sig), never by recorded position -- the
         // tile was collected at rebuild time and list positions drift, and the
         // sale itself already resolves by pool, so the price must match it.
+        // ★AND A PRICER'S SAY ON TOP, on the SELL side. Every caller of this is
+        // pricing a sale -- the barter tooltip, the click-sell, the fragment
+        // dropped on the merchant -- so the extension is asked here, once, with
+        // the same list the value came from, rather than at three sites that
+        // could drift apart.
         int TileValue(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig)
         {
-            auto* p = RE::PlayerCharacter::GetSingleton();
-            return UnitValueWith(a_obj,
-                ExtraForPoolImpl(LiveEntry(p, a_obj), a_uid, a_sig));
+            auto* p  = RE::PlayerCharacter::GetSingleton();
+            auto* xl = ExtraForPoolImpl(LiveEntry(p, a_obj), a_uid, a_sig);
+            return LootBarter::PricedValue(a_obj, xl, UnitValueWith(a_obj, xl), false);
         }
 
 
@@ -4855,7 +4860,20 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         h.partnerOrd = a_ord;   // GI19: and which cell, for plain look-alikes
         if (auto* p = LootBarter::Partner()) {   // GI25: signature for the transfer
             RE::InventoryEntryData* pe = LiveEntry(p, a_obj);
-            h.sig = InstanceSig(ExtraForTile(pe, a_uid, a_xlIdx));
+            // ★★★VERIFIED, NOT WALKED TO. This hashed whatever list sat at the
+            // recorded position, and a partner cell's position is written at
+            // birth and never again: AddExtraList prepends, so one item stored
+            // into the container puts the ARRIVAL at the worn cell's old
+            // index. A uid-less worn unit -- a follower's enchanted boots --
+            // then picked up wearing the newcomer's signature, and the take
+            // that followed resolved by that signature and moved the wrong
+            // pair (2026-09-10; the tooltip lied the same way, see
+            // DrawItemTooltip). The caller now passes the cell's signature and
+            // the position is held against it; the live list still answers
+            // when it can (a uid match, or a verified position), so charge
+            // spent since the cell was born is not lost either.
+            auto* sx = ExtraForUnitImpl(pe, a_uid, a_xlIdx, a_unit.sig, true);
+            h.sig = sx ? InstanceSig(sx) : a_unit.sig;
             // ★(1.6) ...and whether it is a quest object, asked HERE for the
             // reason GI36 gives about the star and the stolen mark: once the
             // unit is on the cursor there is no cell left on either side to
@@ -13571,7 +13589,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // (measured 2026-09-01).
             if (a_uid != 0 || a_sig != 0) {
                 scoped = ExtraForPool(entry, a_uid, a_sig);
-                if (!scoped) scoped = ExtraForTile(entry, a_uid, a_xlIdx);
+                // ★★★THE POSITION IS VERIFIED, NOT TRUSTED. This fell back to
+                // ExtraForTile, which walks to the n-th list and hands it over
+                // unexamined -- and a partner cell's position is recorded once,
+                // at birth. A WORN unit reaches this fallback every time,
+                // because ExtraForPool rightly refuses worn lists; and once
+                // anything of the same form is stored into that container,
+                // AddExtraList has prepended it and the worn cell's old
+                // position names the ARRIVAL. A follower wearing enchanted
+                // boots was handed a second pair with a different enchantment,
+                // and the pair on their feet read as the new one (2026-09-10):
+                // the tile's glow was right (it asks ExtraForUnit) and only the
+                // tooltip lied. Same resolver now: by uid, else by position
+                // only while the signature agrees, else by signature -- worn
+                // last, which is the list a worn cell actually wants.
+                if (!scoped) scoped = ExtraForUnitImpl(entry, a_uid, a_xlIdx, a_sig, false);
             }
             // ★★★THE POOL ANSWER IS THE PRIMARY ONE, and it earned that place
             // before this: a unit sitting in a container on our side of a
@@ -15625,7 +15657,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // leave that cell unclaimed, and position order then
                         // handed it to a sibling.
                         BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
-                                          UnitRef{ occ.occUid, 0, occ.occXlIdx },
+                                          UnitRef{ occ.occUid, occ.occSig, occ.occXlIdx },
                                           occ.occOrd, occ.occRot);
                         LootBarter::NoteCarriedSpot(occ.occSpotKey);
                     }
@@ -16909,7 +16941,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // GI24: same as the rearrange swap — the occupant
                             // keeps its identity and its own cell
                             BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
-                                              UnitRef{ occ.occUid, 0, occ.occXlIdx },
+                                              UnitRef{ occ.occUid, occ.occSig, occ.occXlIdx },
                                               occ.occOrd, occ.occRot);
                             LootBarter::NoteCarriedSpot(occ.occSpotKey);
                             RequestRebuild();

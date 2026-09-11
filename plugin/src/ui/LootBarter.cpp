@@ -14,6 +14,7 @@
 #include "ui/Theme.h"
 #include "ui/UIRoot.h"
 #include "ui/WinManager.h"
+#include "api/HostApi.h"
 
 #include <algorithm>
 #include <array>
@@ -2716,7 +2717,7 @@ namespace FUI::LootBarter
                     g_actingSpot = nk;   // the carry names its own cell
                     Grid::BeginPartnerCarry(g_slider.obj, g_slider.value,
                                             g_slider.unitValue,
-                                            Grid::UnitRef{ g_slider.uid, 0,
+                                            Grid::UnitRef{ g_slider.uid, g_slider.sig,
                                                            g_slider.xlIdx });
                 }
                 break;
@@ -4512,6 +4513,25 @@ namespace
             static_cast<int>(std::lround(a_baseValue * mod / BasePriceFactor())));
     }
 
+    int PricedValue(RE::TESBoundObject* a_item, const RE::ExtraDataList* a_xl,
+                    int a_value, bool a_buy)
+    {
+        // ★THE CHEAP EXIT FIRST. Most players have no pricer, and this sits on
+        // the shelf-collect loop; a cross-DLL call per cell is not free.
+        if (a_value <= 0 || !a_item || !HostApi::HasPricer()) return a_value;
+        const float mult = HostApi::PriceMult(a_item->GetFormID(), a_xl,
+            a_buy ? GridInvAPI::kPriceBuy : GridInvAPI::kPriceSell);
+        if (mult == 1.0f) return a_value;
+        // Rounded ONCE here, on the unit; the totals then round once more on
+        // the whole amount as they always have (B7). Floor 1: a value the
+        // engine said was worth something stays worth something -- the sell
+        // side already refuses to pay zero for a valuable item, and a buy side
+        // that charged nothing would be the same bug in the other direction.
+        const long scaled = std::lround(static_cast<double>(a_value) * mult);
+        return static_cast<int>(std::clamp<long>(scaled, 1L,
+            static_cast<long>((std::numeric_limits<int>::max)())));
+    }
+
     // B7: stack totals round ONCE on the total (vanilla behaviour) — the old
     // per-unit lround * count inflated cheap bulk buys (arrows: 100 x each
     // unit rounded up) and deflated bulk sells.
@@ -5291,6 +5311,13 @@ namespace
                 // GI43: a per-unit cell is priced from ITS list -- a tempered
                 // unit buys/sells at the vanilla tempered value.
                 int value = perUnit ? Grid::UnitValueWith(obj, xl) : unitValue;
+                // ★AND THEN THE PRICER'S SAY, on the merchant's shelf only. A
+                // loot chest has no counter, so its cells keep the engine value
+                // for whatever else reads it. The list goes along in BOTH
+                // branches: an extension prices by the unit's own list, and a
+                // stacking form's shared list is still the one it would look
+                // in (it will find nothing there and say 1.0, which is right).
+                if (g_mode == Mode::kBarter) value = PricedValue(obj, xl, value, true);
                 // ★Gold is the exception, and only because `value` is a
                 // PER-UNIT price everywhere else: a purse is worth its coins.
                 if (obj->IsGold()) value = c.count;
@@ -5784,7 +5811,9 @@ namespace
                             g_carryGlow = it.glow;       // (1.3.2) markers ride along
                             g_carryStolen = it.stolen;   // ★including this one
                             Grid::BeginPartnerCarry(it.obj, it.count, it.value,
-                                Grid::UnitRef{ it.uid, 0, it.xlIdx }, it.ord, it.rot);
+                                // ★The signature rides along: the carry holds
+                                // its position against it (BeginPartnerCarry).
+                                Grid::UnitRef{ it.uid, it.sig, it.xlIdx }, it.ord, it.rot);
                         }
                     }
                     // TAKE trigger: right-click (whole move) OR shift+left-click
@@ -6817,6 +6846,7 @@ namespace
                     d.occCol = pc.col;
                     d.occRow = pc.row;
                     d.occUid = pc.uid;        // GI24
+                    d.occSig = pc.sig;
                     d.occXlIdx = pc.xlIdx;
                     d.occOrd = pc.ord;
                     d.occSpotKey = pc.spotKey;

@@ -109,4 +109,30 @@ namespace FUI::HostApi
                                                 const RE::ExtraDataList* a_xl,
                                                 GridInvAPI::TooltipLine* a_out,
                                                 std::uint32_t a_capacity);
+
+    // ---- barter price ------------------------------------------------------
+    //
+    // A FOURTH extension slot, independent of the other three. See the Pricer
+    // note in GridInventoryAPI.h: our shop window prices a unit by calling the
+    // engine's value routine itself, which no call-site patch inside the game
+    // executable can see, so an extension that wants a say in what a unit is
+    // worth at the counter has to be asked.
+
+    // True once a pricer has passed the handshake. Checked before the call
+    // below so pricing costs nothing for the players who have no such
+    // extension, which is most of them.
+    [[nodiscard]] bool HasPricer();
+
+    // The multiplier on ONE unit's engine value for one side of the counter:
+    // 1.0 when nothing claims it, else whatever the pricer said, sanitised --
+    // a non-positive, NaN or infinite answer reads as 1.0, so a misbehaving
+    // extension yields plain prices rather than free or infinite ones.
+    //
+    // a_xl is the sub-stack's own list, or nullptr when the unit has none --
+    // the same value TintTier is given, and for the same reason.
+    //
+    // Called once per shelf cell at collect time, once per tooltip and once
+    // per sale, NOT per frame.
+    [[nodiscard]] float PriceMult(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                                  GridInvAPI::PriceSide a_side);
 }

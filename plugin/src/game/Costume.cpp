@@ -21,6 +21,9 @@ namespace FUI::Costume
         int  g_tab = -1;          // checked tab, -1 = none
         int  g_appliedTab = -2;   // what the body is currently wearing (-2 = unknown)
         int  g_toldApi = -2;      // what the outside world was last told (-2 = nothing yet)
+        // The player is a beast (werewolf, vampire lord): the costume stays
+        // CHECKED but is not on the body, and the outside world is told so.
+        bool g_beast = false;
 
         // ★★★HOW A REBUILD IS SEEN. Not the biped pointer -- the engine reuses
         // that (measured: the same pointer over 11s), so a rebuild is invisible
@@ -396,53 +399,58 @@ namespace FUI::Costume
         //
         // The request is kept, not dropped: the same watch fires again when the
         // form ends and the real body comes back, and by then this gate opens.
-        static bool s_beastNoted = false;
         if (!race->GetPlayable()) {
-            if (!s_beastNoted) {
-                s_beastNoted = true;
-                // ★★A TRANSFORMATION TAKES THE COSTUME OFF. Holding it back
-                // and putting it on again afterwards was the first answer, and
-                // it bought a race we do not need to run: the form ends, the
-                // engine is still rebuilding the body out of the addon lists it
-                // took apart for the beast, and an anchor dressed into that
-                // half-built body ends up worn, holding its slot, with no model
-                // in it -- the bald head (user report: costume still ticked,
-                // appearance plain and bald, cured by unticking it). Timing it
-                // right means guessing when the actor has settled, which is the
-                // guess §NoteGameLoaded already has to make once per load.
+            if (!g_beast) {
+                g_beast = true;
+                // ★★THE COSTUME STAYS CHECKED. Clearing it here was the answer
+                // for a while (18b1563): the form ends, the engine is still
+                // rebuilding the body out of the addon lists it took apart for
+                // the beast, and an anchor dressed into that half-built body
+                // ends up worn with no model in it -- the bald head -- so the
+                // tick was dropped and the player asked to put it back on.
+                // But the player HAD put it on, and a transformation is not a
+                // reason to take it off: "after exiting werewolf form the
+                // transmog is forgotten and the box must be rechecked"
+                // (2026-09-10).
                 //
-                // Clearing is the simpler contract and the safer one: a costume
-                // is a thing you put ON, and turning into a beast is exactly
-                // the kind of event that should end it. The tick goes away, the
-                // player sees why, and putting it back on is one click on a
-                // body that is finished being built.
-                if (g_tab >= 0) {
-                    SKSE::log::info("[COSTUME] transformed into '{}' -- costume "
-                                    "cleared (put it back on after the form ends)",
-                        race->GetName() ? race->GetName() : "?");
-                    g_tab = -1;
-                }
+                // The timing hazard that motivated clearing is covered twice
+                // over now, and the second cover did not exist in this shape
+                // then: the form ending borrows §NoteGameLoaded's re-dress
+                // schedule (below), and the EVERY-SLOT watch (g_watch,
+                // 2026-09-04) redresses the moment an engine rebuild puts
+                // anything else in a slot. So hold the tab, dress nothing while
+                // the body is a beast's, and let the same belt and braces that
+                // carry a costume through a load put it back.
+                //
+                // ★Held, not hidden: g_tab keeps its value so a save made in
+                // beast form still carries the costume, and the UI cannot be
+                // reached to disagree while transformed anyway. Only the API is
+                // told otherwise -- see AnnounceIfMoved.
+                SKSE::log::info("[COSTUME] transformed into '{}' -- costume tab {} "
+                                "held until the form ends",
+                    race->GetName() ? race->GetName() : "?", g_tab);
             }
             // ★The BODY still has to be put right, and not while it is a
             // beast's: keep the request standing so the pass below runs the
             // moment there is a real body again. The anchors come back worn
             // when the engine restores what the player had on, and an anchor
-            // worn with no costume behind it is the same bald head from the
-            // other direction -- undressing is what takes it off.
+            // worn with nothing dressed behind it is the bald head -- the pass
+            // below (dressing, or undressing when no tab is held) is what
+            // puts it right.
             g_dirty = true;
             return;
         }
-        if (s_beastNoted) {
-            s_beastNoted = false;
+        if (g_beast) {
+            g_beast = false;
             // The form ended. Same belt as a load: the body is still being
-            // assembled, so make the plain state stick over several passes
-            // rather than betting on one, and forget what we think it is
-            // wearing so each pass actually runs.
+            // assembled, so make the costume (or the plain state) stick over
+            // several passes rather than betting on one, and forget what we
+            // think it is wearing so each pass actually runs.
             g_reapplyLeft = kReapplyTimes;
             g_reapplyAt = g_frame + kReapplyFirst;
             g_appliedTab = -2;
-            SKSE::log::info("[COSTUME] form ended -- {} passes scheduled to put "
-                            "the body back to plain", kReapplyTimes);
+            SKSE::log::info("[COSTUME] form ended -- {} re-dress passes scheduled "
+                            "(costume tab {})", kReapplyTimes, g_tab);
         }
         auto& rt = player->GetActorRuntimeData();
         auto* biped = rt.biped.get();
@@ -964,9 +972,13 @@ namespace FUI::Costume
     // built on the frames where the answer actually changed.
     void AnnounceIfMoved()
     {
-        if (g_tab == g_toldApi) return;
-        g_toldApi = g_tab;
-        if (g_tab < 0) {
+        // ★What the player LOOKS like, not what is checked. The API promises
+        // the costume currently on the body, and a beast wears none -- the tab
+        // is only held for the form's end, when this announces it again.
+        const int shown = g_beast ? -1 : g_tab;
+        if (shown == g_toldApi) return;
+        g_toldApi = shown;
+        if (shown < 0) {
             HostApi::BroadcastCostume(-1, nullptr, 0);
             return;
         }
@@ -1068,6 +1080,7 @@ namespace FUI::Costume
         g_anchorGaveUp = false;
         g_lastRebuild = 0;   // a load is not something to space against
         g_tab = -1;
+        g_beast = false;     // the incoming save's first Apply reads the race afresh
         g_appliedTab = -2;   // unknown: the next Apply must run even if -1
         g_dirty = false;
         // ★The schedule belongs to the save being left. NoteGameLoaded opens a

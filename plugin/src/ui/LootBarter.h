@@ -378,6 +378,16 @@ namespace FUI::LootBarter
     // (kModBuyPrices/kModSellPrices); 1.0 with no perks -> pure speech factor.
     [[nodiscard]] int BuyPrice(RE::TESBoundObject* a_item, int a_baseValue);
     [[nodiscard]] int SellPrice(RE::TESBoundObject* a_item, int a_baseValue);
+
+    // ★A PRICER'S SAY on ONE unit's engine value, BEFORE the barter formula --
+    // the value the four functions above and below are then handed. The engine
+    // value comes back untouched when no extension holds the pricer slot
+    // (HostApi::HasPricer), which is most players. a_xl is the unit's own
+    // list, or nullptr: the only handle that names one unit rather than every
+    // copy of its base form, and what an extension prices by. a_buy says which
+    // side of the counter the unit is on.
+    [[nodiscard]] int PricedValue(RE::TESBoundObject* a_item, const RE::ExtraDataList* a_xl,
+                                  int a_value, bool a_buy);
     // B7: stack totals round ONCE on the total (per-unit rounding x count
     // inflated cheap bulk buys / deflated bulk sells); floor 1 gold per unit
     [[nodiscard]] int BuyPriceTotal(RE::TESBoundObject* a_item, int a_unitValue, int a_count);
@@ -422,6 +432,7 @@ namespace FUI::LootBarter
         // as an anonymous (uid 0, xlIdx -1, ord 0) unit, its slot stays behind
         // unreserved, and dropping it lands in a fresh slot at the front.
         std::uint16_t       occUid = 0;
+        std::uint16_t       occSig = 0;   // its pool, so a position can be verified
         int                 occXlIdx = -1;
         int                 occOrd = 0;
         std::string         occSpotKey;

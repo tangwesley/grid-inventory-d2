@@ -24,9 +24,10 @@
 //      AND the allocator, and any version drift between the two plugins would
 //      be an undiagnosable CTD.
 //
-//  THREADING -- GetOverlay / GetTooltipLines / OfferDrop / GetTier / GetLines are
-//  all called from the host's render thread inside an active ImGui frame. Do not
-//  block, allocate, or call a game API that can open or close a menu.
+//  THREADING -- GetOverlay / GetTooltipLines / OfferDrop / GetTier / GetLines /
+//  GetMultiplier are all called from the host's render thread inside an active
+//  ImGui frame. Do not block, allocate, or call a game API that can open or
+//  close a menu.
 //
 //  HANDSHAKE (SKSE messaging, both plugins register a listener in
 //  SKSEPluginLoad so ordering does not matter):
@@ -88,6 +89,7 @@ namespace GridInvAPI
     inline constexpr std::uint32_t kMsgCostumeState     = 0x47494353;  // 'GICS'
     inline constexpr std::uint32_t kMsgRegisterTinter   = 0x47495443;  // 'GITC'
     inline constexpr std::uint32_t kMsgRegisterAnnot    = 0x4749414E;  // 'GIAN'
+    inline constexpr std::uint32_t kMsgRegisterPricer   = 0x47495052;  // 'GIPR'
 
     // ★(1.5.x) SUPPRESS THE GRID'S OWN WINDOW while yours sits over it.
     //
@@ -486,4 +488,67 @@ namespace GridInvAPI
                                   TooltipLine* out, std::uint32_t capacity);
     };
     static_assert(sizeof(Annotator) == 32, "Annotator is part of the ABI");
+
+    // ---- provider -> host: BARTER PRICE ------------------------------------
+
+    // ★★A FOURTH TABLE, AND THE REASON IS THE HOST'S OWN SHOP WINDOW.
+    //
+    // The host replaces the vanilla barter menu. Its shelf prices a unit by
+    // calling the engine's item-value routine ITSELF, from this DLL, through an
+    // indirect call -- so an extension that patches that routine's call sites
+    // inside SkyrimSE.exe (the only kind of patch that needs no disassembler)
+    // never sees the host's call, and the vanilla BarterMenu it would read the
+    // buy/sell direction from is never open while the host's shop is. Every
+    // price the player sees in that shop is therefore the plain engine value,
+    // whatever the extension does to the vanilla menus. Measured: a purple
+    // sword sold for the same gold with the extension's sell scaling on and
+    // off, because neither setting was ever consulted.
+    //
+    // So the host asks. Once per priced unit it hands over the base form, the
+    // unit's own list (the same handle Tinter and Annotator get, for the same
+    // reason: it is the only name one unit has) and WHICH SIDE of the counter
+    // the unit is on, and the pricer answers with a multiplier on the unit's
+    // engine value. The host then applies its barter formula -- speech skill,
+    // perks, the merchant's purse -- to the scaled value exactly as it would
+    // to the plain one, so a pricer changes what a thing is WORTH and nothing
+    // else about how the shop works.
+    //
+    // Own slot, own message, own handshake, kABIVersion untouched -- rule 2,
+    // for the third time. Register any combination of the four.
+
+    enum PriceSide : std::uint32_t
+    {
+        kPriceBuy  = 1,   // the merchant's shelf: what the PLAYER pays
+        kPriceSell = 2    // the player's own item: what the MERCHANT pays
+    };
+
+    struct Pricer
+    {
+        std::uint32_t structSize;   // = sizeof(Pricer)
+        std::uint32_t abiVersion;   // = kABIVersion
+        const char*   name;         // static string, diagnostics only
+        void*         self;         // opaque; handed back as the first argument
+
+        // The multiplier on ONE unit's engine value, before the barter formula.
+        //
+        //   base  the TESBoundObject FormID
+        //   xl    the RE::ExtraDataList* of THIS sub-stack, or nullptr when the
+        //         unit has none of its own. Read-only, borrowed for the call.
+        //   side  a PriceSide: which way the gold is about to move.
+        //
+        // Return 1.0 for "no opinion". Anything <= 0, NaN or infinite is read
+        // as 1.0 by the host rather than refused, so a pricer built against a
+        // later ABI degrades to plain prices instead of vanishing. A float is a
+        // fundamental type and crosses this boundary in XMM0 under the x64
+        // calling convention, which both sides share by definition -- rule 1
+        // forbids library types, not the language's own.
+        //
+        // NOT the per-frame hot path: once per shelf cell when the shop window
+        // is (re)collected, once per tooltip, and once per sale. It still runs
+        // inside the host's ImGui frame on the render thread, so do not block,
+        // do not open or close a menu, and never call ImGui.
+        float (*GetMultiplier)(void* self, std::uint32_t base, const void* xl,
+                               std::uint32_t side);
+    };
+    static_assert(sizeof(Pricer) == 32, "Pricer is part of the ABI");
 }
