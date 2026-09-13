@@ -210,6 +210,12 @@ namespace FUI::Grid
             // of two identical daggers looked like picking up both.
             int                 partnerOrd = 0;
             std::uint16_t       sig = 0;   // GI25: survives the queue delay
+            // ★Lifted off a partner cell the CORPSE / MARK is wearing. The take
+            // resolver names the worn list only when told the unit came from a
+            // worn slot; the right-click road says so through PartnerCell::unit()
+            // and the drag road did not, so a dragged worn weapon was refused as
+            // "can't tell it apart from the worn copy" while right-click worked.
+            bool                partnerWorn = false;
             // ★GI36's argument, applied to the two markers as well: once the unit
             // is mid-flight there is no tile left to ask, so the answers travel
             // WITH the carry. Set at pickup from the tile that was lifted.
@@ -4841,6 +4847,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         h.partnerValue = a_value;
         h.uid = a_uid;       // D4: which sub-stack was picked up
         h.xlIdx = a_xlIdx;
+        h.partnerWorn = a_unit.worn;   // the worn slot travels with the carry (see Held)
         h.partnerOrd = a_ord;   // GI19: and which cell, for plain look-alikes
         if (auto* p = LootBarter::Partner()) {   // GI25: signature for the transfer
             RE::InventoryEntryData* pe = LiveEntry(p, a_obj);
@@ -16201,7 +16208,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (onOwnBoard && a_held.obj->IsGold() &&
                 LootBarter::IsLootMode(LootBarter::CurrentMode())) {
                 const int take = a_held.count;
-                if (LootBarter::RequestTake(a_held.obj, take, UnitRef{ a_held.uid, a_held.sig })) {
+                if (LootBarter::RequestTake(a_held.obj, take, UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn })) {
                     GoldCoins::ExpectIncoming(take);
                     g_held.reset();
                     CarryWithdrawnGold(take);   // nets to zero against the above
@@ -16277,23 +16284,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // remainder stays in the container exactly as it did
                         // when the slider was clamped to the same number
                         tookNow = LootBarter::RequestTakeAll(a_held.obj, cnt,
-                                                             UnitRef{ a_held.uid, a_held.sig });
+                                                             UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn });
                     } else if (LootBarter::CurrentMode() ==
                                LootBarter::Mode::kPickpocket) {
                         // F6b: dragging out of a mark's pockets rolls too
                         if (cnt > 1) LootBarter::OpenSlider(a_held.obj, cnt,
                             LootBarter::XferDir::kPickTake,
-                            UnitRef{ a_held.uid, a_held.sig });
-                        else LootBarter::RequestPickTake(a_held.obj, cnt, UnitRef{ a_held.uid, a_held.sig });
+                            UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn });
+                        else LootBarter::RequestPickTake(a_held.obj, cnt, UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn });
                     } else {   // kBarter
                         if (cnt > 1) LootBarter::OpenSlider(a_held.obj, cnt,
                             LootBarter::XferDir::kBuy,
-                            UnitRef{ a_held.uid, a_held.sig }, {},
+                            UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn }, {},
                             a_held.partnerValue);
                         else {
                             const int total = LootBarter::BuyPrice(a_held.obj, a_held.partnerValue);
                             LootBarter::RequestBuy(a_held.obj, 1, total,
-                                                   UnitRef{ a_held.uid, a_held.sig },
+                                                   UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn },
                                                    a_held.partnerValue);
                         }
                     }

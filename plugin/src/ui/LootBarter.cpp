@@ -6054,7 +6054,7 @@ namespace
                             Grid::BeginPartnerCarry(it.obj, it.count, it.value,
                                 // ★The signature rides along: the carry holds
                                 // its position against it (BeginPartnerCarry).
-                                Grid::UnitRef{ it.uid, it.sig, it.xlIdx }, it.ord, it.rot);
+                                it.unit(), it.ord, it.rot);
                         }
                     }
                     // TAKE trigger: right-click (whole move) OR shift+left-click
