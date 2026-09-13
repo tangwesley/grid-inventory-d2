@@ -1,8 +1,10 @@
 ﻿#pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace FUI
 {
@@ -89,6 +91,104 @@ namespace FUI
         }
         a_def.w = (std::max)(1, w);
         a_def.h = h;
+    }
+
+    // ---- footprints -------------------------------------------------------
+    //
+    // ★★GI71: THE FOOTPRINT LIVES HERE NOW, BESIDE THE DEF IT COMES FROM.
+    //
+    // It used to be private to Grid.cpp, which is exactly why the partner board
+    // never had one: LootBarter could resolve an item's def but had no way to
+    // turn it into a shape, so it laid every container and merchant tile out as
+    // a plain rectangle. An item given a T footprint kept it on the player's
+    // grid and lost it the moment it was put in a follower's pack (reported).
+    //
+    // Nothing about a shape is grid-specific except the column clamp, so that
+    // is the one thing passed in -- the player board and a partner board have
+    // different widths and must clamp to their own.
+    struct Shape
+    {
+        std::vector<std::vector<bool>> rows;
+        int                            w = 1;
+        int                            h = 1;
+
+        // Bounds-safe read: off the mask is simply "not mine".
+        [[nodiscard]] bool At(int a_x, int a_y) const
+        {
+            if (a_y < 0 || a_y >= static_cast<int>(rows.size())) return false;
+            const auto& r = rows[static_cast<std::size_t>(a_y)];
+            if (a_x < 0 || a_x >= static_cast<int>(r.size())) return false;
+            return r[static_cast<std::size_t>(a_x)];
+        }
+    };
+
+    // "11|10|10" -> an L. Empty shape = a solid a_def.w x a_def.h rectangle,
+    // which is the 99% case and reduces every mask-walking consumer back to the
+    // rectangle arithmetic it replaced.
+    [[nodiscard]] inline Shape ShapeOf(const ItemDef& a_def, int a_maxW)
+    {
+        Shape m;
+        const int cap = (std::max)(1, a_maxW);
+        if (!a_def.shape.empty()) {
+            std::vector<bool> row;
+            int               w = 1;
+            for (char ch : a_def.shape) {
+                if (ch == '|') {
+                    w = (std::max)(w, static_cast<int>(row.size()));
+                    m.rows.push_back(std::move(row));
+                    row.clear();
+                } else {
+                    row.push_back(ch == '1');
+                }
+            }
+            // ★A TRAILING '|' IS A SEPARATOR, NOT AN EMPTY ROW. The getline
+            // loop this replaces ended on eof and never produced that row, so
+            // pushing one here would give "11|10|" a phantom third rank and
+            // move every footprint written that way.
+            if (!row.empty() || m.rows.empty()) {
+                w = (std::max)(w, static_cast<int>(row.size()));
+                m.rows.push_back(std::move(row));
+            }
+            if (m.rows.empty()) m.rows.push_back({ true });
+            for (auto& r : m.rows) r.resize(static_cast<std::size_t>(w), false);
+            m.w = (std::min)(w, cap);
+            m.h = static_cast<int>(m.rows.size());
+            return m;
+        }
+        m.w = (std::min)(cap, (std::max)(1, a_def.w));
+        m.h = (std::max)(1, a_def.h);
+        m.rows.assign(static_cast<std::size_t>(m.h),
+            std::vector<bool>(static_cast<std::size_t>(m.w), true));
+        return m;
+    }
+
+    // a_rot quarter-turns CLOCKWISE (0..3). Rotating the SHAPE rather than each
+    // consumer is what keeps rotation a one-line change at placement, collision,
+    // the drop ghost, the hover hit test and the occupancy shading alike.
+    [[nodiscard]] inline Shape RotateShape(const Shape& a_shape, int a_rot)
+    {
+        Shape m = a_shape;
+        for (int i = 0; i < (a_rot & 3); ++i) {
+            Shape r;
+            r.w = m.h;
+            r.h = m.w;
+            r.rows.assign(static_cast<std::size_t>(r.h),
+                std::vector<bool>(static_cast<std::size_t>(r.w), false));
+            for (int y = 0; y < m.h; ++y) {
+                for (int x = 0; x < m.w; ++x) {
+                    if (m.At(x, y)) r.rows[static_cast<std::size_t>(x)]
+                                     [static_cast<std::size_t>(m.h - 1 - y)] = true;
+                }
+            }
+            m = std::move(r);
+        }
+        return m;
+    }
+
+    // The pairing is always this, so it gets one call.
+    [[nodiscard]] inline Shape ShapeOf(const ItemDef& a_def, int a_maxW, int a_rot)
+    {
+        return RotateShape(ShapeOf(a_def, a_maxW), a_rot);
     }
 
     namespace detail

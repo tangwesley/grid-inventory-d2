@@ -34,6 +34,42 @@ namespace FUI
             return false;
         }
 
+        // ★★A NON-NULL spModel IS NOT A FINISHED ONE, and LoadInFlight cannot
+        // tell the difference. It covers the hole it can see: an entry whose
+        // pointer has not arrived. A crash on 2026-09-03 (SE 1.5.97, Community
+        // Shaders + PGPatcher, a freshly generated PBR weapon) came through
+        // that guard INTACT -- every spModel was non-null, so the teardown was
+        // allowed, and End3D still read [rcx] with rcx = 0 one level deeper,
+        // inside the model. The engine hands out the node before every pass is
+        // attached to it and nothing in the entry says so.
+        //
+        // worldBound.radius is the one readiness signal already trusted
+        // elsewhere: the capture gates refuse a model until it is positive
+        // (see IconCache::CheckPendingGates). A zero radius here means the
+        // geometry has not landed, so the entry is still being built and End3D
+        // must not walk it yet.
+        //
+        // ★This is a GUARD, NOT A DIAGNOSIS. The crash log names no field, the
+        // reporter's runtime is not reproducible here, and the shipped exe is
+        // DRM-wrapped so the engine side cannot be read. It catches the
+        // half-built case IF the null is geometry-related; it proves nothing
+        // about the crash it was written for.
+        //
+        // ★Asked ONLY by the teardown, which is bounded: 300 reposts and then
+        // it skips End3D entirely and lets the next open/close pair it. Asking
+        // the same question in ResetScene would be unbounded -- a model that
+        // never gains a radius would stall the capture queue for the whole
+        // session with nothing to break the tie.
+        bool SceneModelIncomplete(RE::Inventory3DManager* a_mgr)
+        {
+            for (auto& lm : a_mgr->GetRuntimeData().loadedModels) {
+                if (lm.spModel && lm.spModel->worldBound.radius <= 0.0f) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // ★★1.0.5 — the capture rig, measured from the shipped scene:
         //   item (-12.4,-500,-26.25)   lamp (100,-350,100)   |d| = 226
         // Read as spherical about the item, with the camera at the origin
@@ -486,7 +522,7 @@ namespace FUI
     {
         if (!a_device) return false;
         // Already built for this surface.
-        if (m_dstTex && m_dstSRV && m_scratchTex &&
+        if (m_dstTex && m_dstSRV && m_scratchTex && m_dstTexB &&
             m_texFormat == static_cast<std::uint32_t>(a_src.Format) &&
             m_texW == a_src.Width && m_texH == a_src.Height) {
             return true;
@@ -499,6 +535,7 @@ namespace FUI
         // outside: every step "succeeded" and the pixels never arrived.
         if (m_dstSRV)     { m_dstSRV->Release();     m_dstSRV = nullptr; }
         if (m_dstTex)     { m_dstTex->Release();     m_dstTex = nullptr; }
+        if (m_dstTexB)    { m_dstTexB->Release();    m_dstTexB = nullptr; }
         if (m_scratchTex) { m_scratchTex->Release(); m_scratchTex = nullptr; }
 
         D3D11_TEXTURE2D_DESC desc = {};
@@ -522,6 +559,13 @@ namespace FUI
         // rect-only restore leaves any overspill visible (oversized items
         // peeking past the caching card for the capture frame). Full
         // save/restore reverts every pixel we touched.
+        // GI77: the white pass lands here. Same shape as the black pass; it is
+        // only ever read back on the CPU, never sampled, so no SRV.
+        if (FAILED(a_device->CreateTexture2D(&desc, nullptr, &m_dstTexB))) {
+            m_dstSRV->Release(); m_dstSRV = nullptr;
+            m_dstTex->Release(); m_dstTex = nullptr;
+            return false;
+        }
         D3D11_TEXTURE2D_DESC sdesc = a_src;
         sdesc.MipLevels      = 1;
         sdesc.ArraySize      = 1;
@@ -532,6 +576,7 @@ namespace FUI
         if (FAILED(a_device->CreateTexture2D(&sdesc, nullptr, &m_scratchTex))) {
             m_dstSRV->Release(); m_dstSRV = nullptr;
             m_dstTex->Release(); m_dstTex = nullptr;
+            m_dstTexB->Release(); m_dstTexB = nullptr;
             return false;
         }
 
@@ -554,6 +599,7 @@ namespace FUI
 
         release(m_dstSRV);
         release(m_dstTex);
+        release(m_dstTexB);
         release(m_scratchTex);
         m_initialized = false;
     }
@@ -577,10 +623,40 @@ namespace FUI
         }
 
         if (auto* mgr = RE::Inventory3DManager::GetSingleton()) {
-            Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
+            // ★★★GI73: ADOPT A SCENE THAT IS STILL UP, DO NOT STACK ANOTHER ONE.
+            //
+            // This called Begin3D whenever m_running was false -- and m_running
+            // is OUR state, cleared the instant the menu hides, while the engine
+            // scene lives until a teardown actually runs. TeardownWhenIdle
+            // returns WITHOUT End3D in two cases: the menu reopened (the session
+            // changed), or three hundred retries were exhausted. Its comment
+            // says the new session's own End() pairs the teardown -- but the new
+            // session had already added a second Begin3D by then, so the count
+            // came out two-to-one and one scene was left standing.
+            //
+            // ★An outstanding UI 3D scene draws the item and the player and not
+            // the world, which is exactly the report: "everything other than the
+            // player character will stop rendering, NPCs, objects, even the
+            // skybox", and it happened on the SECOND open (LO13OL75, 1.6.0).
+            // That reporter settled on another mod as the cause and may well be
+            // right about what stalled the first teardown -- but a stalled
+            // teardown is a thing this side has to survive, and it did not.
+            //
+            // ★m_scene3D tracks the only question that matters: is a Begin3D
+            // outstanding. When one is, the scene still up IS the scene this
+            // session wants, so it is adopted and the eventual End3D pairs the
+            // original call exactly.
+            if (m_scene3D) {
+                SKSE::log::warn("[PREVIEW] Begin3D SKIPPED -- the previous scene is "
+                                "still up (its teardown was deferred or refused). "
+                                "Adopting it so the pair stays 1:1.");
+            } else {
+                Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
+                m_scene3D = true;
+                SKSE::log::info("[PREVIEW] Begin3D");
+            }
             m_running = true;
             ++m_session;   // cancels any teardown still deferred from the last close
-            SKSE::log::info("[PREVIEW] Begin3D");
         } else {
             SKSE::log::warn("[PREVIEW] Begin: Inventory3DManager null");
         }
@@ -615,11 +691,16 @@ namespace FUI
         if (a_session != m_session || m_running) return;
         auto* mgr = RE::Inventory3DManager::GetSingleton();
         if (!mgr) return;
-        if (LoadInFlight(mgr)) {
+        // ★Two questions, not one: has a load yet to LAND (null spModel), and
+        // has one landed only PARTLY (spModel with no geometry). The second is
+        // the 2026-09-03 crash; see SceneModelIncomplete.
+        if (LoadInFlight(mgr) || SceneModelIncomplete(mgr)) {
             if (a_tries >= 300) {
                 // a load that never lands: leave the scene untouched (next
                 // open/close cycle pairs End3D) rather than risk the CTD
-                SKSE::log::warn("[PREVIEW] End: load stuck in flight, teardown skipped");
+                SKSE::log::warn("[PREVIEW] End: model never finished ({}), "
+                                "teardown skipped",
+                    LoadInFlight(mgr) ? "load stuck in flight" : "no geometry");
                 return;
             }
             SKSE::GetTaskInterface()->AddTask([this, a_session, a_tries]() {
@@ -630,16 +711,21 @@ namespace FUI
         Inv3D::Unload(mgr);
         // ★Same hole as ResetScene's, and the same answer: the guard above ran
         // before Unload, End3D walks the array Unload just touched.
-        if (LoadInFlight(mgr)) {
+        if (LoadInFlight(mgr) || SceneModelIncomplete(mgr)) {
             SKSE::GetTaskInterface()->AddTask([this, a_session, a_tries]() {
                 TeardownWhenIdle(a_session, a_tries + 1);
             });
             return;
         }
         Inv3D::End3D(mgr);
-        if (a_tries > 0) {
-            SKSE::log::info("[PREVIEW] End3D (deferred {} tasks)", a_tries);
-        }
+        m_scene3D = false;   // GI73: the pair is closed; the next open opens a scene
+        // ★GI73: ALWAYS, not only when it was deferred. A successful teardown
+        // used to log nothing at all, so a log could show Begin3D twice and give
+        // no way to tell whether an End3D had run between them -- which is why
+        // the unbalanced pair could not be seen in any of the three reporter
+        // logs that went past it. One line per menu close buys the whole
+        // question back.
+        SKSE::log::info("[PREVIEW] End3D (deferred {} tasks)", a_tries);
     }
 
     RE::NiAVObject* ItemPreview::FindCurrentModel() const
@@ -784,8 +870,14 @@ namespace FUI
                             "-- End3D skipped");
             return false;
         }
+        // ★GI73: balanced IN PLACE -- one out, one straight back in -- so the
+        // outstanding-Begin3D count is unchanged and m_scene3D stays true. It is
+        // written rather than left implied because the two calls have to move
+        // together: dropping the Begin3D here without clearing the flag would
+        // leave Begin() adopting a scene that is no longer there.
         Inv3D::End3D(mgr);
         Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
+        m_scene3D = true;
         m_current = nullptr;
         SKSE::log::info("[PREVIEW] scene reset (loadedModels was full)");
         return true;
@@ -925,7 +1017,7 @@ namespace FUI
 
     void ItemPreview::Request(RE::TESBoundObject* a_item, ImVec2 a_screenPos, ImVec2 a_screenSize,
                               float a_modelScale, float a_offsetX, float a_offsetY,
-                              const IconDef* a_def)
+                              const IconDef* a_def, bool a_spell)
     {
         if (!m_running || a_item == nullptr) return;
         // model-less leveled-item stubs CTD inside the engine's load task —
@@ -958,6 +1050,7 @@ namespace FUI
                 _stricmp(mdlNew->GetModel(), mdlCur->GetModel()) == 0 &&
                 FindCurrentModel() != nullptr) {
                 m_current = a_item;
+                m_currentIsSpell = a_spell;   // GI74b: told by the caller, never derived here
                 m_def = a_def ? *a_def : IconDef{};
             }
         }
@@ -1008,6 +1101,7 @@ namespace FUI
                 SKSE::log::info("[PREVIEW] load '{}'", a_item->GetName());
             }
             m_current = a_item;
+            m_currentIsSpell = a_spell;   // GI74b: told by the caller, never derived here
             m_def = a_def ? *a_def : IconDef{};
         } else if (a_def && (a_def->rx != m_def.rx || a_def->ry != m_def.ry ||
                              a_def->rz != m_def.rz || a_def->scale != m_def.scale)) {
@@ -1200,7 +1294,7 @@ namespace FUI
             auto* dev = reinterpret_cast<ID3D11Device*>(data->forwarder);
             if (!EnsureCaptureTextures(dev, bd)) { srcTex->Release(); return; }
         }
-        if (!m_dstTex || !m_scratchTex) { srcTex->Release(); return; }
+        if (!m_dstTex || !m_dstTexB || !m_scratchTex) { srcTex->Release(); return; }
 
         // Compute the clamped backbuffer rect once. Save/clear/capture/restore
         // all operate on this single box.
@@ -1339,7 +1433,9 @@ namespace FUI
             if (SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
                     reinterpret_cast<void**>(&ctx1))) && ctx1) {
                 D3D11_RECT rect = { left, top, left + width, top + height };
-                ctx1->ClearView(rtv, kCaptureBg, &rect, 1);
+                // GI77: pass A is always black -- for an item it is one half of
+                // the matte, for a spell it is the whole capture.
+                ctx1->ClearView(rtv, kMatteBlack, &rect, 1);
                 ctx1->Release();
             }
         }
@@ -1363,6 +1459,22 @@ namespace FUI
 
         // Step 4 (capture): copy backbuffer rect → top-left of our texture.
         context->CopySubresourceRegion(m_dstTex, 0, 0, 0, 0, srcTex, 0, &box);
+        // ★★GI77: PASS B, the same model over WHITE, into the second texture.
+        // The scene has not moved between the two draws -- same frame, same
+        // rig, same rotation -- so the only thing that differs is what shows
+        // through, and that difference is read back as the alpha. Skipped for
+        // a spell (see kMatteWhite): an additive glow over white saturates.
+        if (!m_currentIsSpell) {
+            ID3D11DeviceContext1* ctx1 = nullptr;
+            if (SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                    reinterpret_cast<void**>(&ctx1))) && ctx1) {
+                D3D11_RECT rect = { left, top, left + width, top + height };
+                ctx1->ClearView(rtv, kMatteWhite, &rect, 1);
+                ctx1->Release();
+            }
+            inv->Render();
+            context->CopySubresourceRegion(m_dstTexB, 0, 0, 0, 0, srcTex, 0, &box);
+        }
 
         // Diagnostic probe (first few captures with a loaded model): read the
         // captured rect back and count pixels that differ from the painted

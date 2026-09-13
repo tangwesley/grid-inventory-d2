@@ -52,12 +52,12 @@ namespace FUI::Grid
     {
         constexpr const char* kLayoutPath = "Data/SKSE/Plugins/GridInventory_layout.ini";
 
-        struct Mask
-        {
-            std::vector<std::vector<bool>> rows;
-            int w = 1;
-            int h = 1;
-        };
+        // ★GI71: the footprint moved to ItemDef.h so the partner board can build
+        // one too (it could resolve a def but not a shape, which is why a
+        // container laid every tile out as a rectangle). Same type, same
+        // arithmetic -- this name stays because the file says `mask` in about
+        // sixty places and renaming them would bury the change that matters.
+        using Mask = FUI::Shape;
 
         struct Item
         {
@@ -883,11 +883,14 @@ namespace FUI::Grid
                 // reasoning that a plain unit owns no ExtraDataList and so a
                 // star for it has nowhere to live -- the engine writes into a
                 // variant sibling's list instead. That measurement was real,
-                // and it stopped being the whole story the day ProcessFavorites
-                // learned to LIFT every existing star before calling
-                // SetFavorite: with the entry momentarily bare, the engine
-                // mints a fresh list, and the plain pool ends up owning one
-                // like everybody else. The line outlived the problem.
+                // and it stopped being the whole story once ProcessFavorites
+                // learned to HIDE the entry's lists for the SetFavorite call
+                // (GI81): with the entry genuinely bare, the engine mints a
+                // fresh list, and the plain pool ends up owning one like
+                // everybody else. (Lifting the STARS first, which is what this
+                // comment used to credit, never did that -- the engine reads
+                // the lists, not the stars; that is the bug GI81 fixed.) The
+                // line outlived the problem.
                 //
                 // What it cost while it stayed: star the tempered sword and the
                 // plain one lit up beside it, because "any star on this entry"
@@ -2569,29 +2572,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         // ---- placement (JS maskOf / placeItems 1:1) ----
 
+        // ★GI71: the body of these three now lives in ItemDef.h, next to the def
+        // they read, so LootBarter can build the same footprint for a container
+        // or a merchant. The clamp is the only grid-specific part and is the one
+        // thing passed in -- a partner board has its own width.
         Mask MaskOf(const GridDef& a_def)
         {
-            Mask m;
-            if (!a_def.shape.empty()) {
-                std::istringstream ss(a_def.shape);
-                std::string tok;
-                int w = 1;
-                while (std::getline(ss, tok, '|')) {
-                    std::vector<bool> row;
-                    for (char c : tok) row.push_back(c == '1');
-                    w = (std::max)(w, static_cast<int>(row.size()));
-                    m.rows.push_back(std::move(row));
-                }
-                if (m.rows.empty()) m.rows.push_back({ true });
-                for (auto& r : m.rows) r.resize(w, false);
-                m.w = (std::min)(w, BaseCols());
-                m.h = static_cast<int>(m.rows.size());
-                return m;
-            }
-            m.w = (std::min)(BaseCols(), (std::max)(1, a_def.w));
-            m.h = (std::max)(1, a_def.h);
-            m.rows.assign(m.h, std::vector<bool>(m.w, true));
-            return m;
+            return FUI::ShapeOf(a_def, BaseCols());
         }
 
         // GI62: the footprint turned a_rot quarter-turns CLOCKWISE (0..3).
@@ -2601,20 +2588,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // every one of those sites instead of a special case in each.
         [[nodiscard]] Mask RotateMask(const Mask& a_mask, int a_rot)
         {
-            Mask m = a_mask;
-            for (int i = 0; i < (a_rot & 3); ++i) {
-                Mask r;
-                r.w = m.h;
-                r.h = m.w;
-                r.rows.assign(r.h, std::vector<bool>(r.w, false));
-                for (int y = 0; y < m.h; ++y) {
-                    for (int x = 0; x < m.w; ++x) {
-                        if (m.rows[y][x]) r.rows[x][m.h - 1 - y] = true;
-                    }
-                }
-                m = std::move(r);
-            }
-            return m;
+            return FUI::RotateShape(a_mask, a_rot);
         }
 
         // A footprint's def + rotation in one call (the pairing is always this).
@@ -3982,6 +3956,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             !ImGui::GetIO().WantTextInput &&
                             !GoldCoins::IsCoinForm(fid)) {
                             ToggleFavorite(it.key, it.obj, it.uid, it.xlIdx, it.sig);
+                            // GI81 diag: the press itself, so a toggle that
+                            // never reaches the engine can be told from one
+                            // that did and had no effect. One line per click.
+                            SKSE::log::info("[FAV] F on '{}' key='{}' uid {:04X} xl {} sig {:04X} count {}",
+                                it.obj->GetName(), it.key, it.uid, it.xlIdx, it.sig, it.count);
                             Sfx::Favorite();
                             // ★S1: no rebuild -- the star lands when the engine
                             // applies it (ProcessFavorites), and THAT refreshes
@@ -4643,6 +4622,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         a_offX = g_held->offX;
         a_offY = g_held->offY;
         return true;
+    }
+
+    const FUI::Shape* HeldShape()
+    {
+        return g_held ? &g_held->mask : nullptr;
     }
 
     namespace
@@ -9968,8 +9952,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     //
     // The one thing only the engine can do is favourite a unit that owns NO
     // list, because that unit has to be split off the stack first -- and it
-    // refuses to split while the entry already carries a hotkey. So lift the
-    // other hotkeys for the duration of that one call and put them straight back.
+    // only splits for an entry that has no lists at all. So the entry's lists
+    // are hidden from it for the duration of that one call (GI81, in
+    // ProcessFavorites) and the list it mints is spliced back in.
     // ★The doll's and the drawer's way in. A board tile has a key and a list
     // index; a WORN unit has neither -- it owns no cell, and its position in
     // the entry shifts every time something is equipped. uid+sig names it
@@ -9992,8 +9977,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         for (const auto& f : q) {
             // tripwire witness: this form's star state is changing on purpose
             if (f.obj) g_starChangeOk.insert(f.obj->GetFormID());
+            bool found = false;
             for (auto* entry : *changes->entryList) {
                 if (!entry || entry->object != f.obj) continue;
+                found = true;
                 const std::string base = FormKey(f.obj);
                 // The pool a list belongs to, by CONTENT -- never by pointer.
                 // RemoveFavorite/SetFavorite create and destroy lists, so a
@@ -10048,6 +10035,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // nothing changed on screen.
                 const std::uint16_t tsig = xl ? InstanceSig(xl) : 0;
                 const bool on = PoolHasStar(entry, f.uid, tsig);
+                // ★GI81 diag: one line per press, UNCONDITIONALLY. The first
+                // TEST 10 log had no trace of the press at all, and a whole
+                // test cycle went on telling the silent branches apart. A
+                // favourite is a click, not a frame; the line is cheap.
+                // The snapshot is taken BEFORE any branch mutates the lists,
+                // and `hit` is resolved now because RemoveFavorite may free
+                // the very list `xl` points at (that was a real crash once).
+                auto listsNow = [&]() {
+                    std::string ls;
+                    if (entry->extraLists) {
+                        for (auto* x2 : *entry->extraLists) {
+                            if (!x2) continue;
+                            std::uint16_t u = 0;
+                            if (const auto* xu = x2->GetByType<RE::ExtraUniqueID>()) {
+                                u = xu->uniqueID;
+                            }
+                            ls += std::format("[{} n{}{}{}] ",
+                                PoolPrefix(base, u, InstanceSig(x2)), x2->GetCount(),
+                                x2->HasType<RE::ExtraHotkey>() ? " HOT" : "",
+                                (x2->HasType<RE::ExtraWorn>() ||
+                                 x2->HasType<RE::ExtraWornLeft>()) ? " WORN" : "");
+                        }
+                    }
+                    return ls.empty() ? std::string("-") : ls;
+                };
+                const std::string before = listsNow();
+                const std::string hit    = xl ? poolOf(xl) : std::string("-");
+                const char*       via    = "?";
                 // ★★Tell the wheel the moment the star comes off, not the next
                 // time it happens to look. It re-reads the favourites only when
                 // it opens, so unstar-and-restar inside one inventory visit was
@@ -10070,11 +10085,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // A toggle that cannot be untoggled is the one outcome worth
                     // avoiding here.
                     // ★This is now the rare path, not the plain pool's normal
-                    // one: lifting the other stars before SetFavorite gets the
-                    // engine to mint a list for a plain unit too, so it usually
-                    // owns one and takes the precise branch below. Reached only
-                    // when that failed -- and then we do not know which list
-                    // holds this pool's mark, so coarse is the honest answer.
+                    // one: hiding the entry's lists from SetFavorite (GI81,
+                    // below) gets the engine to mint a list for a plain unit
+                    // too, so it usually owns one and takes the precise branch.
+                    // Reached only when that failed -- and then we do not know
+                    // which list holds this pool's mark, so coarse is the honest
+                    // answer.
                     std::vector<std::string> all;
                     if (entry->extraLists) {
                         for (auto* x : *entry->extraLists) {
@@ -10082,79 +10098,138 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                     clearPools(all);
+                    via = "off-all";
                 } else if (on) {
                     clearPools({ PoolPrefix(base, f.uid, tsig) });
+                    via = "off-pool";
                 } else if (xl) {
                     xl->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
+                    via = "self";
                 } else {
                     // No list of its own, and the pool has no star anywhere else.
-                    // Only the engine can split the unit off the stack, and it
-                    // refuses while the entry already carries a hotkey -- so lift
-                    // the others across the call.
-                    std::vector<std::string> lifted;
-                    if (entry->extraLists) {
-                        for (auto* x : *entry->extraLists) {
-                            if (x && x->HasType<RE::ExtraHotkey>()) lifted.push_back(poolOf(x));
-                        }
-                    }
-                    clearPools(lifted);
-                    // ★★SetFavorite's second parameter names the UNIT, and null
-                    // is the only honest value for a plain unit: it has no list
-                    // to point at, which is the whole reason this branch exists.
-                    // The engine then picks for itself, and MEASUREMENT settled
-                    // what it picks -- it mints a fresh list only when the entry
-                    // has none at all; with even one variant present it writes
-                    // into that variant's list instead. Calling again does not
-                    // move it along either (verified: a second call is refused
-                    // outright while any star exists).
+                    // Only the engine can split a unit off the stack, and
+                    // MEASUREMENT settled when it does: SetFavorite(entry, null)
+                    // mints a fresh list only for an entry with NO lists at all;
+                    // with even one variant present it writes the hotkey into
+                    // that variant's list instead, and calling again is refused
+                    // outright while any star exists. Lifting the other stars
+                    // across the call (what this branch did) changed nothing,
+                    // because what the engine looks at is the LISTS, not the
+                    // stars -- a torch with a stolen sibling, a potion with an
+                    // owned one, never got a list of its own, and the tile the
+                    // player pointed at stayed dark while the sibling lit up.
+                    // (Reported: "starring registers, but no star unless the
+                    // item was equipped once, or dropped and picked up" -- both
+                    // of which hand the unit a list by other means.)
                     //
-                    // So there is no way to aim this call at a plain unit, and
-                    // the star it produces is ACCEPTED where it lands rather
-                    // than reverted. Reverting was tried first and it removed
-                    // the wrong thing -- it left the player unable to favourite
-                    // an ordinary dagger at all, which is worse than the star
-                    // being coarse. PoolHasStar reads any entry star as the
-                    // plain pool's, so the tile the player pointed at does light
-                    // up; its variant sibling lights up with it. Same dagger,
-                    // one mark between them.
+                    // ★★GI81: SO HIDE THE LISTS. For this one call the entry's
+                    // container is detached; the engine sees the ordinary bare
+                    // entry it handles every day, mints a {Hotkey} list into a
+                    // fresh container, and that list is then spliced into the
+                    // real one. Nothing here constructs an ExtraDataList (the
+                    // library cannot, in a cross-runtime build: no ctor, and
+                    // the object's size differs by runtime) -- the engine does,
+                    // on its usual path. countDelta is untouched: lists only
+                    // partition the entry's count, and AddExtraList is a
+                    // push_front. The fresh list hashes to the plain pool
+                    // (nothing but the hotkey), which is exactly the shape the
+                    // engine mints for a bare entry, so PoolHasStar and the
+                    // untoggle path read it as they always have.
+                    // ★The one container deleted here is one the engine just
+                    // made and nothing else references; ~BSSimpleList frees its
+                    // nodes only (the payloads are pointers), and the library's
+                    // own ~InventoryEntryData deletes containers the same way.
+                    // ★Game thread only (ProcessFavorites runs on the Tick), so
+                    // nothing reads extraLists inside the window.
+                    auto* const hidden = entry->extraLists;
+                    entry->extraLists = nullptr;
                     changes->SetFavorite(entry, nullptr);
-                    // Re-walk the CURRENT list and restore by POOL, so a list
-                    // the split rebuilt is matched by what it holds, not by an
-                    // address that may no longer mean anything.
-                    if (entry->extraLists && !lifted.empty()) {
-                        for (auto* x : *entry->extraLists) {
-                            if (!x || x->HasType<RE::ExtraHotkey>()) continue;
-                            if (std::find(lifted.begin(), lifted.end(), poolOf(x)) ==
-                                lifted.end()) continue;
-                            x->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
+                    auto* const minted = entry->extraLists;
+                    entry->extraLists = hidden;
+                    int spliced = 0;
+                    if (minted && hidden) {
+                        for (auto* x : *minted) {
+                            if (!x) continue;
+                            entry->AddExtraList(x);   // into `hidden`, the real container
+                            ++spliced;
+                        }
+                        delete minted;   // nodes only -- the lists live on in `hidden`
+                    } else if (minted) {
+                        entry->extraLists = minted;   // no container before: the engine's IS it
+                        for (auto* x : *minted) {
+                            if (x) ++spliced;
                         }
                     }
-                }
-                // ★Back behind the trace switch. It was unconditional while the
-                // question was open, and it answered it: the engine mints a list
-                // only for an entry that has none, so "via=engine" on an entry
-                // with variants always lands on a sibling. Nothing left to catch
-                // here every press.
-                if (g_poolTrace) {
-                    std::string ls;
-                    if (entry->extraLists) {
-                        for (auto* x2 : *entry->extraLists) {
-                            if (!x2) continue;
-                            const std::uint16_t u = PoolUid(f.obj, x2);
-                            ls += std::format("[{}{}] ",
-                                PoolPrefix(FormKey(f.obj), u, InstanceSig(x2)),
-                                x2->HasType<RE::ExtraHotkey>() ? " HOT" : "");
-                        }
+                    if (spliced == 0) {
+                        via = "mint-none";
+                        SKSE::log::warn("[FAV] '{}': the engine minted no list for the plain "
+                                        "unit -- the star has nowhere to sit",
+                            f.obj->GetName());
+                    } else {
+                        via = hidden ? "mint-hidden" : "mint-bare";
                     }
-                    SKSE::log::info("[FAV] toggle uid {:04X} xl {} was={} via={}"
-                                    " asked='{}' hit='{}' | {}",
-                        f.uid, f.xlIdx, on ? "on" : "off",
-                        xl ? "self" : "engine",
-                        PoolPrefix(base, f.uid, tsig),
-                        xl ? poolOf(xl) : std::string("-"),
-                        ls.empty() ? "-" : ls);
                 }
+                // ★The one line that says what happened: the branch, the lists
+                // before and after, and whether the pool the player pointed at
+                // reads as starred NOW -- which is exactly what the tile will
+                // draw. (This used to sit behind g_poolTrace; see the diag note
+                // at the snapshot above for why it is unconditional.)
+                SKSE::log::info("[FAV] toggle '{}' uid {:04X} xl {} sig {:04X} was={} via={} "
+                                "asked='{}' hit='{}' delta={} | before {}| after {}| star now={}",
+                    f.obj->GetName(), f.uid, f.xlIdx, tsig, on ? "on" : "off", via,
+                    PoolPrefix(base, f.uid, tsig), hit, entry->countDelta,
+                    before, listsNow(), PoolHasStar(entry, f.uid, tsig) ? "yes" : "no");
                 break;
+            }
+            if (!found) {
+                // ★★★GI82: THE UNIT HAS NO ENTRY, SO MAKE ONE.
+                //
+                // The board counts through GetInventory, which walks the base
+                // container AND the changes; InventoryChanges::entryList holds
+                // only the changes. A unit nothing has ever happened to lives
+                // in the base container alone and has NO entry here -- and
+                // this loop, finding nothing, used to return without a word.
+                // Measured (TEST 10 diag): 'Iron War Axe', count 1, no entry.
+                // That IS the report: "an item never equipped will not take a
+                // star; equip and unequip it once, or drop and pick it up, and
+                // it will" -- each of those is the engine creating the entry.
+                // (The sibling-list case above, GI81, is real too; it is just
+                // not the common one.)
+                //
+                // ★The engine does exactly this for a base unit the moment it
+                // is worn: an entry with countDelta 0 (the unit is still the
+                // container's) carrying the worn list. Same shape here, with
+                // the hotkey list the engine mints on a bare entry. The class
+                // is 0x18 in every runtime, the ctor is the library's, the
+                // allocation is the game heap (TES_HEAP_REDEFINE_NEW), and
+                // AddEntryData is the library's push_front + changed=true.
+                // ★A request that NAMES a unit (uid or sig) cannot be for a
+                // listless base unit -- that is a stale click, not a licence
+                // to invent an entry for something else.
+                if (!f.obj || f.uid != 0 || f.sig != 0 || f.worn) {
+                    SKSE::log::warn("[FAV] '{}' ({:08X}): no InventoryChanges entry and the "
+                                    "request names a unit (uid {:04X} sig {:04X} worn={}) -- "
+                                    "stale, ignored",
+                        f.obj ? f.obj->GetName() : "-", f.obj ? f.obj->GetFormID() : 0u,
+                        f.uid, f.sig, f.worn);
+                    continue;
+                }
+                auto* fresh = new RE::InventoryEntryData(f.obj, 0);
+                changes->AddEntryData(fresh);
+                changes->SetFavorite(fresh, nullptr);   // bare entry: the engine mints {Hotkey}
+                const bool starred = PoolHasStar(fresh, 0, 0);
+                if (starred) {
+                    Wheeler::NoteStarred(f.obj->GetFormID());
+                    SKSE::log::info("[FAV] '{}' ({:08X}): had no InventoryChanges entry -- "
+                                    "made one (delta 0) and the engine starred it",
+                        f.obj->GetName(), f.obj->GetFormID());
+                } else {
+                    SKSE::log::warn("[FAV] '{}' ({:08X}): had no InventoryChanges entry -- "
+                                    "made one (delta 0) but the engine minted no hotkey list "
+                                    "on it (lists: {})",
+                        f.obj->GetName(), f.obj->GetFormID(),
+                        fresh->extraLists ? static_cast<int>(fresh->extraLists->size()) : 0);
+                }
             }
         }
         // GI33: the star is read back OUT of the engine once the change has
@@ -11065,6 +11140,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     int SpaceUsed() { return g_spaceUsed; }
+    int TileCount() { return static_cast<int>(g_items.size()); }
 
     // ⛔The old companion `BagFreeCells()` is gone. It existed because the
     //  total counted only the main board, so the take-all budget had to add
@@ -12300,6 +12376,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             RE::FormID    form = 0;
             std::uint16_t uid = 0;
             std::uint16_t sig = 0;
+            // ★GI79: WHO HOLDS THE BOOK. 0 = the player. A shelf read names the
+            // container, so the page can find the unit's own ExtraDataList --
+            // which is where a quest note keeps the quest that fills its
+            // <Alias=...> tokens. Looking it up in the player's pack found
+            // nothing, and a page with no quest context cut off at the first
+            // token (reported).
+            RE::FormID    owner = 0;
+            // ★GI84: what the book was worth BEFORE the read, carried into the
+            // deferred stage so the tome's spending can be decided once the
+            // engine's queued Use has actually landed. See ProcessBookRead.
+            int           heldBefore = 0;
+            bool          hadSpell   = false;
+            bool          took       = false;   // Read() accepted it
         };
         std::optional<PendingRead> g_pendingRead;
         // ★(1.5.x) a SHELF book's page (no owner involved) -- see
@@ -12461,10 +12550,232 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // needs no owner: ShowBookPage raises TESBookReadEvent, so a skill book
     // still teaches exactly as reading it in the world does.
     void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                              std::uint16_t a_sig)
+                              std::uint16_t a_sig, RE::FormID a_owner)
     {
         if (!a_book) return;
-        g_pendingShelfPage = PendingRead{ a_book->GetFormID(), a_uid, a_sig };
+        g_pendingShelfPage = PendingRead{ a_book->GetFormID(), a_uid, a_sig, a_owner };
+    }
+
+    namespace
+    {
+        // ★★★GI79: THE ENGINE'S OWN TEXT REPLACEMENT, DONE THE ENGINE'S WAY.
+        //
+        // A book's DESC can carry <Alias=Name>, <Alias.ShortName=Name>, the
+        // pronoun forms, <Alias.Race=..>, <Alias.Sex=..> and <Global=EditorID>.
+        // The engine fills them from the QUEST that handed the note over: a
+        // quest-owned unit carries ExtraTextDisplayData with the quest and the
+        // instance id, and TESQuest::instanceData holds, per instance, "alias
+        // id -> the form whose name goes here" and "global -> its value at the
+        // time". GetDescription on the base form knows none of that, so the
+        // page we raise ourselves showed the tokens raw -- and the BookMenu's
+        // text field reads '<Alias=..>' as an HTML tag it does not know and
+        // swallows everything after it. That is the cut-off (reported: the
+        // jarl's inheritance letter, missives, notice-board notes).
+        //
+        // ★Resolved from the instance the note names when it exists, which is
+        // right even for a note from a finished radiant quest whose aliases
+        // have since moved on; the quest's live aliases are the fallback. A
+        // token nothing can answer is removed rather than left: an unanswered
+        // name reads wrong, a truncated letter reads as nothing at all.
+        [[nodiscard]] const char* SexWord(RE::SEX a_sex, const char* a_m,
+                                          const char* a_f, const char* a_n)
+        {
+            return a_sex == RE::SEX::kFemale ? a_f : a_sex == RE::SEX::kMale ? a_m : a_n;
+        }
+
+        // ★GI87: the list on this entry that carries the quest context, which is
+        // not necessarily the one the pool named. a_preferred wins when it has
+        // the data; otherwise the entry is scanned. Null when nobody has it --
+        // and that is a fact worth logging, not a silent empty page.
+        [[nodiscard]] const RE::ExtraDataList* TextContextList(
+            RE::InventoryEntryData* a_entry, const RE::ExtraDataList* a_preferred)
+        {
+            auto has = [](const RE::ExtraDataList* x) {
+                if (!x) return false;
+                const auto* t = const_cast<RE::ExtraDataList*>(x)
+                                    ->GetByType<RE::ExtraTextDisplayData>();
+                return t && t->ownerQuest;
+            };
+            if (has(a_preferred)) return a_preferred;
+            if (a_entry && a_entry->extraLists) {
+                for (const auto* x : *a_entry->extraLists) {
+                    if (has(x)) return x;
+                }
+            }
+            return a_preferred;   // nothing better; the resolver reports why
+        }
+
+        void ResolveTextTokens(std::string& a_text, const RE::ExtraDataList* a_xl,
+                               const char* a_what)
+        {
+            if (a_text.find('<') == std::string::npos) return;
+            const RE::ExtraTextDisplayData* xt = nullptr;
+            if (a_xl) {
+                xt = const_cast<RE::ExtraDataList*>(a_xl)->GetByType<RE::ExtraTextDisplayData>();
+            }
+            RE::TESQuest* quest = xt ? xt->ownerQuest : nullptr;
+            // ★★★GI87 DIAGNOSTIC: NAME THE BOOK AND THE MISSING PIECE.
+            //
+            // "The alias is a blank space" is what an unresolved tag looks like
+            // from the outside, and from the inside it can be any of four
+            // different failures. One line per page says which, and names the
+            // book so a reporter's save can be pointed at directly.
+            const char* what = a_what && *a_what ? a_what : "?";
+            SKSE::log::info("[BOOK] tokens in '{}': list={} textdata={} quest={} instance={}",
+                what, a_xl ? "yes" : "NONE", xt ? "yes" : "NONE",
+                quest ? (quest->GetFormEditorID() && *quest->GetFormEditorID()
+                             ? quest->GetFormEditorID()
+                             : "(unnamed)")
+                      : "NONE",
+                xt ? static_cast<int>(xt->ownerInstance.get()) : -1);
+            const std::int32_t instId =
+                xt ? static_cast<std::int32_t>(xt->ownerInstance.get()) : -1;
+            const RE::BGSQuestInstanceText* inst = nullptr;
+            if (quest && instId >= 0) {
+                for (const auto* it : quest->instanceData) {
+                    if (it && it->id == static_cast<std::uint32_t>(instId)) { inst = it; break; }
+                }
+            }
+            auto ieq = [](std::string_view a, std::string_view b) {
+                if (a.size() != b.size()) return false;
+                for (size_t i = 0; i < a.size(); ++i) {
+                    if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                        std::tolower(static_cast<unsigned char>(b[i]))) return false;
+                }
+                return true;
+            };
+            // The form that fills an alias: the instance's record first, the
+            // quest's live alias second.
+            // ★GI87: and it SAYS WHY when it comes back empty. Four different
+            // failures used to look identical on the page (a blank space), and
+            // telling them apart from a report was impossible.
+            auto formOf = [&](std::string_view a_alias) -> RE::TESForm* {
+                if (!quest) {
+                    SKSE::log::warn("[BOOK] '{}': <{}> has no quest behind it -- "
+                                    "the note carries no ExtraTextDisplayData we can see",
+                        what, a_alias);
+                    return nullptr;
+                }
+                for (const auto* al : quest->aliases) {
+                    if (!al || !ieq(al->aliasName.c_str(), a_alias)) continue;
+                    if (inst) {
+                        for (const auto& sd : inst->stringData) {
+                            if (sd.aliasID == al->aliasID && sd.fullNameFormID) {
+                                if (auto* f = RE::TESForm::LookupByID(sd.fullNameFormID)) return f;
+                            }
+                        }
+                    }
+                    if (al->GetVMTypeID() == RE::BGSRefAlias::VMTYPEID) {
+                        auto* ref = static_cast<const RE::BGSRefAlias*>(al)->GetReference();
+                        if (!ref) {
+                            SKSE::log::warn("[BOOK] '{}': alias '{}' (id {}) is in the quest "
+                                            "but holds no reference right now",
+                                what, a_alias, al->aliasID);
+                        }
+                        return ref;
+                    }
+                    SKSE::log::warn("[BOOK] '{}': alias '{}' (id {}) is not a reference alias "
+                                    "and the instance had no name for it",
+                        what, a_alias, al->aliasID);
+                    return nullptr;
+                }
+                SKSE::log::warn("[BOOK] '{}': quest '{}' has no alias named '{}' "
+                                "({} alias(es) searched)",
+                    what, quest->GetFormEditorID() ? quest->GetFormEditorID() : "?",
+                    a_alias, quest->aliases.size());
+                return nullptr;
+            };
+            auto nameOf = [](RE::TESForm* a_f) -> std::string {
+                if (!a_f) return {};
+                if (auto* r = a_f->As<RE::TESObjectREFR>()) {
+                    const char* n = r->GetDisplayFullName();
+                    return n ? n : "";
+                }
+                const char* n = a_f->GetName();
+                return n ? n : "";
+            };
+            auto npcOf = [](RE::TESForm* a_f) -> RE::TESNPC* {
+                if (!a_f) return nullptr;
+                if (auto* n = a_f->As<RE::TESNPC>()) return n;
+                if (auto* a = a_f->As<RE::Actor>()) return a->GetActorBase();
+                return nullptr;
+            };
+            static std::unordered_set<std::string> s_saidUnknown;
+
+            std::string out;
+            out.reserve(a_text.size());
+            size_t i = 0;
+            while (i < a_text.size()) {
+                const char c = a_text[i];
+                if (c != '<') { out.push_back(c); ++i; continue; }
+                const size_t close = a_text.find('>', i + 1);
+                if (close == std::string::npos) { out.append(a_text, i, std::string::npos); break; }
+                const std::string_view tag(a_text.data() + i + 1, close - i - 1);
+                // Only the replacement grammar is ours. <p>, <font>, <br>, <img>
+                // are the book's own markup and pass through untouched.
+                const bool isAlias  = tag.size() > 5 && ieq(tag.substr(0, 5), "Alias");
+                const bool isGlobal = tag.size() > 7 && ieq(tag.substr(0, 7), "Global=");
+                const bool isToken  = tag.size() > 5 && ieq(tag.substr(0, 5), "Token");
+                if (!isAlias && !isGlobal && !isToken) {
+                    out.append(a_text, i, close - i + 1);
+                    i = close + 1;
+                    continue;
+                }
+                std::string repl;
+                const size_t eq = tag.find('=');
+                const std::string_view kind = eq == std::string_view::npos ? tag : tag.substr(0, eq);
+                const std::string_view arg  = eq == std::string_view::npos ? std::string_view{} : tag.substr(eq + 1);
+                if (isGlobal) {
+                    float v = 0.0f; bool have = false;
+                    if (inst) {
+                        for (const auto& gd : inst->valueData) {
+                            const char* eid = gd.global ? gd.global->GetFormEditorID() : nullptr;
+                            if (eid && ieq(eid, arg)) { v = gd.value; have = true; break; }
+                        }
+                    }
+                    if (!have) {
+                        if (auto* g = RE::TESForm::LookupByEditorID<RE::TESGlobal>(std::string(arg))) {
+                            v = g->value; have = true;
+                        }
+                    }
+                    if (have) {
+                        repl = (std::fabs(v - std::round(v)) < 0.0005f)
+                                   ? std::to_string(static_cast<long long>(std::llround(v)))
+                                   : std::format("{:.2f}", v);
+                    }
+                } else if (isAlias) {
+                    // kind is "Alias" or "Alias.<Form>"
+                    const std::string_view form = kind.size() > 6 ? kind.substr(6) : std::string_view{};
+                    RE::TESForm* f = formOf(arg);
+                    RE::TESNPC*  npc = npcOf(f);
+                    const RE::SEX sex = npc ? npc->GetSex() : RE::SEX::kNone;
+                    if (form.empty())                       repl = nameOf(f);
+                    else if (ieq(form, "ShortName"))        repl = (npc && npc->shortName.c_str() && *npc->shortName.c_str()) ? npc->shortName.c_str() : nameOf(f);
+                    else if (ieq(form, "Pronoun"))          repl = SexWord(sex, "he", "she", "it");
+                    else if (ieq(form, "PronounObj"))       repl = SexWord(sex, "him", "her", "it");
+                    else if (ieq(form, "PronounPos"))       repl = SexWord(sex, "his", "her", "its");
+                    else if (ieq(form, "PronounPosObj"))    repl = SexWord(sex, "his", "hers", "its");
+                    else if (ieq(form, "PronounRefl"))      repl = SexWord(sex, "himself", "herself", "itself");
+                    else if (ieq(form, "CapPronoun"))       repl = SexWord(sex, "He", "She", "It");
+                    else if (ieq(form, "CapPronounObj"))    repl = SexWord(sex, "Him", "Her", "It");
+                    else if (ieq(form, "CapPronounPos"))    repl = SexWord(sex, "His", "Her", "Its");
+                    else if (ieq(form, "CapPronounPosObj")) repl = SexWord(sex, "His", "Hers", "Its");
+                    else if (ieq(form, "CapPronounRefl"))   repl = SexWord(sex, "Himself", "Herself", "Itself");
+                    else if (ieq(form, "Sex"))              repl = SexWord(sex, "male", "female", "");
+                    else if (ieq(form, "Race")) {
+                        auto* race = npc ? npc->GetRace() : nullptr;
+                        repl = race && race->GetFullName() ? race->GetFullName() : "";
+                    } else if (s_saidUnknown.insert(std::string(form)).second) {
+                        SKSE::log::info("[BOOK] unknown alias form '<{}>' -- dropped from the page", tag);
+                    }
+                } else if (s_saidUnknown.insert(std::string(kind)).second) {
+                    SKSE::log::info("[BOOK] unknown text token '<{}>' -- dropped from the page", tag);
+                }
+                out += repl;
+                i = close + 1;
+            }
+            a_text.swap(out);
+        }
     }
 
     // Raise the engine's page for a book we are only DISPLAYING. Handing it
@@ -12494,13 +12805,48 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // What is true is that it is not the WHOLE reading: the engine's own menu
     // path spends a tome, and that spending is still done explicitly above.
     void ShowBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                      std::uint16_t a_sig)
+                      std::uint16_t a_sig, RE::FormID a_owner)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !a_book) return;
-        auto* xl = ExtraForPool(LiveEntryOf(player, a_book), a_uid, a_sig);
-        RE::BSString desc;
-        a_book->GetDescription(desc, a_book);
+        // ★GI79: the unit's list comes from whoever HOLDS it. A shelf read used
+        // to look in the player's pack, find nothing, and raise a page with no
+        // quest behind it.
+        RE::TESObjectREFR* owner =
+            a_owner ? RE::TESForm::LookupByID<RE::TESObjectREFR>(a_owner) : nullptr;
+        if (!owner) owner = player;
+        auto* entry = LiveEntryOf(owner, a_book);
+        auto* xl = ExtraForPool(entry, a_uid, a_sig);
+        RE::BSString raw;
+        a_book->GetDescription(raw, a_book);
+        std::string text = raw.c_str() ? raw.c_str() : "";
+        // ★★★GI87: THE QUEST CONTEXT IS NOT NECESSARILY ON THE LIST THE POOL
+        // PICKED.
+        //
+        // GI79 handed `xl` straight to the resolver, and `xl` is whatever
+        // ExtraForPool named for the tile that was clicked. When that list is
+        // not the one carrying ExtraTextDisplayData -- a null pool answer, a
+        // note whose unit the signature hashes into a different pool
+        // (ExtraTextDisplayData is deliberately NOT part of InstanceSig, see
+        // the note there), a uniqueID the tile never recorded -- the resolver
+        // finds no quest, every alias resolves to nothing, and the tag is
+        // replaced by EMPTY. That is the second half of the report: "no longer
+        // truncating, however the alias itself is a blank space" (Kalian2015,
+        // 1.6.1).
+        //
+        // The quest context belongs to the UNIT that has it, so ask the whole
+        // entry rather than one list. The pool's answer is still preferred --
+        // it is the unit the player pointed at -- and the scan is the fallback.
+        // ★Only the RESOLVER gets this list. openBook below keeps `xl`, which
+        // is the display list and answers a different question (the name on
+        // the page).
+        const RE::ExtraDataList* ctx = TextContextList(entry, xl);
+        if (ctx != xl) {
+            SKSE::log::info("[BOOK] '{}': the quest context is on another unit's list, "
+                            "not the one the tile named", a_book->GetName());
+        }
+        ResolveTextTokens(text, ctx, a_book->GetName());   // GI79 + GI87
+        RE::BSString desc(text.c_str());
         // ★★The NG line declares BookMenu::OpenBookMenu and never defines it,
         // so the call is made here through the same address-library id
         // CommonLib itself used. Same function, same arguments -- only the
@@ -12546,6 +12892,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (held <= 0) {
                 SKSE::log::info("[BOOK] read consumed it -- no page to raise");
                 return;
+            }
+            // ★★★GI84: THE TOME'S SPENDING, DECIDED HERE AND NOWHERE ELSE.
+            //
+            // Read() teaches without taking the book, so somebody has to take
+            // it -- but only if nobody else already did. By this line the
+            // queued Use has run, which means the engine has had its chance to
+            // spend the tome AND any script riding OnEquipped has had its
+            // chance to hand a copy back. Both show up in the same number, so
+            // the test is the one it always was, asked at the only moment it
+            // is true: the read was accepted, the spell arrived across it, and
+            // the count has still not moved.
+            //
+            // ★The `held <= 0` return above is the other half: when the engine
+            // did take it, we are already gone and cannot take it twice. That
+            // pairing is the whole fix -- spending against a count read before
+            // the Use landed is how the Destruction ritual book was lost.
+            if (req.took && held == req.heldBefore) {
+                auto* sp = book->GetSpell();
+                if (sp && !req.hadSpell && player->HasSpell(sp)) {
+                    player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,
+                                       nullptr, nullptr);
+                    SKSE::log::info("[BOOK] tome spent (the engine left it at {})", held);
+                    NotePendingRemove(book, {}, 1, -1);
+                    RequestRebuild();
+                    return;   // nothing left to raise a page for
+                }
             }
             // ★★★AND NOT IN FRONT OF ONE THE ENGINE TOOK OVER. The Elder Scroll
             // is EQUIPPED by the Use -- that is the unfurl, and the scroll's
@@ -12609,7 +12981,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 return;
             }
             SKSE::log::info("[BOOK] the engine raised no page -- showing it ourselves");
-            ShowBookPage(book, req.uid, req.sig);
+            ShowBookPage(book, req.uid, req.sig, req.owner);
             return;
         }
 
@@ -12622,7 +12994,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* sui = RE::UI::GetSingleton();
             if (sbook && sui && !sui->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
                 SKSE::log::info("[BOOK] shelf read -- raising the page in place");
-                ShowBookPage(sbook, sreq.uid, sreq.sig);
+                ShowBookPage(sbook, sreq.uid, sreq.sig, sreq.owner);
             }
             return;
         }
@@ -12662,36 +13034,58 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const int heldBefore = HeldCountOf(player, book);
 
         const bool took = book->Read(player);
-        // Read settles a TOME (it teaches; the spending is below). Anything it
-        // refuses is handed to the engine's Use instead, which is the door the
-        // rest of the world's books go through.
-        bool used = false;
-        if (!took) used = Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
+        // ★★★GI84: AND THE ENGINE'S DOOR AS WELL, ALWAYS — NOT ONLY WHEN READ
+        // REFUSES.
+        //
+        // Read() teaches. It is not what Skyrim calls reading a book, and the
+        // difference is a quest that cannot be finished. Vanilla reads a book
+        // by USING it, which is ActorEquipManager::EquipObject, and that is
+        // what raises OnEquipped -- the event quest fragments hang off. The
+        // Destruction Ritual Spell is exactly that shape (vanilla
+        // MGRDestructionBook04Script):
+        //
+        //     Event OnEquipped(Actor AkActor)
+        //         Game.GetPlayer().Additem(MGRDestructionFinal, 1)
+        //         Self.GetReference().Disable()
+        //         MGRitual01.SetStage(200)
+        //     EndEvent
+        //
+        // Read() accepts a tome, so `if (!took)` skipped the Use outright and
+        // that event never fired. Our own log had been saying so all along:
+        //     'Spell Tome: Ash Rune'  Read=true  Use=false
+        //     'Line and Lure'         Read=false Use=true
+        // The player learned Fire Storm, we spent the book below, and the
+        // script that would have handed it back never ran at all -- "the game
+        // refuses to add the book back" (reported, 1.6.1). It is not this one
+        // quest either: every book whose script hangs off being equipped was
+        // reachable only by the books Read() happened to turn away.
+        //
+        // ★Both doors, because they answer different halves. Read() is what
+        // applies `teaches` here and now (the skill gate and the page below
+        // depend on having asked it); the Use is what tells the world the book
+        // was read. Re-teaching a spell already known is a no-op, so the
+        // overlap costs nothing.
+        const bool used = Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
 
         const bool hasSpell = spell ? player->HasSpell(spell) : false;
         const int heldAfter = HeldCountOf(player, book);
 
-        // ★★★AND THE TOME IS SPENT. Read() is the engine's door and it does
-        // teach -- measured: `Read -> 1; spell 0 -> 1` on a spell the player
-        // did not have. What it does NOT do is take the book: `held 2 -> 2`.
-        // In the vanilla menu something downstream of the page spends it, and
-        // that something is not reachable from here.
+        // ★★★THE TOME IS SPENT — BUT NOT HERE ANY MORE (GI84).
         //
-        // So the spending is done explicitly, and only on the exact evidence
-        // that it is owed: the read was accepted, the spell arrived across it,
-        // and the count did not move. If a gate refuses the read -- vanilla's
-        // or a mod's -- `took` is false, nothing was learned, and the book
-        // stays, which is the whole point of asking the engine first.
-        if (took && spell && hasSpell && !hadSpell && heldAfter == heldBefore &&
-            heldAfter > 0) {
-            player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,
-                               nullptr, nullptr);
-            SKSE::log::info("[BOOK] tome spent");
-            NotePendingRemove(book, {}, 1, -1);
-            RequestRebuild();
-        }
-        // the page is owed only if the engine raises none of its own
+        // Read() teaches and does NOT take the book (measured: `spell 0 -> 1`,
+        // `held 2 -> 2`), so the spending has to be done by hand. What changed
+        // is WHEN. The Use issued above is QUEUED, so at this line it has not
+        // run: the engine may yet take the book itself, and a quest script may
+        // yet hand one back. Spending against a count read before any of that
+        // is how one book becomes none.
+        //
+        // So the decision moves to the deferred stage below, which already
+        // waits for exactly this and already re-reads the count. The evidence
+        // it needs travels with the request.
         g_pageOwed = req;
+        g_pageOwed->heldBefore = heldBefore;
+        g_pageOwed->hadSpell   = hadSpell;
+        g_pageOwed->took       = took;
         g_pageOwedWait = 8;
         // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the
         // Dawnguard Elder Scroll does nothing at all, and a spell tome skips
@@ -13054,6 +13448,72 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 std::to_underlying(RE::DefaultObjectID::kSurvivalModeEnabled) & 0xFFFF);
             const auto* g = dom->GetObject<RE::TESGlobal>(kIdx);
             return g && g->value != 0.0f;
+        }
+
+        // ★★GI72: ASK THE ENGINE FOR THE NUMBER RATHER THAN RECOMPUTE IT.
+        //
+        // Survival Mode gives armour a warmth rating and vanilla's item card
+        // prints it. Ours never did -- reported as "the tooltip for warmth on
+        // armour in survival mode does not show up", and it was a plain gap:
+        // nothing in this file had ever heard of warmth.
+        //
+        // ★★THE VALUE IS NOT IN ANY PLUGIN. TESObjectARMO carries armorRating
+        // and nothing else. The engine derives warmth from default-object
+        // KEYWORDS -- BGSDefaultObjectManager holds kSurvivalKeywordWarm/Cold
+        // and an Armor/Clothing pair per body area -- weighed by values that are
+        // not a record anywhere: Skyrim.esm, the four masters and the Survival
+        // ESL were all searched for a warmth setting and none of them has one.
+        // Reimplementing that from guesses would print a number that quietly
+        // disagrees with the game's own, which is worse than printing none.
+        //
+        // ★So the engine fills ITS card for us and the field is read off it.
+        // Whatever the game would show, this shows. ItemCard::SetItem has real
+        // Address Library ids in CommonLibSSE, and the constructor is inline --
+        // no unresolved symbol, unlike the ExtraDataList wall in LootBarter.
+        //
+        // Returns -1 for "no warmth to show", which is also the honest answer
+        // when Survival is off: vanilla prints nothing then either.
+        [[nodiscard]] int ArmourWarmth(RE::TESBoundObject* a_obj)
+        {
+            if (!a_obj || !a_obj->As<RE::TESObjectARMO>()) return -1;
+            if (!SurvivalModeOn()) return -1;
+            // ★Cached per FORM, because SetItem builds the WHOLE card -- name,
+            // effects, every string vanilla would draw -- and a tooltip asks
+            // once a frame for as long as it is up. Warmth is a property of the
+            // record and the mode; neither moves while a menu is open. The
+            // Survival gate above gates entry, so a cached value can only have
+            // been taken with the mode on.
+            static std::unordered_map<RE::FormID, int> s_warmth;
+            const auto id = a_obj->GetFormID();
+            if (const auto it = s_warmth.find(id); it != s_warmth.end()) return it->second;
+
+            int warmth = -1;
+            auto* ui = RE::UI::GetSingleton();
+            const auto hud = ui ? ui->GetMenu(RE::HUDMenu::MENU_NAME) : nullptr;
+            if (hud && hud->uiMovie) {
+                // A card needs a movie to build its object in; the HUD's is the
+                // one view that is loaded whenever a menu of ours is up.
+                RE::ItemCard          card(hud->uiMovie.get());
+                RE::InventoryEntryData e(a_obj, 1);
+                card.SetItem(&e, true);   // ignoreStolen: the mark is ours to draw
+                RE::GFxValue v;
+                if (card.obj.GetMember("warmth", &v) && v.IsNumber()) {
+                    warmth = static_cast<int>(std::lround(v.GetNumber()));
+                }
+                // ★SAY IT ONCE IF THE FIELD IS NOT THERE. The name comes from
+                // the item card's own field list in SkyrimSE.exe, so a miss
+                // means the card changed or the mode is not what we think --
+                // either way the tooltip would just be silently short, which is
+                // the failure mode that cost a release the last time.
+                static bool s_saidMissing = false;
+                if (warmth < 0 && !s_saidMissing) {
+                    s_saidMissing = true;
+                    SKSE::log::info("[TIP] survival is on but the item card has no "
+                                    "'warmth' field -- no warmth line will be drawn");
+                }
+            }
+            s_warmth[id] = warmth;
+            return warmth;
         }
 
         // ★Both ends, in place. Leading/trailing space is what a dropped SURV
@@ -14045,6 +14505,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the piece IS rather than as part of its measurement)
             ImGui::TextColored(Theme::TipVal(), "%s %d", Lang::T(Lang::Str::Armor), arm);
             diffText(arm);
+            // ★GI72: beside the rating, because that is where vanilla's card
+            // puts it and it is the same kind of measurement. Absent unless
+            // Survival Mode is on -- see ArmourWarmth.
+            if (const int warm = ArmourWarmth(a_obj); warm >= 0) {
+                ImGui::TextColored(Theme::TipVal(), "%s %d",
+                    Lang::T(Lang::Str::Warmth), warm);
+            }
         } else {
             RE::MagicItem* magic = a_obj->As<RE::AlchemyItem>();
             // ★An INGREDIENT only tells you what you have LEARNED (user report

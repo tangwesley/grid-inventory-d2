@@ -271,6 +271,23 @@ namespace FUI
             Sfx::MenuClose();
         }
         g_closeSfxPlayed = false;
+        CloseSession("kForceHide");
+    }
+
+    // ★★★GI83: THE CLOSE, MINUS THE SOUND, WITH NO INSTANCE NEEDED.
+    //
+    // This body used to live inside OnHide, and OnHide is reached from exactly
+    // one message: kForceHide. kHide suppresses instead (see ProcessMessage,
+    // and it is right to) -- but the engine can take the menu OFF the stack
+    // without sending either, and then NOTHING here ran: no reconcile, no
+    // census take, no worn audit, and no ItemPreview::End. The last one is
+    // what costs a crash; the rest is why the next open reads "surplus 3" and
+    // "1 plain loss" against a baseline from a session that never closed.
+    //
+    // So the work is named, and the tick's orphan net can ask for it.
+    void GridInventoryMenu::CloseSession(const char* a_why)
+    {
+        SKSE::log::info("[UI] session closing ({})", a_why ? a_why : "-");
         // ...and this one covers the session itself: our own actions, which we
         // are supposed to know about exactly.
         FUI::DeltaWatch::Reconcile("menu-close");

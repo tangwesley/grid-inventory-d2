@@ -181,6 +181,15 @@ namespace FUI::Grid
     // grid's drop ghost / drop-cell math. False when nothing is carried.
     bool HeldFootprint(int& a_w, int& a_h, float& a_offX, float& a_offY);
 
+    // ★GI71b: the carried FOOTPRINT, not just its bounding box. HeldFootprint
+    // hands out w/h, which is all a rectangle ever needed -- and it is why the
+    // partner board's drop ghost stayed a rectangle after its tiles learned to
+    // be L-shaped: the shape was there, the accessor simply could not say it.
+    // The player's own grid has always drawn its ghost from the mask; this is
+    // how the other board reads the same thing.
+    // Null when nothing is carried. Valid only for the current frame.
+    [[nodiscard]] const FUI::Shape* HeldShape();
+
     // v9.2: start carrying an item that is NOT in the grid (equipment doll
     // pickup — the unequip runs deferred, the carry starts immediately).
     // GI25: a_uid/a_sig identify the sub-stack being lifted (the doll's pickup
@@ -320,8 +329,11 @@ namespace FUI::Grid
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig);
     // ★(1.5.x) a SHELF book (not owned): raise the page in place -- no
     // engine Use, which needs the player's own copy.
+    // ★GI79: a_owner names the container holding the book (0 = the player), so
+    // the page can reach the unit's own ExtraDataList and the quest that fills
+    // its <Alias=...> tokens.
     void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                              std::uint16_t a_sig);
+                              std::uint16_t a_sig, RE::FormID a_owner = 0);
     void ProcessBookRead();   // UIRoot::Tick
 
     // GI32: apply queued favourite toggles. MUST run on the game thread --
@@ -477,6 +489,9 @@ namespace FUI::Grid
     // left" (take-all budget included). Both halves span the main board plus
     // every owned bag, open or closed; the trash is storage for neither.
     [[nodiscard]] int SpaceUsed();
+    // ★GI90: tiles on the board right now. Diagnostic only -- the open timer
+    // needs a size to report its milliseconds against.
+    [[nodiscard]] int TileCount();
     [[nodiscard]] int SpaceTotal();
     [[nodiscard]] int CellSpanOf(RE::TESBoundObject* a_obj);   // grid cells an item occupies
     // shift+lclick split -> held fragment. a_srcKey = the tile it leaves.

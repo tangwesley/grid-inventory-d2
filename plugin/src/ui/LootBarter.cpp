@@ -31,6 +31,10 @@ namespace FUI::LootBarter
     // a merchant's stock is the vendor faction's container. Declared up here
     // because the ledgers below need to ask it what is already on the shelf.
     RE::TESObjectREFR* SourceRef();
+    // ★GI86: a shop is the chest AND the shopkeeper. Declared here because the
+    // buy runs (ProcessTransfers) long before these are defined.
+    RE::Actor*         MerchantActor();
+    RE::TESObjectREFR* HolderOf(RE::TESBoundObject* a_obj);
     // (defined with the other board writes) split a shelf cell in two and
     // give the smaller half to the cursor -- the slider's confirm needs it
     // before the definitions further down.
@@ -2280,7 +2284,13 @@ namespace FUI::LootBarter
             }
             case XferReq::kBuy: {
                 // merchant -> player; player pays, merchant receives.
-                const auto pick = SourceUnit(source, r);
+                // ★GI86: the ware may live on the SHOPKEEPER rather than in the
+                // chest (see HolderOf). The gold still moves through the chest
+                // below -- that is where a shop's till is -- but the item has to
+                // leave the hand that is actually holding it.
+                auto* holder = HolderOf(r.obj);
+                if (!holder) holder = source;
+                const auto pick = SourceUnit(holder, r);
                 if (!pick.ok()) {   // GI42: e.g. the merchant WEARS the twin
                     ClearOut(r.obj, r.uid, r.sig, r.count);
                     Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
@@ -2288,11 +2298,15 @@ namespace FUI::LootBarter
                         "{:04X} sig {:04X}", r.obj->GetName(), r.uid, r.sig);
                     break;
                 }
-                GuardedRemove(source, r.obj,
+                GuardedRemove(holder, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "buy", [&]() {
-                    source->RemoveItem(r.obj, r.count, RE::ITEM_REMOVE_REASON::kRemove,
+                    holder->RemoveItem(r.obj, r.count, RE::ITEM_REMOVE_REASON::kRemove,
                         pick.xl, player);
                 });
+                if (holder != source) {
+                    SKSE::log::info("[XFER] buy '{}' from the shopkeeper, not the chest",
+                        r.obj->GetName());
+                }
                 if (gold && r.price > 0) {
                     player->RemoveItem(gold, r.price, RE::ITEM_REMOVE_REASON::kRemove,
                         nullptr, nullptr);
@@ -3626,6 +3640,16 @@ namespace
                     const bool ok = fits(gc, gr, hw, hh);
                     const ImU32 ghost = ok ? IM_COL32(90, 170, 90, 90)
                                            : IM_COL32(190, 60, 60, 110);
+                    // ★★GI71b: A BOX HERE, ON PURPOSE, and it is not an
+                    // oversight left over from the partner board's ghost.
+                    //
+                    // A BAG still PACKS by bounding box -- its fits/mark walk
+                    // w x h, so a T dropped in one reserves the whole 3x2 it
+                    // sits in. Drawing the notched outline would promise a shape
+                    // the bag will not honour, and a ghost that disagrees with
+                    // what happens next is worse than a coarse one. When bag
+                    // packing learns masks, this becomes the same loop the
+                    // partner board uses and not before.
                     const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
                     dl->AddRectFilled(g0,
                         ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
@@ -4455,6 +4479,81 @@ namespace
         return partner;
     }
 
+    // ★★★GI86: A SHOP IS THE CHEST *AND* THE SHOPKEEPER.
+    //
+    // SourceRef above returns the chest and stops, on the reasoning written
+    // beside it: the actor's own inventory is "the merchant's personal
+    // belongings". That is half true and the missing half is a whole class of
+    // wares. Skyrim offers BOTH: the faction chest, and whatever the merchant
+    // is carrying that passes their sell/buy list. That is how a unique
+    // shopkeeper sells a unique thing without a chest of their own for it --
+    // and it is why Revus Sarvani's Kagrumez Resonance Gem was on the SkyUI
+    // screen and missing from ours (reported, 1.6.1, confirmed by the reporter
+    // switching mods back and forth on the same save).
+    //
+    // So the actor is a SECOND source. It is not a second board: the wares are
+    // merged into one list, and the only thing that has to remember where a
+    // unit lives is the buy, which asks HolderOf.
+    [[nodiscard]] RE::Actor* MerchantActor()
+    {
+        if (g_mode != Mode::kBarter) return nullptr;
+        auto* partner = Partner();
+        auto* actor = partner ? partner->As<RE::Actor>() : nullptr;
+        if (!actor) return nullptr;
+        // No chest means SourceRef already IS the actor -- there is no second
+        // source to add, and merging the actor with itself would double it.
+        auto* fac = actor->GetVendorFaction();
+        if (!fac || !fac->vendorData.merchantContainer) return nullptr;
+        return actor;
+    }
+
+    // Does this merchant's list let them trade in this item? The same test
+    // vanilla applies, and the same one GoldCoins::SeedVendorStock already
+    // makes for the bag wares: the list is a whitelist of KEYWORDS unless
+    // notBuySell flips it into a blacklist. A vendor with no list at all is
+    // unrestricted.
+    [[nodiscard]] bool VendorSells(RE::Actor* a_merchant, RE::TESBoundObject* a_obj)
+    {
+        if (!a_merchant || !a_obj) return false;
+        auto* fac = a_merchant->GetVendorFaction();
+        if (!fac) return false;
+        auto* list = fac->vendorData.vendorSellBuyList;
+        if (!list) return true;
+        bool inList = list->HasForm(a_obj);
+        if (!inList) {
+            if (const auto* kwf = a_obj->As<RE::BGSKeywordForm>()) {
+                for (std::uint32_t i = 0; i < kwf->numKeywords; ++i) {
+                    if (const auto* kw = kwf->keywords[i]; kw && list->HasForm(kw)) {
+                        inList = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return fac->vendorData.vendorValues.notBuySell ? !inList : inList;
+    }
+
+    // Which of the two actually holds this form right now. The chest answers
+    // first because that is where the ordinary stock and the merchant's gold
+    // live; the shopkeeper answers for what only they carry.
+    // ★Asked at the moment of the buy, never remembered on the cell: the board
+    // is rebuilt around pools, and a remembered ref is the kind of fact that
+    // goes stale between the click and the engine (the rule this file already
+    // keeps for extra lists).
+    [[nodiscard]] RE::TESObjectREFR* HolderOf(RE::TESBoundObject* a_obj)
+    {
+        auto* chest = SourceRef();
+        if (!a_obj || !chest) return chest;
+        auto* m = MerchantActor();
+        if (!m) return chest;
+        if (chest->GetInventoryCounts([&](RE::TESBoundObject& o) {
+                return &o == a_obj;
+            }).empty()) {
+            return m;
+        }
+        return chest;
+    }
+
     namespace
     {
         // UESP barter formula: factor = fBarterMax - (fBarterMax-fBarterMin) *
@@ -4682,10 +4781,33 @@ namespace
             // angle can never disagree -- every placement test on this side reads
             // w/h directly, and a stale pair would place the cell wrong.
             int           rot = 0;
+            // ★★GI71: THE FOOTPRINT, so a container can hold a T the same shape
+            // the player's board does. Derived from the def every frame rather
+            // than stored on ContCell: the shape follows the def, so persisting
+            // it would only give a saved layout a way to disagree with items.ini
+            // after an edit. w/h stay the mask's bounding box.
+            FUI::Shape mask;
             void SetRot(int a_rot)
             {
+                // ★Turn the MASK by the same delta, in the same call that swaps
+                // w/h. The note above about w/h and the angle never disagreeing
+                // now covers three things instead of two, and the only way to
+                // keep that true is to move them together.
+                // ★★AND NOT AN ABSENT ONE. An empty mask MEANS "solid
+                // rectangle" (see Solid), and rotating it would build a real
+                // 1x1 of all-false instead -- turning every ordinary tile into
+                // one that owns no square at all. Absent stays absent.
+                const int d = (a_rot - rot) & 3;
+                if (d != 0 && !mask.rows.empty()) mask = FUI::RotateShape(mask, d);
                 if (((rot ^ a_rot) & 1) != 0) std::swap(w, h);
                 rot = a_rot & 3;
+            }
+            // Bounds-safe: a cell built before its mask was filled reads as a
+            // solid rectangle, which is what every such cell used to be.
+            [[nodiscard]] bool Solid(int a_x, int a_y) const
+            {
+                if (mask.rows.empty()) return true;
+                return mask.At(a_x, a_y);
             }
 
             // ★THE WHOLE IDENTITY, so a caller cannot take half of it by
@@ -4845,6 +4967,40 @@ namespace
             // exactly like the complete answer.
             [[nodiscard]] UnitRef unit() const { return { uid, sig, xlIdx, worn }; }
         };
+
+        // ★GI86: fold the shopkeeper's own sellable wares into the shop list.
+        // One board, two holders -- see MerchantActor / HolderOf. Worn gear is
+        // left out whole: what a merchant is wearing is not for sale, and
+        // over-excluding one of two identical items is the safe side of that.
+        void MergeMerchantStock(InvMap& a_inv)
+        {
+            auto* m = MerchantActor();
+            if (!m) return;
+            int added = 0, worn = 0;
+            auto own = m->GetInventory([&](RE::TESBoundObject& o) {
+                return VendorSells(m, &o);
+            });
+            for (auto& [obj, d] : own) {
+                if (!obj || d.first <= 0) continue;
+                if (d.second && d.second->IsWorn()) { ++worn; continue; }
+                if (const auto it = a_inv.find(obj); it != a_inv.end()) {
+                    it->second.first += d.first;   // the chest stocks it too
+                } else {
+                    a_inv.emplace(obj, std::move(d));
+                }
+                ++added;
+            }
+            // ★One line per shop open, always. The whole reason this bug
+            // survived a release is that nothing anywhere said which of the
+            // two lists a missing ware should have been in.
+            static RE::FormID s_said = 0;
+            if (s_said != m->GetFormID()) {
+                s_said = m->GetFormID();
+                SKSE::log::info("[VENDOR] {}: {} ware(s) carried by the shopkeeper "
+                                "merged into the shop list ({} worn, not for sale)",
+                    m->GetDisplayFullName(), added, worn);
+            }
+        }
 
         void ReconcileContainer(ContLayout& a_cl, RE::TESObjectREFR* a_source,
                                 const InvMap& a_inv)
@@ -5226,7 +5382,8 @@ namespace
             auto* cl = BoardFor();
             if (!cl) return cells;
 
-            const auto inv = source->GetInventory();
+            auto inv = source->GetInventory();
+            MergeMerchantStock(inv);   // GI86: the shopkeeper's own wares too
             ReconcileContainer(*cl, source, inv);
 
             // ---- the VIEW ----
@@ -5335,6 +5492,21 @@ namespace
                 pc.ord = ordOf[PoolOf(c)]++;
                 pc.col = c.col;
                 pc.row = c.row;
+                // ★GI71: BEFORE SetRot, and unrotated. SetRot turns the mask by
+                // the delta, so handing it an already-turned shape would turn it
+                // twice. Clamped to the partner board's own width.
+                //
+                // ★★ONLY WHEN THERE IS A SHAPE TO BUILD. This function runs on
+                // the RENDER path -- once per cell per frame -- and a Shape is a
+                // vector of vectors, so building one for every ordinary tile
+                // meant a few hundred heap allocations a frame on a merchant's
+                // hundred wares. An absent mask already MEANS "solid rectangle"
+                // to every consumer here (Solid, washCell, fits/mark, the
+                // ghost), so the 99% case now allocates nothing and behaves
+                // exactly as it did. Same rule the EDIT-mode gate a few hundred
+                // lines below was written for: no per-frame work to answer a
+                // question that is "no" almost always.
+                if (!def.shape.empty()) pc.mask = FUI::ShapeOf(def, Grid::BaseCols());
                 pc.SetRot(c.rot);
                 // GI42: the lock's resolution must MATCH the naming resolution.
                 // Locking only the worn cell while a spare cell could still pull
@@ -5468,19 +5640,35 @@ namespace
             auto ensureRow = [&](int r) {
                 while (static_cast<int>(occ.size()) <= r) occ.emplace_back(cols, false);
             };
-            auto fits = [&](int c, int r, int w, int h) {
-                if (c < 0 || r < 0 || c + w > cols) return false;
-                for (int y = 0; y < h; ++y) {
+            // ★★GI71: THE FOOTPRINT DECIDES, NOT THE BOUNDING BOX.
+            //
+            // These two walked the w x h rectangle, which is why a container
+            // could not hold a polyomino: a T claimed the whole 3x2 box it sits
+            // in, so its two empty corners stayed reserved and no neighbour
+            // could use them. The player board has always walked the mask; this
+            // is the same walk.
+            //
+            // ★A solid rectangle has every cell set, so both reduce exactly to
+            // what they replaced -- the 99% case is untouched by construction
+            // rather than by luck. `Solid` also answers true for a cell whose
+            // mask was never filled, so nothing regresses on a path that has not
+            // been taught about shapes yet.
+            auto fits = [&](const PartnerCell& it, int c, int r) {
+                if (c < 0 || r < 0 || c + it.w > cols) return false;
+                for (int y = 0; y < it.h; ++y) {
                     ensureRow(r + y);
-                    for (int x = 0; x < w; ++x)
-                        if (occ[r + y][c + x]) return false;
+                    for (int x = 0; x < it.w; ++x) {
+                        if (it.Solid(x, y) && occ[r + y][c + x]) return false;
+                    }
                 }
                 return true;
             };
-            auto mark = [&](int c, int r, int w, int h) {
-                for (int y = 0; y < h; ++y) {
+            auto mark = [&](const PartnerCell& it, int c, int r) {
+                for (int y = 0; y < it.h; ++y) {
                     ensureRow(r + y);
-                    for (int x = 0; x < w; ++x) occ[r + y][c + x] = true;
+                    for (int x = 0; x < it.w; ++x) {
+                        if (it.Solid(x, y)) occ[r + y][c + x] = true;
+                    }
                 }
             };
 
@@ -5495,8 +5683,8 @@ namespace
             for (auto& it : cells) {
                 if (it.col < 0 || it.row < 0) continue;
                 const bool inCap = !companionBoard || it.row + it.h <= kCompanionRows;
-                if (inCap && fits(it.col, it.row, it.w, it.h)) {
-                    mark(it.col, it.row, it.w, it.h);
+                if (inCap && fits(it, it.col, it.row)) {
+                    mark(it, it.col, it.row);
                 } else {
                     it.col = -1;
                     it.row = -1;
@@ -5540,10 +5728,10 @@ namespace
                         }
                         for (int r = 0; r + it.h <= kCompanionRows && it.col < 0; ++r) {
                             for (int c = 0; c < cols; ++c) {
-                                if (!fits(c, r, it.w, it.h)) continue;
+                                if (!fits(it, c, r)) continue;
                                 it.col = c;
                                 it.row = r;
-                                mark(c, r, it.w, it.h);
+                                mark(it, c, r);
                                 break;
                             }
                         }
@@ -5586,10 +5774,10 @@ namespace
                 }
                 for (int r = companionBoard ? kCompanionRows : 0; it.col < 0; ++r) {
                     for (int c = 0; c < cols; ++c) {
-                        if (fits(c, r, it.w, it.h)) {
+                        if (fits(it, c, r)) {
                             it.col = c;
                             it.row = r;
-                            mark(c, r, it.w, it.h);
+                            mark(it, c, r);
                             break;
                         }
                     }
@@ -5673,6 +5861,12 @@ namespace
                 if (HeldCell(it.spotKey)) continue;
                 for (int y = 0; y < it.h; ++y) {
                     for (int x = 0; x < it.w; ++x) {
+                        // ★GI71: a notch is not occupied ground. Shading the
+                        // bounding box would paint a T's two empty corners as
+                        // full and then a neighbour placed there -- which the
+                        // mask-aware placement now allows -- would sit on top of
+                        // ground belonging to nothing.
+                        if (!it.Solid(x, y)) continue;
                         const int cc = it.col + x, rr = it.row + y;
                         const ImVec2 c0(base.x + cc * cell, base.y + rr * cell);
                         const ImVec2 q0(c0.x + (cc > 0 ? in1 : in0),
@@ -5702,19 +5896,66 @@ namespace
                 const ImVec2 p0(base.x + it.col * cell, base.y + it.row * cell);
                 const float bw = it.w * cell, bh = it.h * cell;   // footprint box
 
+                // ★★GI71c: A WASH FOLLOWS THE FOOTPRINT, and there are three of
+                // them -- hover, search miss, and the pickpocket lock. Each
+                // painted the bounding box, so a shaped tile lit its own empty
+                // corners; and once a neighbour can sit in one of those corners,
+                // it lit THAT item's square as well, which reads as the wrong
+                // tile answering the cursor.
+                //
+                // ★One helper rather than three loops: the next wash somebody
+                // adds gets the footprint without having to know it should.
+                // Decorations are NOT washes and keep the box -- the sprite, the
+                // marker tray, the lock glyph and the edit ring are all placed
+                // against the tile's rectangle on purpose.
+                const auto washCell = [&](ImU32 a_col) {
+                    if (it.mask.rows.empty()) {
+                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh), a_col);
+                        return;
+                    }
+                    for (int y = 0; y < it.h; ++y) {
+                        for (int x = 0; x < it.w; ++x) {
+                            if (!it.Solid(x, y)) continue;
+                            const ImVec2 w0(p0.x + x * cell, p0.y + y * cell);
+                            dl->AddRectFilled(w0, ImVec2(w0.x + cell, w0.y + cell), a_col);
+                        }
+                    }
+                };
+
                 // click target: right-click = TAKE (loot mode). Barter buy is
                 // Phase 5. Gold ignores space; other items need a free cell.
                 // While carrying, SKIP the cell buttons — they'd swallow the drop
                 // click over an occupied cell (drag-to-store must reach the window
                 // hover test regardless of what's under the cursor).
-                if (!Grid::IsHolding()) {
+                // ★★GI71: A CLICK TARGET IS THE FOOTPRINT, NOT ITS BOX.
+                //
+                // The button below covers the whole w x h rect. That was exact
+                // while every partner tile WAS a rectangle, and stops being so
+                // the moment placement lets a neighbour sit in a T's notch: the
+                // T's box covers that neighbour, and ImGui hands the hover to
+                // whichever overlapping item was submitted last, so one of the
+                // two becomes unclickable depending on draw order.
+                //
+                // ★So the item simply does not offer a target on a square it
+                // does not own. Both cells still submit their own button when
+                // the cursor is over a square that IS theirs, and no two items
+                // can own the same square -- placement guarantees it -- so the
+                // right one answers whatever the order. A solid rectangle owns
+                // every square in its box and is unaffected.
+                bool ownsCursor = true;
+                if (!it.mask.rows.empty()) {
+                    const ImVec2 mp = ImGui::GetIO().MousePos;
+                    const int    mx = static_cast<int>(std::floor((mp.x - p0.x) / cell));
+                    const int    my = static_cast<int>(std::floor((mp.y - p0.y) / cell));
+                    ownsCursor = it.Solid(mx, my);
+                }
+                if (!Grid::IsHolding() && ownsCursor) {
                     char idbuf[16];
                     std::snprintf(idbuf, sizeof(idbuf), "##pc%zu", i);
                     ImGui::SetCursorScreenPos(p0);
                     ImGui::InvisibleButton(idbuf, ImVec2(bw, bh));
                     if (ImGui::IsItemHovered() && !UIRoot::MouseInOverlay()) {
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            Theme::Acc(0.10f));
+                        washCell(Theme::Acc(0.10f));
                         Sfx::HoverNote(ImGui::GetItemID());   // partner cell hover
                         // Phase 4: rich tooltip; barter side shows the BUY price
                         int price = -1;
@@ -5913,7 +6154,10 @@ namespace
                                 // read: the engine's Use needs the player's
                                 // own copy and raised no page for a book still
                                 // in the chest (the 8/24 rework's regression).
-                                Grid::RequestShelfBookPage(bk, it.uid, it.sig);
+                                // GI79: name the chest, so the page can find the
+                                // unit's own list -- and the quest behind a note.
+                                Grid::RequestShelfBookPage(bk, it.uid, it.sig,
+                                    SourceRef() ? SourceRef()->GetFormID() : 0);
                                 // ...and the page offers E-take, the world
                                 // book's own grammar
                                 NoteShelfBookRead(it.obj, it.uid, it.sig,
@@ -6090,8 +6334,7 @@ namespace
                     // ★Same wash and the same alpha the player's board uses for
                     // a search miss — one search, one look, both windows.
                     if (FindMisses(it.obj)) {
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            IM_COL32(6, 6, 10, 168));
+                        washCell(IM_COL32(6, 6, 10, 168));
                     }
                     // ★1.0.5: the shared marker tray, so poison keeps showing
                     // here now that DrawGlow no longer draws it. Favourite
@@ -6149,12 +6392,24 @@ namespace
                 // matters most for the socket mod -- the point is to SEE what a
                 // chest holds and decide whether to take it, so the badges have
                 // to be on the partner cell, not only on our own grid.
-                // The partner window draws plain rectangles (no polyomino mask),
-                // so the default full-rect shape is correct here.
+                // ★GI71: and it carries the FOOTPRINT now, so a socket well lands
+                // on a cell the item actually owns. The default stays a full
+                // rectangle, which is still exactly right for every tile that
+                // has no shape of its own.
                 {
                     Badges::TileShape shape;
                     shape.w = it.w;
                     shape.h = it.h;
+                    if (!it.mask.rows.empty()) {
+                        shape.cells = 0;
+                        for (int my = 0; my < it.h && my < 8; ++my) {
+                            for (int mx = 0; mx < it.w && mx < 8; ++mx) {
+                                if (it.Solid(mx, my)) {
+                                    shape.cells |= 1ull << (my * 8 + mx);
+                                }
+                            }
+                        }
+                    }
                     auto       pr = g_partner.get();
                     // ★IsMouseHoveringRect is geometry only -- it clips, but it
                     // never asks who is on top, so a badge under another window
@@ -6188,8 +6443,7 @@ namespace
                 if (g_mode == Mode::kPickpocket) {
                     if (it.locked) {
                         // greyed out: "and you can't have it"
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            IM_COL32(0, 0, 0, 90));
+                        washCell(IM_COL32(0, 0, 0, 90));
                         const float ps = 10.0f * Theme::Scale();
                         const ImVec2 lp(p0.x + bw - ps - 4.0f, p0.y + bh - ps - 4.0f);
                         const ImU32 lc = IM_COL32(220, 200, 150, 230);
@@ -6235,22 +6489,59 @@ namespace
                     int gr = static_cast<int>(std::lround((m.y - base.y - oy) / cell));
                     gc = (std::max)(0, (std::min)(Grid::BaseCols() - hw, gc));
                     gr = (std::max)(0, (std::min)(rows - hh, gr));
+                    // ★★GI71b: THE GHOST IS THE FOOTPRINT. Both halves of it.
+                    //
+                    // The tiles on this board learned to be L-shaped and the
+                    // preview did not, so a shaped item was still announced as
+                    // the rectangle it sits in -- reported straight after the
+                    // shapes landed. The player's own grid has drawn its ghost
+                    // cell by cell from the mask since it was written; this is
+                    // the same loop.
+                    //
+                    // ★And the blocker test with it, or the two would disagree:
+                    // a box-vs-box hit turns the ghost red over a notch neither
+                    // shape uses, and the drop that follows would go through
+                    // green. HeldShape is null only when nothing is carried,
+                    // which the caller already ruled out; a shapeless carry
+                    // falls back to the full box exactly as before.
+                    const auto* hs = Grid::HeldShape();
+                    const auto heldSolid = [&](int a_x, int a_y) {
+                        return (!hs || hs->rows.empty()) ? true : hs->At(a_x, a_y);
+                    };
                     int blockers = 0;
                     for (const auto& pc : cells) {
                         if (pc.col < 0 ||
                             HeldCell(pc.spotKey)) {
                             continue;
                         }
-                        if (gc < pc.col + pc.w && gc + hw > pc.col &&
-                            gr < pc.row + pc.h && gr + hh > pc.row) {
-                            ++blockers;
+                        bool hit = false;
+                        for (int y = 0; y < hh && !hit; ++y) {
+                            for (int x = 0; x < hw; ++x) {
+                                if (!heldSolid(x, y)) continue;
+                                const int cc = gc + x, rr = gr + y;
+                                if (cc < pc.col || cc >= pc.col + pc.w ||
+                                    rr < pc.row || rr >= pc.row + pc.h) {
+                                    continue;
+                                }
+                                if (pc.Solid(cc - pc.col, rr - pc.row)) {
+                                    hit = true;
+                                    break;
+                                }
+                            }
                         }
+                        if (hit) ++blockers;
                     }
                     const ImU32 ghost = blockers == 0 ? IM_COL32(90, 170, 90, 90)
                                                       : IM_COL32(190, 60, 60, 110);
-                    const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
-                    dl->AddRectFilled(g0,
-                        ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
+                    for (int y = 0; y < hh; ++y) {
+                        for (int x = 0; x < hw; ++x) {
+                            if (!heldSolid(x, y)) continue;
+                            const ImVec2 g0(base.x + (gc + x) * cell,
+                                            base.y + (gr + y) * cell);
+                            dl->AddRectFilled(g0,
+                                ImVec2(g0.x + cell, g0.y + cell), ghost);
+                        }
+                    }
                 }
             }
 
@@ -6761,18 +7052,29 @@ namespace
                 const int rr = c.row + y;
                 if (rr < 0 || rr >= kCompanionRows) continue;
                 for (int x = 0; x < c.w; ++x) {
+                    // ★GI71: an occupant reserves its FOOTPRINT, matching what
+                    // PlacePartnerCells actually marks. Marking the bounding box
+                    // here would hide a T's two free corners from this gate and
+                    // answer "the pack is full" with a hole in plain sight --
+                    // the same wrong answer the note below was written about.
+                    if (!c.Solid(x, y)) continue;
                     const int cc = c.col + x;
                     if (cc < 0 || cc >= cols) continue;
                     occ[static_cast<std::size_t>(rr) * cols + cc] = 1;
                 }
             }
         }
-        const auto fits = [&](int a_w, int a_h) {
-            for (int r = 0; r + a_h <= kCompanionRows; ++r) {
-                for (int c = 0; c + a_w <= cols; ++c) {
+        // ★GI71: and the INCOMING item is tested by its footprint too, so a
+        // notched shape is not refused for squares it would never use. Built
+        // once, turned to the angle asked for, exactly as placement will.
+        const auto probe = FUI::ShapeOf(d, cols, a_rot);
+        const auto fits = [&](const FUI::Shape& a_sh) {
+            for (int r = 0; r + a_sh.h <= kCompanionRows; ++r) {
+                for (int c = 0; c + a_sh.w <= cols; ++c) {
                     bool free = true;
-                    for (int y = 0; y < a_h && free; ++y) {
-                        for (int x = 0; x < a_w; ++x) {
+                    for (int y = 0; y < a_sh.h && free; ++y) {
+                        for (int x = 0; x < a_sh.w; ++x) {
+                            if (!a_sh.At(x, y)) continue;
                             if (occ[static_cast<std::size_t>(r + y) * cols + c + x]) {
                                 free = false;
                                 break;
@@ -6784,7 +7086,7 @@ namespace
             }
             return false;
         };
-        if (fits(w, h)) return true;
+        if (fits(probe)) return true;
         // ★★★AND THE OTHER WAY ROUND, which is the promise the player board
         // already makes. Its capacity gate green-lights a pickup by trying BOTH
         // orientations, and its landing turns the tile to honour that (see
@@ -6795,7 +7097,10 @@ namespace
         //
         // ★A square footprint has no other way round; asking twice would just
         // cost the same walk again.
-        if (w != h) return fits(h, w);
+        // ★GI71: a quarter TURN, not a transpose. Swapping w and h is the same
+        // thing only for a rectangle -- transposing an L mirrors it, and the
+        // gate would then green-light a shape placement cannot produce.
+        if (w != h) return fits(FUI::RotateShape(probe, 1));
         return false;
     }
 
@@ -6837,8 +7142,37 @@ namespace
         int blockers = 0;
         for (const auto& pc : g_lastCells) {
             if (pc.col < 0 || HeldCell(pc.spotKey)) continue;
-            if (c < pc.col + pc.w && c + hw > pc.col &&
-                r < pc.row + pc.h && r + hh > pc.row) {
+            // ★GI71: the OCCUPANT is asked by its footprint, the carried item
+            // still by its box. Box-vs-box was exact while every shelf tile was
+            // a rectangle; now that a T can sit here, its two empty corners
+            // would report a blocker that is not there and the drop would read
+            // as a swap (or, with a second neighbour, as invalid).
+            // ★GI71b: and the CARRIED side by its footprint too, now that
+            // HeldShape can say what it is. This has to match the ghost drawn
+            // in DrawPartnerCells cell for cell -- the comment above that ghost
+            // says preview and result cannot disagree, and they only cannot if
+            // both ask the same question. A carry with no shape falls back to
+            // its full box, which is what every carry used to be.
+            const auto* hs = Grid::HeldShape();
+            const auto overlaps = [&] {
+                if (!(c < pc.col + pc.w && c + hw > pc.col &&
+                      r < pc.row + pc.h && r + hh > pc.row)) {
+                    return false;
+                }
+                for (int y = 0; y < hh; ++y) {
+                    for (int x = 0; x < hw; ++x) {
+                        if (hs && !hs->rows.empty() && !hs->At(x, y)) continue;
+                        const int cc = c + x, rr = r + y;
+                        if (cc < pc.col || cc >= pc.col + pc.w ||
+                            rr < pc.row || rr >= pc.row + pc.h) {
+                            continue;
+                        }
+                        if (pc.Solid(cc - pc.col, rr - pc.row)) return true;
+                    }
+                }
+                return false;
+            };
+            if (overlaps()) {
                 if (++blockers == 1) {
                     d.occ = pc.obj;
                     d.occCount = pc.count;

@@ -71,6 +71,7 @@ namespace FUI::Lang
         X(ArmorLight, "Light Armor")   /* tooltip armour class (feedback ⑪) */                              \
         X(ArmorHeavy, "Heavy Armor")                                                                        \
         X(ArmorClothing, "Clothing")                                                                        \
+        X(Warmth, "Warmth")   /* Survival Mode armour rating (feedback, 1.6.1) */                           \
         X(Weight, "Weight")                                                                                 \
         X(Value, "Value")                                                                                   \
         X(SlotHead, "Head")                                                                                 \

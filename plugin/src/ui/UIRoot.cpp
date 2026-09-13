@@ -856,6 +856,11 @@ namespace FUI::UIRoot
         // Render reads it on the render thread.
         std::atomic<bool> g_suppressed{ false };
         int               g_suppressTicks = 0;   // safety-net age, in Ticks
+        // ★GI83: age of "the preview is running but the menu is gone" (see the
+        // second net in Tick). Separate from the suppression age above: that
+        // one waits for somebody else's window to go, this one waits only for
+        // the menu map to settle.
+        int               g_orphanTicks   = 0;
         // ★A named client holds this one (UIRoot.h SuppressBy). ATOMIC because
         // a client dispatches its message on whatever thread it likes, and
         // SKSE hands the dispatch straight to us on that thread -- a plain
@@ -4859,6 +4864,22 @@ namespace FUI::UIRoot
 
     void OnShow()
     {
+        // ★★★GI90: WHERE THE FIRST OPEN GOES. A player with a very large
+        // inventory reports the game hanging on the first open after installing,
+        // and the first open is genuinely the expensive one: nothing has a
+        // remembered cell yet, so every tile goes through the placement search,
+        // and no mesh has been probed yet, so every item pays that once. Which
+        // of those dominates is not something to GUESS at -- the local save is
+        // 98 tiles and opens in 23ms, which cannot be extrapolated to three
+        // thousand because neither cost is linear.
+        // ★One line, only when it is slow enough to be worth reading. The
+        // draw's own share is NOT here -- QueueCapture runs from the tile loop,
+        // so it lands in the frames after this one (see the frame probe in
+        // IconCache).
+        const auto t0 = std::chrono::steady_clock::now();
+        auto ms = [](auto a, auto b2) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(b2 - a).count();
+        };
         // PHASE 0 PROBE: the state the menu is opening onto. After a save/load
         // this is the reading that matters -- kPostLoadGame fires before the 3D
         // is back, so the report there cannot see what the body actually built.
@@ -4925,13 +4946,16 @@ namespace FUI::UIRoot
 
         // Callback FIRST: it hot-reloads the item defs which the grid and the
         // capture queue key off (building before the reload uses stale defs).
+        const auto tPre = std::chrono::steady_clock::now();
         if (g_onShow) g_onShow();
+        const auto tBuilt = std::chrono::steady_clock::now();
 
         // ★B4-1: conditional since the demolition began. A closed-menu count
         // delta raised the flag through its event; the census gate in
         // GridMenu::OnShow covers event-less value drifts (the grindstone).
         // A quiet open keeps the board untouched and every ladder idle.
         Grid::RebuildIfNeeded();
+        const auto tRebuilt = std::chrono::steady_clock::now();
 
         // B: prefetch EVERYTHING the player carries the moment the menu
         // opens — one up-front caching burst instead of per-scroll/per-bag
@@ -4960,6 +4984,20 @@ namespace FUI::UIRoot
 
         SKSE::log::info("[UI] menu shown ({} icons cached)",
             IconCache::GetSingleton()->CachedCount());
+        // ★GI90: 50ms is a frame and a half -- below that nobody felt
+        // anything and the line would only be noise in every log we read.
+        if (const auto total = ms(t0, std::chrono::steady_clock::now()); total >= 50) {
+            // ★★The first labels were WRONG and the first measurement said so:
+            // "board 8 / epilogue 59" read as if the board were cheap, when the
+            // board is not built by g_onShow at all -- that reloads the defs and
+            // the filters. The rebuild happens in RebuildIfNeeded, which sat
+            // inside "epilogue" with everything else. A stage name that points
+            // at the wrong code is worse than no timer.
+            SKSE::log::warn("[UI] menu open took {}ms: prelude {} / defs {} / "
+                            "board {} / rest {} -- {} tile(s)",
+                total, ms(t0, tPre), ms(tPre, tBuilt), ms(tBuilt, tRebuilt),
+                ms(tRebuilt, std::chrono::steady_clock::now()), Grid::TileCount());
+        }
 
         // ★AUTHOR TOOLING, on the same watch-file idiom as the vanilla
         // passthrough: drop the file, open the bag once, and the shipping pak
@@ -5672,6 +5710,49 @@ namespace FUI::UIRoot
                 Suppress(false, !blocker ? "nothing left above us" : "backstop",
                          SuppressBy::kOverride);
             }
+        }
+        // ★★★GI83: THE SECOND NET — A SESSION THAT ENDED WITHOUT SAYING SO.
+        //
+        // kHide SUPPRESSES rather than closes, which is right: it is the
+        // courtesy every overlay sends. But the engine can then take the menu
+        // OFF THE STACK without ever sending kForceHide, and kForceHide is the
+        // only thing that reaches OnHide -- so the whole close never ran.
+        //
+        // Two reporter CTDs (1.5.1 and 1.6.1) have the identical shape:
+        //     [SUPPRESS] on (kHide, engine)
+        //     [INV] session over            <- MenuCloseEchoTick's own test, so
+        //                                      the menu was CLOSED and the game
+        //                                      UNPAUSED, while m_running stayed
+        //                                      true and m_session never moved
+        //     ...the next open logs NEITHER "Begin3D" NOR "Begin3D SKIPPED",
+        //        i.e. Begin() returned at `if (m_running)`. Our Begin3D was
+        //        left outstanding ACROSS a vanilla InventoryMenu open/close --
+        //        and that menu drives the very same Inventory3DManager.
+        //     ...every capture after it: "model ready, capture empty".
+        //     ...and the eventual real close called End3D on a scene the engine
+        //        had already taken apart.
+        //
+        // ★The loadedModels guards cannot see this and never could: their
+        // entries still look perfect (radius 31.2 in both logs). The fault is
+        // one level up, at the SCENE, and the only cure is not to leave a
+        // session open behind a menu that is gone.
+        //
+        // ★The same question is already asked one screen up, for the client
+        // suppression hold: "a hold cannot outlive the session it was taken
+        // over". It was simply never asked about the session itself.
+        //
+        // ★Structural, not a timer. Self-limiting: the close clears m_running,
+        // so one leak costs one firing. The three ticks are for a frame where
+        // the menu map is mid-update, not a grace for anybody's manners.
+        if (ItemPreview::GetSingleton()->IsRunning() && !IsSessionOpen()) {
+            if (++g_orphanTicks >= 3) {
+                g_orphanTicks = 0;
+                SKSE::log::warn("[UI] the menu left the stack without a close -- "
+                                "ending the session from the tick (GI83)");
+                GridInventoryMenu::CloseSession("gone from the stack, no kForceHide");
+            }
+        } else {
+            g_orphanTicks = 0;
         }
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
         Grid::ProcessFavorites();  // GI32: favourites, same reason

@@ -45,35 +45,72 @@ namespace FUI
     // Is there room to capture at all? See the note at the call site for why
     // this is asked BEFORE arming a queue entry rather than after failing one.
     //
-    // ★A FRACTION, FENCED AT BOTH ENDS -- all three numbers earn their place.
+    // ★★★GI89: THE QUESTION IS "CAN THIS ALLOCATION SUCCEED", AND FREE PHYSICAL
+    // RAM DOES NOT ANSWER IT.
     //
-    // The FRACTION is the honest measure of "this machine is running out":
-    // the reported crash sat at 1.13 of 23.91 GB, which is 4.7%.
+    // This used to demand a TENTH of installed RAM free, floored at 512MB and
+    // ceilinged at 2GB. The ceiling already cancelled the fraction on anything
+    // past 20GB, so the rule in practice was one number: 2GB of free physical
+    // memory. That number is wrong twice over.
     //
-    // The FLOOR exists because a fraction alone is meaningless on a small
-    // machine -- 10% of 8GB is 800MB, and one that size lives near there
-    // normally. Below 512MB nothing should be captured on any box.
+    //   1. It measures the wrong thing. Windows lends every spare page to the
+    //      file cache, so a healthy machine running a heavy load order sits
+    //      near zero free physical as a matter of course. That is not distress
+    //      -- and it describes exactly the setups with the most icons to
+    //      capture. Reported: caching stalls on high-end PCs, which is the
+    //      gate firing forever on machines in no trouble at all.
+    //   2. It is forty times the cost. A capture is two 2048² targets and a
+    //      mesh -- about 50MB, the same on every machine. The old comment said
+    //      the cost does not scale with RAM and then wrote a rule that did.
     //
-    // The CEILING exists because a capture's cost does NOT scale with RAM. It
-    // is two 2048² targets and a mesh, the same on every machine, so demanding
-    // 6.4GB free on a 64GB box would stall captures on the machine least
-    // likely to be in trouble. Past 2GB of headroom the question is settled.
+    // What makes an allocation FAIL is running out of COMMIT, not out of free
+    // physical pages: with commit headroom the allocation succeeds and Windows
+    // pages for it; without it, `new` returns null wherever it is called --
+    // including inside the engine's NIF loader, which is where the crash this
+    // gate was written for actually died.
     //
-    // ★10%, not the 5% first written: 5% would have cleared the reported crash
-    // by 0.3 of a percentage point, and a margin that thin is not a margin.
-    [[nodiscard]] static bool MemoryHeadroom()
+    // ★So: commit headroom, a flat floor, ten times the real cost. It does not
+    // scale with RAM because the thing it guards does not either.
+    // ★The physical test stays as a BACKSTOP at a level no healthy machine of
+    // any size reaches. It is not the rule any more; it is the tripwire for a
+    // box genuinely at the wall (the reported crash was thrashing at 6.6M page
+    // faults), and it costs nothing when things are fine.
+    // ★★HONEST FOOTING: this gate has never been shown to prevent anything.
+    // It was built from ONE crash, after that crash. What it HAS done is stop
+    // icons caching on healthy machines. Both numbers below are deliberately
+    // loose for that reason, and the pause says which one it was so the next
+    // report settles it in one line rather than another release.
+    struct MemGate
+    {
+        bool  ok = true;
+        int   commitMB = -1;   // headroom on what this process may commit
+        int   physMB = -1;
+        const char* why = "";
+    };
+
+    [[nodiscard]] static MemGate MemoryHeadroom()
     {
         MEMORYSTATUSEX ms{};
         ms.dwLength = sizeof(ms);
         // ★Cannot ask -> proceed. A capture that might fail beats an icon
         // system that silently never runs because one API said no.
-        if (!::GlobalMemoryStatusEx(&ms)) return true;
-        constexpr ULONGLONG kFloor   =  512ull * 1024 * 1024;
-        constexpr ULONGLONG kCeiling = 2048ull * 1024 * 1024;
-        const ULONGLONG tenth = ms.ullTotalPhys / 10;
-        const ULONGLONG need =
-            (std::min)(kCeiling, (std::max)(kFloor, tenth));
-        return ms.ullAvailPhys >= need;
+        if (!::GlobalMemoryStatusEx(&ms)) return {};
+        constexpr ULONGLONG kMB = 1024ull * 1024;
+        // ~10x a capture's real cost. Flat: see above.
+        constexpr ULONGLONG kCommitFloor = 512ull * kMB;
+        // Backstop only. A machine below this is thrashing, not merely busy.
+        constexpr ULONGLONG kPhysFloor   = 256ull * kMB;
+        MemGate g;
+        g.commitMB = static_cast<int>(ms.ullAvailPageFile / kMB);
+        g.physMB   = static_cast<int>(ms.ullAvailPhys / kMB);
+        if (ms.ullAvailPageFile < kCommitFloor) {
+            g.ok = false;
+            g.why = "no commit headroom";
+        } else if (ms.ullAvailPhys < kPhysFloor) {
+            g.ok = false;
+            g.why = "physical memory exhausted";
+        }
+        return g;
     }
 
     // 'FIC8': no rotation field.
@@ -558,9 +595,10 @@ namespace FUI
         m_inspect = a_obj;
         SetInspectRot(a_rx, a_ry, a_rz);
         m_inspectValid = false;   // nothing captured yet ("caching" for a frame)
+        m_inspectShrink = 1.0f;   // GI80: a fresh ladder for a fresh item
         // no pin, no cache key: PreRender simply gives the preview to this item
         // while the overlay is open, and the result lands in m_inspectIcon
-        ItemPreview::GetSingleton()->SetInspectScale(kInspectModelScale);
+        ItemPreview::GetSingleton()->SetInspectScale(kInspectModelScale * m_inspectShrink);
     }
 
     void IconCache::SetInspectRot(float a_rx, float a_ry, float a_rz)
@@ -628,6 +666,21 @@ namespace FUI
     // Items with ALTERNATE TEXTURES (same nif, different pixels) and items
     // without a model path keep the per-FormID slot. A stale hit would need a
     // full 64-bit collision incl. the rotation hash — effectively impossible.
+    // ★★A SCROLL IS NOT A SPELL HERE, AND As<SpellItem>() SAYS IT IS.
+    //
+    // RE::ScrollItem derives from SpellItem and FormTraits resolves As<T>()
+    // by convertibility, so every scroll answers the cast. Every spell-only
+    // rule in this file (the salted key, the black backdrop, brightness as
+    // alpha, the glow trim) would then run on a scroll -- and a scroll is a
+    // physical object with its own nif, photographed like any other item
+    // (see CaptureSourceOf). Every site that asks "is this a spell" asks
+    // this instead, so the answer cannot drift between them.
+    [[nodiscard]] static bool IsSpellCapture(const RE::TESForm* a_form)
+    {
+        return a_form && a_form->As<RE::SpellItem>() &&
+               !a_form->Is(RE::FormType::Scroll);
+    }
+
     // ★★★A SPELL HAS NO MODEL, AND THE ENGINE ALREADY KNOWS WHAT TO SHOW.
     //
     // MDOB (BGSMenuDisplayObject) is the bound object the vanilla magic menu
@@ -878,7 +931,25 @@ namespace FUI
 
     std::uint64_t IconCache::KeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
     {
-        return (static_cast<std::uint64_t>(ModelSlot32(a_obj)) << 32) | RotHash(a_def);
+        std::uint32_t rot = RotHash(a_def);
+        // ★★GI74: A SPELL'S KEY CHANGED WHEN ITS CAPTURE DID, on purpose.
+        //
+        // Every spell icon captured before this build was shot over a magenta
+        // backdrop, and additive glows sum the backdrop in -- so those records
+        // are the purple blobs that were reported, and they sit in the pak
+        // where the next lookup would serve them straight back. Salting the
+        // spell key orphans every one of them: the lookup misses, the spell is
+        // captured again over black, and the player never has to find the
+        // cache-reset button. The old records cost a few kilobytes until the
+        // next compaction and are never read. XOR with a constant is a
+        // bijection, so it manufactures no collisions.
+        // ★Bumped to 02: the first test build shipped half the fix (magenta
+        // backdrop + brightness alpha) and wrote solid pink squares under salt
+        // 01. Those records are as wrong as the purple ones and have to be
+        // orphaned the same way, or the retest serves them straight back.
+        constexpr std::uint32_t kSpellCaptureSalt = 0x5BE11A02u;   // "spell 2"
+        if (IsSpellCapture(a_obj)) rot ^= kSpellCaptureSalt;
+        return (static_cast<std::uint64_t>(ModelSlot32(a_obj)) << 32) | rot;
     }
 
     std::uint64_t IconCache::LegacyKeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
@@ -1893,7 +1964,16 @@ namespace FUI
     // written under the old rules are no longer evidence of anything. v3: the
     // empty-world-model and missing-mesh cases are now caught before a capture
     // is ever armed, so anything the old gate recorded deserves a clean look.
-    static constexpr const char* kFailVer = "; ver 3";
+    // ★v4: a single timeout no longer condemns a key -- it takes two in one
+    // session (see CheckPendingGates). Every entry written under v3 was put
+    // there by ONE reading, and a reporter's PBR weapon proved that reading can
+    // be wrong: the same item captured in 121ms the moment the list was deleted
+    // by hand. So v3 lists are not evidence and are discarded, which is also
+    // what frees the items already condemned on machines we will never see.
+    // ★v5: an armour with a ground model for one sex only is now healed before
+    // the capture (see Capturable), so every key v4 condemned for "no model" on
+    // such a record was condemned for a gap this build fills. Clean look.
+    static constexpr const char* kFailVer = "; ver 5";
 
     void IconCache::EnsureFailLoaded()
     {
@@ -1921,7 +2001,8 @@ namespace FUI
             std::error_code ec;
             std::filesystem::remove(kFailPath, ec);
             SKSE::log::info(
-                "[ICONS] fail list discarded ({} pre-GI68 keys) - they get another chance", n);
+                "[ICONS] fail list discarded ({} keys written under older rules) "
+                "- they get another chance", n);
             m_failed.clear();
             return;
         }
@@ -1948,6 +2029,29 @@ namespace FUI
         std::snprintf(buf, sizeof(buf), "%016llX\n",
             static_cast<unsigned long long>(a_key));
         out << buf;
+    }
+
+    // ★★GI69: THE FAIL LIST WAS THE ONLY SILENT EXIT IN THE WHOLE PIPELINE.
+    // Every other outcome leaves a line -- cached, skipped, deferred, mesh not
+    // found -- but a key on this list is dropped before anything is armed, so
+    // the player saw a flat tile and the log said nothing at all about it. That
+    // cost a release: a reporter's PBR sword had been condemned by one bad
+    // session, three logs went back and forth, and the answer was a file nobody
+    // could have known to look at.
+    //
+    // ★Once per key per session, and only from QueueCapture -- i.e. only for
+    // something actually on the screen. Prefetch sweeps thousands of records
+    // the player is not looking at, and saying this for each of them would bury
+    // the line it exists to make visible (the same mistake MeshMissingQuiet was
+    // written to undo).
+    void IconCache::NoteFailSkip(std::uint64_t a_key, RE::TESBoundObject* a_obj)
+    {
+        if (!m_failNoted.insert(a_key).second) return;
+        SKSE::log::info(
+            "[ICONS] '{}' is on the permanent fail list ({:016X}) -- skipped without "
+            "a capture. Delete Data/SKSE/Plugins/GridInventory_iconfail.txt to let "
+            "it try again.",
+            a_obj->GetName(), a_key);
     }
 
     // ---- GI68: the deferred list ------------------------------------------
@@ -2099,9 +2203,45 @@ namespace FUI
             // and 12 of them were exactly this: 45 frames each, 9 seconds of a
             // 71-second scan spent proving a blank string is still blank.
             if (auto* bip = a_obj->As<RE::TESBipedModelForm>()) {
-                const char* m = bip->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
-                const char* f = bip->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
-                if ((!m || !m[0]) && (!f || !f[0])) return false;
+                auto& wm = bip->worldModels[RE::TESBipedModelForm::Sexes::kMale];
+                auto& wf = bip->worldModels[RE::TESBipedModelForm::Sexes::kFemale];
+                const char* m = wm.GetModel();
+                const char* f = wf.GetModel();
+                const bool hasM = m && m[0];
+                const bool hasF = f && f[0];
+                if (!hasM && !hasF) return false;
+                // ★★GI78: A GROUND MODEL FOR ONE SEX ONLY IS FILLED FROM THE OTHER.
+                //
+                // The engine picks an armour's ground model by the PLAYER's sex,
+                // and a female-only outfit pack sets the female slot alone -- the
+                // Bride set measured here has MOD4 on every piece and MOD2 on
+                // none. Worn by a male character, every load came back with no
+                // task and no entry, self-heal reloaded three times into the
+                // same empty path, and the item was condemned for "no model"
+                // (log: model=false loading=false). There was never anything
+                // wrong with the mesh; the record simply had no answer for this
+                // character.
+                //
+                // ★Filled in memory, once, on first sight. Model paths are not
+                // saved, so nothing persists; and an empty slot can only gain a
+                // model where there was none, so vanilla's own inventory preview
+                // and a dropped item gain a picture too rather than lose one.
+                // SetModel is the engine's own virtual setter.
+                if (hasM != hasF) {
+                    if (hasM) wf.SetModel(m); else wm.SetModel(f);
+                    // ★A handful of lines, not one per record: a load-order sweep
+                    // healed 3098 of these in one session and the log was a
+                    // third this message. The rule is deterministic; five
+                    // examples say it is running and which way.
+                    static int s_said = 0;
+                    if (s_said < 5) {
+                        ++s_said;
+                        SKSE::log::info("[ICONS] '{}' has a ground model for one sex only "
+                                        "-- filled the {} slot from it{}",
+                            a_obj->GetName(), hasM ? "female" : "male",
+                            s_said == 5 ? " (further ones not logged)" : "");
+                    }
+                }
             }
             if (IsUnobtainable(a_obj)) return false;
             return true;
@@ -2241,6 +2381,30 @@ namespace FUI
 
     void IconCache::QueueCapture(RE::TESBoundObject* a_obj)
     {
+        // ★★★GI90: THE DRAW'S SHARE OF A SLOW FIRST OPEN.
+        //
+        // This runs from the tile loop, once per tile per frame, and the first
+        // time it sees an item it can pay for a fresh archive probe (MeshMissing
+        // -> PathMissing, which memoises, so the cost is once per nif ever). The
+        // queue DRAIN budgets that work at 64 a frame and says why in its own
+        // comment -- 'a load order missing a whole mesh pack can have hundreds in
+        // a row, which would land as one long hitch'. This side has no budget at
+        // all, and on a first open every tile arrives here at once.
+        //
+        // ★Measured before it is changed. Whether this or the placement search
+        // dominates is exactly what the report cannot tell us and a timer can.
+        // The accumulator is per FRAME (PreRender clears it), so the line reads
+        // as one hitch rather than a thousand fragments.
+        const auto t0 = std::chrono::steady_clock::now();
+        ++m_queueAsks;
+        struct Charge {
+            IconCache* self;
+            std::chrono::steady_clock::time_point t;
+            ~Charge() {
+                self->m_queueUs += std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - t).count();
+            }
+        } charge{ this, t0 };
         if (!Capturable(a_obj)) return;
         const auto key = KeyFor(a_obj, ResolveDef(a_obj));
 
@@ -2259,7 +2423,10 @@ namespace FUI
 
         if (m_icons.contains(key) || m_queued.contains(key)) return;
         EnsureFailLoaded();
-        if (m_failed.contains(key)) return;   // gave up on this one — stay out
+        if (m_failed.contains(key)) {         // gave up on this one — stay out
+            NoteFailSkip(key, a_obj);
+            return;
+        }
         if (m_pendingBusy && m_pending.key == key) return;
 
         // Session-persistent icons: load from disk before spending any
@@ -2397,6 +2564,14 @@ namespace FUI
 
     void IconCache::PreRender()
     {
+        // ★GI90: report the PREVIOUS frame's queueing cost, then reset. 30ms is
+        // already a dropped frame; below that there is nothing to investigate.
+        if (m_queueUs >= 30000) {
+            SKSE::log::warn("[ICONS] queueing cost {}ms in one frame over {} tile ask(s)",
+                m_queueUs / 1000, m_queueAsks);
+        }
+        m_queueUs = 0;
+        m_queueAsks = 0;
         auto* pv = ItemPreview::GetSingleton();
         if (!pv->IsRunning()) return;
 
@@ -2415,14 +2590,16 @@ namespace FUI
         // stopped, correctly, while C walked straight past: the most expensive
         // request this plugin makes, a 900px model at 3x scale, going into the
         // same engine NIF loader the reported crash died inside.
-        const bool memOk = MemoryHeadroom();
+        const MemGate mem = MemoryHeadroom();
+        const bool memOk = mem.ok;
 
         if (m_inspect && !m_pendingBusy) {
             if (!memOk) {
                 if (!m_memPaused) {
                     m_memPaused = true;
-                    SKSE::log::warn("[ICONS] paused: system memory is low -- the inspect "
-                                    "capture waits until it frees up");
+                    SKSE::log::warn("[ICONS] paused ({}): commit headroom {}MB, physical "
+                                    "{}MB -- the inspect capture waits until it frees up",
+                        mem.why, mem.commitMB, mem.physMB);
                 }
                 return;   // nothing dropped; the next frame simply asks again
             }
@@ -2483,9 +2660,9 @@ namespace FUI
         // an icon.
         if (!memOk && !m_memPaused && !m_queue.empty()) {
             m_memPaused = true;
-            SKSE::log::warn("[ICONS] paused: system memory is low -- {} icon(s) "
-                            "stay queued and resume when it frees up",
-                m_queue.size());
+            SKSE::log::warn("[ICONS] paused ({}): commit headroom {}MB, physical {}MB "
+                            "-- {} icon(s) stay queued and resume when it frees up",
+                mem.why, mem.commitMB, mem.physMB, m_queue.size());
         } else if (memOk && m_memPaused) {
             m_memPaused = false;
             SKSE::log::info("[ICONS] resumed: memory recovered");
@@ -2584,7 +2761,9 @@ namespace FUI
         // just grows to cover the enlarged model. The box is still clamped to
         // what the screen can physically render (margin included) — pixels
         // the backbuffer cannot hold do not exist to capture.
-        pv->SetInspectScale(m_pendingInspect ? kInspectModelScale
+        // ★GI80: the inspect carries its own shrink (see m_inspectShrink) --
+        // the same rung the tiles have, kept apart from the tile ladder's state.
+        pv->SetInspectScale(m_pendingInspect ? kInspectModelScale * m_inspectShrink
                                              : kIconCaptureScale * m_captureShrink);
         // ★★The capture lamp belongs to the ITEM, and it has to be set from the
         // SAME def this request carries — set it anywhere else and a slow
@@ -2604,14 +2783,20 @@ namespace FUI
         // taken from the spell with a picture taken from the flame would file
         // the capture under a name nothing ever looks up, and the icon would
         // be re-photographed every single time it was asked for.
+        // ★GI74b: and the FIFTH thing that must agree -- whether this is a
+        // spell. The preview only ever sees the display model, so it cannot
+        // tell; the pending object can, and the backdrop it picks has to match
+        // the alpha rule PostRender applies. Half of that pair applied alone is
+        // the pink-square regression.
         pv->Request(CaptureSourceOf(m_pending.obj), ImVec2(0.0f, 0.0f),
-            ImVec2(boxPx, boxPx), -1.0f, 0.0f, 0.0f, &def);
+            ImVec2(boxPx, boxPx), -1.0f, 0.0f, 0.0f, &def,
+            IsSpellCapture(m_pending.obj));
         if (m_pending.boost > 0.0f) {
             pv->BoostCapture(m_pending.boost);   // B4: resume the clip-boost ladder
         }
     }
 
-    void IconCache::GiveUpPending(const char* a_why)
+    void IconCache::GiveUpPending(const char* a_why, bool a_persist)
     {
         SKSE::log::warn("[ICONS] '{}' skipped ({})", m_pending.obj->GetName(), a_why);
 
@@ -2657,9 +2842,21 @@ namespace FUI
         // an inspect frame carries no cache key (0): its failures must never
         // reach the PERSISTED fail list
         if (m_pendingInspect) return;
-        // GI68: one verdict, no attempt counting. Reaching here means either the
-        // engine never even started a load (more time cannot help) or the retry
-        // pass already gave it ten seconds. Either way it is done.
+        // ★★GI69: AND NEITHER MUST A VERDICT THAT IS NOT ONE. This write used to
+        // be unconditional, so every caller got it -- including the two that
+        // announce "precache deferred", whose entire purpose is to say "this
+        // item WORKS, it is only slower than this pass can afford". They put
+        // the key on the deferred list and then, one line later, on the
+        // permanent one as well; and since QueueCapture tests m_failed first,
+        // the permanent verdict is the one that counted. GI68 built a
+        // recoverable path and this line quietly swallowed it.
+        //
+        // That is the most likely way a reporter's PBR weapon was condemned
+        // during a warm-up precache while loading perfectly well.
+        if (!a_persist) return;
+        // One verdict, no attempt counting HERE -- the strike count lives in
+        // CheckPendingGates, which decides whether to call this at all.
+        // Reaching this line means the item has been judged done.
         if (m_failed.insert(m_pending.key).second) {
             PersistFail(m_pending.key);
         }
@@ -2775,10 +2972,24 @@ namespace FUI
             // DIAGNOSTIC: which gate starved? (stamp = captures ran at all,
             // model/rot = scene state, content probe logs separately below)
             auto* dmdl = pv->FindCurrentModel();
+            // ★★"no model" WAS PRINTED BESIDE model=true radius=25.4 -- i.e. the
+            // label said the opposite of the evidence on its own line. It was
+            // never a verdict about the model at all, only the load flag
+            // negated. Three states reach this point and they take three
+            // different fixes, so the log has to tell them apart:
+            //   still loading              -> the loader needs more time
+            //   model ready, capture empty -> it loaded fine and rendered
+            //                                nothing (sheer meshes with no body
+            //                                under them: measured 19 of these)
+            //   no model                   -> the load never landed
+            const char* state = loading ? "still loading"
+                : (dmdl && dmdl->worldBound.radius > 0.0f)
+                    ? "model ready, capture empty"
+                    : "no model";
             SKSE::log::warn(
                 "[ICONS] precache gates '{}': {} (model={} radius={:.1f} rot={} "
                 "park={} stamp={}->{} mesh='{}')",
-                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                m_pending.obj->GetName(), state,
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
                 pv->RotationApplied(), pv->ParkTicks(),
                 m_stampBefore, pv->GetCaptureStamp(), ModelPathOf(m_pending.obj));
@@ -2787,7 +2998,22 @@ namespace FUI
                     m_deferredObj[m_pending.key] = m_pending.obj;
                     PersistSlow(m_pending.key);
                 }
-                GiveUpPending("precache deferred");
+                GiveUpPending("precache deferred", false);   // NOT a permanent verdict
+                return GateResult::kAbandoned;
+            }
+            // ★GI69: the same two-strike rule the normal path takes below, and
+            // for the same reason -- this branch reached the persisted fail
+            // list from ONE "loading == false", which is the reading that was
+            // shown to be wrong. A precache entry is not re-queued by the draw
+            // loop, so its second strike waits for the retry pass or the next
+            // time the grid actually shows the item; deferring costs a line on
+            // a list the player can act on rather than a permanent verdict.
+            if (!m_retryPass && ++m_strikes[m_pending.key] < 2) {
+                if (m_deferred.insert(m_pending.key).second) {
+                    m_deferredObj[m_pending.key] = m_pending.obj;
+                    PersistSlow(m_pending.key);
+                }
+                GiveUpPending("precache deferred (first miss)", false);
                 return GateResult::kAbandoned;
             }
             m_deferred.erase(m_pending.key);
@@ -2843,10 +3069,24 @@ namespace FUI
             // returned early); park < 2 means the rig had not settled. Without
             // them a timeout line said only "not ready" and every cause looked
             // identical.
+            // ★★"no model" WAS PRINTED BESIDE model=true radius=25.4 -- i.e. the
+            // label said the opposite of the evidence on its own line. It was
+            // never a verdict about the model at all, only the load flag
+            // negated. Three states reach this point and they take three
+            // different fixes, so the log has to tell them apart:
+            //   still loading              -> the loader needs more time
+            //   model ready, capture empty -> it loaded fine and rendered
+            //                                nothing (sheer meshes with no body
+            //                                under them: measured 19 of these)
+            //   no model                   -> the load never landed
+            const char* state = loading ? "still loading"
+                : (dmdl && dmdl->worldBound.radius > 0.0f)
+                    ? "model ready, capture empty"
+                    : "no model";
             SKSE::log::info(
                 "[ICONS] '{}' {} (model={} radius={:.1f} rot={} park={} "
                 "stamp={}->{} loading={})",
-                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                m_pending.obj->GetName(), state,
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
                 pv->RotationApplied(), pv->ParkTicks(),
                 m_stampBefore, pv->GetCaptureStamp(), loading);
@@ -2860,7 +3100,39 @@ namespace FUI
                 m_pendingBusy = false;
                 return GateResult::kAbandoned;
             }
-            // retry pass ran out too, or the load never took at all
+            // ★★GI69: ONE READING MUST NOT CONDEMN AN ITEM FOR EVER.
+            //
+            // "loading == false" was read as "no task, no entry: more time
+            // changes nothing" and went STRAIGHT to the persisted fail list on
+            // the first try. Measured against a real report it is simply not
+            // that reliable: a PBR weapon (Community Shaders + PGPatcher) was
+            // condemned on one session and then captured in 121ms on the next,
+            // the moment the list was deleted by hand. A cold first load on a
+            // heavy setup can answer false at the instant we happen to ask.
+            //
+            // ★So it takes TWO. The first one defers, which also puts the key
+            // where the player can see it and press a button. Because the draw
+            // loop re-queues a visible tile as soon as the slot frees (m_queued
+            // was erased at the pop), the second attempt usually happens a few
+            // frames later against a now-warm loader -- which is how the item
+            // this was written for heals itself inside one session.
+            //
+            // ★And it has to be a COUNT, not the deferred list itself. That
+            // list persists, so reading membership would make the second strike
+            // arrive a whole session later and leave a hopeless item re-queuing
+            // at 20 frames a go for all of it. Two strikes bounds the spin at
+            // one extra window -- the same protection the old code bought, for
+            // one attempt more.
+            if (!m_retryPass && ++m_strikes[m_pending.key] < 2) {
+                if (m_deferred.insert(m_pending.key).second) {
+                    m_deferredObj[m_pending.key] = m_pending.obj;
+                    PersistSlow(m_pending.key);
+                }
+                pv->UnloadCurrent();
+                m_pendingBusy = false;
+                return GateResult::kAbandoned;
+            }
+            // the retry pass ran out too, or this key has now failed twice
             m_deferred.erase(m_pending.key);
             m_deferredObj.erase(m_pending.key);
             GiveUpPending("timeout");
@@ -2944,6 +3216,11 @@ namespace FUI
         // in one body: its locals (crop rect, mapped rows, trim bounds) flow
         // straight through — splitting them would only add plumbing structs.
         auto giveUp = [&](const char* a_why) { GiveUpPending(a_why); };
+        // ★GI74: one answer for the content probe and the sprite pass both,
+        // taken here at function scope -- the gates above have just confirmed
+        // the pending object is live -- so neither stage re-derives it.
+        const bool spellCapture =
+            IsSpellCapture(m_pending.obj);
 
         // Pixel rect of the FULL margin region (kSafetyMargin x inner box):
         // rotation diagonals that outgrow the inner box stay uncut; tiles
@@ -3147,24 +3424,70 @@ namespace FUI
                 // question that generalises is whether the channel came back,
                 // and the answer costs nothing to ask — a healthy capture's
                 // first pixel IS backdrop, so this breaks on iteration one.
-                bool alphaOk = false;
-                for (size_t i = 3; i < pixels.size(); i += 4) {
-                    if (pixels[i] == 0) { alphaOk = true; break; }
-                }
-                if (!alphaOk && !pixels.empty()) {
-                    for (size_t i = 0; i < pixels.size(); i += 4) {
-                        // Symmetric in R/B, so BGRA vs RGBA never matters.
-                        const bool key = pixels[i] > 200 && pixels[i + 2] > 200 &&
-                                         pixels[i + 1] < 60;
-                        pixels[i + 3] = key ? 0 : 255;
+                // ★★★GI77: THE MATTE. Pass A (over black) is already in `pixels`.
+                // Read pass B (the same model over white) and, per pixel:
+                //     d     = white - black          (= 255 * (1 - alpha))
+                //     alpha = 255 - d
+                //     colour = black / alpha         (the black pass is colour*alpha)
+                // An opaque pixel reads the same over both -> alpha 255, colour
+                // as drawn. The bare backdrop reads 0 and 255 -> alpha 0. A half
+                // covered fur tip or a lace thread lands exactly in between, and
+                // a potion that merely IS purple is opaque and untouched -- the
+                // two cases the single-backdrop key could never tell apart.
+                // The surface's own alpha channel is not consulted at all, which
+                // is what makes a 10-bit surface and a no-alpha surface behave
+                // like a perfect one.
+                // A spell keeps pass A alone (its alpha is brightness, below).
+                if (!spellCapture) {
+                    auto* srcB = pv->GetTextureB();
+                    ID3D11Texture2D* stagingB = nullptr;
+                    if (!srcB || FAILED(device->CreateTexture2D(&sd, nullptr, &stagingB))) {
+                        staging->Release();
+                        giveUp("no matte pass");
+                        return;
                     }
-                    static bool s_saidKey = false;
-                    if (!s_saidKey) {
-                        s_saidKey = true;
-                        SKSE::log::info("[ICONS] capture surface returned no alpha (fmt={}) "
-                                        "-- keying the backdrop by colour instead",
-                            static_cast<int>(srcDesc.Format));
+                    context->CopySubresourceRegion(stagingB, 0, 0, 0, 0, srcB, 0, &cbox);
+                    D3D11_MAPPED_SUBRESOURCE mapB = {};
+                    if (FAILED(context->Map(stagingB, 0, D3D11_MAP_READ, 0, &mapB))) {
+                        stagingB->Release();
+                        staging->Release();
+                        giveUp("matte map fail");
+                        return;
                     }
+                    for (int y = 0; y < h; ++y) {
+                        const auto* rowB = static_cast<const std::uint8_t*>(mapB.pData) +
+                                           static_cast<size_t>(y) * mapB.RowPitch;
+                        auto* p = pixels.data() + static_cast<size_t>(y) * w * 4;
+                        for (int x = 0; x < w; ++x, p += 4) {
+                            int rB, gB, bB;
+                            if (is10Bit) {
+                                const std::uint32_t v =
+                                    reinterpret_cast<const std::uint32_t*>(rowB)[x];
+                                rB = static_cast<int>(((v >>  0) & 0x3FF) >> 2);
+                                gB = static_cast<int>(((v >> 10) & 0x3FF) >> 2);
+                                bB = static_cast<int>(((v >> 20) & 0x3FF) >> 2);
+                            } else {
+                                rB = rowB[x * 4 + 0];
+                                gB = rowB[x * 4 + 1];
+                                bB = rowB[x * 4 + 2];
+                            }
+                            // mean of the three channels: identical for a true
+                            // blend, and the average rides out a bit of noise
+                            const int d = ((rB - p[0]) + (gB - p[1]) + (bB - p[2]) + 1) / 3;
+                            const int alpha = (std::max)(0, (std::min)(255, 255 - d));
+                            if (alpha == 0) {
+                                p[0] = p[1] = p[2] = p[3] = 0;
+                                continue;
+                            }
+                            for (int c = 0; c < 3; ++c) {
+                                const int un = (p[c] * 255 + alpha / 2) / alpha;
+                                p[c] = static_cast<std::uint8_t>((std::min)(255, un));
+                            }
+                            p[3] = static_cast<std::uint8_t>(alpha);
+                        }
+                    }
+                    context->Unmap(stagingB, 0);
+                    stagingB->Release();
                 }
 
                 for (int y = 0; y < h; ++y) {
@@ -3180,7 +3503,18 @@ namespace FUI
                         // ★Read from dst, not the raw row: on a 10-bit surface
                         // those are different numbers, and alpha only means
                         // this after the unpack.
-                        const bool bg = dst[x * 4 + 3] == 0;
+                        // ★GI74: for a SPELL, content is BRIGHTNESS, not alpha.
+                        // The backdrop is black and the glow is additive, so
+                        // what the engine wrote into alpha is not coverage --
+                        // it may be 0 across the whole glow -- and reading it
+                        // would find nothing, time the capture out and defer
+                        // a spell that drew perfectly well. Black is the
+                        // backdrop; anything brighter than black is the spell.
+                        const bool bg = spellCapture
+                            ? ((std::max)({ static_cast<int>(dst[x * 4 + 0]),
+                                            static_cast<int>(dst[x * 4 + 1]),
+                                            static_cast<int>(dst[x * 4 + 2]) }) < 8)
+                            : dst[x * 4 + 3] == 0;
                         if (!bg) {
                             ++nonBg;
                             minX = (std::min)(minX, x);
@@ -3246,7 +3580,23 @@ namespace FUI
                 // is a small loss; a sprite with its silhouette sliced off is
                 // wrong forever, and the pixel style outlines that cut into a
                 // rectangle around the icon.
-                if (!m_pendingInspect && m_captureShrink > kMinCaptureShrink) {
+                // ★GI80: the INSPECT takes this rung too, on its own factor.
+                // It used to be excluded here outright, so a 3x model that
+                // reached the screen edge went on to the trim below and was
+                // shown with its ends cut flat -- a picture of the screen's
+                // border, not of the item. Not published until it fits (or
+                // the floor is reached): the overlay shows "caching" for the
+                // extra frame or two instead of a sliced sprite that then
+                // pops to a whole one.
+                if (m_pendingInspect) {
+                    if (m_inspectShrink > kMinInspectShrink) {
+                        m_inspectShrink = (std::max)(kMinInspectShrink, m_inspectShrink * 0.7f);
+                        SKSE::log::info("[ICONS] inspect '{}' reaches the screen edge at {}x{} -- "
+                            "retry at {:.0f}% model scale",
+                            m_pending.obj->GetName(), w, h, m_inspectShrink * 100.0f);
+                        return;
+                    }
+                } else if (m_captureShrink > kMinCaptureShrink) {
                     m_captureShrink = (std::max)(kMinCaptureShrink, m_captureShrink * 0.7f);
                     SKSE::log::info("[ICONS] '{}' still clipped at box ceiling {:.0f}px — "
                         "retry at {:.0f}% model scale",
@@ -3303,41 +3653,32 @@ namespace FUI
             std::memcpy(dst, src, static_cast<size_t>(trimW) * 4);
             for (int x = 0; x < trimW; ++x) {
                 auto* px = dst + x * 4;
-                const int a = px[3];
-                if (a == 0) {
-                    px[0] = px[1] = px[2] = 0;
-                } else if (a < 255) {
-                    const int spill =
-                        (std::min)(static_cast<int>(px[0]), static_cast<int>(px[2])) - px[1];
-                    if (spill > 0) {
-                        px[0] = static_cast<std::uint8_t>((std::max)(0, px[0] - spill));
-                        px[2] = static_cast<std::uint8_t>((std::max)(0, px[2] - spill));
-                    } else {
-                        // ★★★LOW ALPHA WITH NO BACKDROP IN IT IS NOT
-                        // TRANSPARENCY. Hides and pelts came out see-through
-                        // (reported: goat and elk). Measured, they carry NO
-                        // opaque pixel at all — 'Goat Hide' 255=0, every pixel
-                        // between 64 and 191 — and yet the engine draws them
-                        // solid, because they are alpha-TESTED: the shader
-                        // writes the material's alpha and the test decides
-                        // visibility, so the number in the buffer describes
-                        // the material, not what you can see through.
-                        //
-                        // The two cases separate by COLOUR, not by alpha. A
-                        // pixel that really was blended has the magenta
-                        // backdrop mixed into it and shows up as spill (a lace
-                        // veil measured 940B92 -> 135). One that covered the
-                        // backdrop outright has none, and on natural colours
-                        // min(R,B)-G lands at or below zero. So: backdrop in
-                        // the pixel means it is genuinely see-through, and no
-                        // backdrop means the low alpha is bookkeeping.
-                        //
-                        // ★This keeps the veil intact — that was the whole
-                        // point of reading alpha — while giving the hides back
-                        // the solidity the engine gives them.
-                        px[3] = 255;
-                    }
+                // ★★GI74: A SPELL IS LIGHT, AND LIGHT'S ALPHA IS ITS BRIGHTNESS.
+                //
+                // The three rules below read the alpha the engine wrote and
+                // subtract magenta spill from blended pixels. Neither applies
+                // to an additive glow shot over BLACK: the shader's alpha is
+                // not coverage, and there is no backdrop colour in the pixel
+                // to subtract. What makes a glow visible is how bright it is
+                // -- over black that is the whole of it, exactly as the game's
+                // own magic menu shows it -- so the brightest channel becomes
+                // the alpha and the colour is kept as drawn. Black stays clear.
+                // Robust whichever way the shader wrote alpha, which is the
+                // point: that value could not be measured on the reporter's
+                // hardware and this does not need it to be.
+                if (spellCapture) {
+                    const int lum = (std::max)({ static_cast<int>(px[0]),
+                                                 static_cast<int>(px[1]),
+                                                 static_cast<int>(px[2]) });
+                    px[3] = static_cast<std::uint8_t>(lum);
+                    if (lum == 0) px[0] = px[1] = px[2] = 0;
+                    continue;
                 }
+                // ★GI77: the matte already decided every alpha and un-blended
+                // every colour; nothing here second-guesses it. Clearing RGB at
+                // alpha 0 keeps bilinear sampling from bleeding a neighbour in.
+                const int a = px[3];
+                if (a == 0) px[0] = px[1] = px[2] = 0;
             }
         }
 
@@ -3370,7 +3711,7 @@ namespace FUI
         // ★ITEMS ARE LEFT ALONE, deliberately. A wine bottle measures 0.48 /
         // 0.64 because it is heavy at the base, and "correcting" that would
         // float it in its cell. Its box is honest; a spell's is not.
-        if (m_pending.obj->As<RE::SpellItem>() && trimW > 0 && trimH > 0) {
+        if (IsSpellCapture(m_pending.obj) && trimW > 0 && trimH > 0) {
             const auto vOf = [](const std::uint8_t* a_px) {
                 const double lum = (a_px[0] * 0.299 + a_px[1] * 0.587 +
                                     a_px[2] * 0.114) / 255.0;
@@ -3822,6 +4163,13 @@ namespace FUI
         m_queued.clear();
         m_failed.clear();
         m_failLoaded = false;   // persisted fail keys reload on next access
+        // ★GI69: the two session-scoped companions of that list go with it. A
+        // cache reset is the player asking for a clean look, and a key holding
+        // one strike would be condemned by its very next timeout instead of
+        // getting the two the rule promises -- while a key already reported as
+        // skipped would stay silent about it.
+        m_strikes.clear();
+        m_failNoted.clear();
         m_pendingBusy = false;
         m_pinLastKey = 0;
         m_pinSprite.clear();

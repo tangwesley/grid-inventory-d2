@@ -2524,10 +2524,48 @@ namespace FUI::Wheeler
             // click for the same reason the spells are -- the snapshot
             // refreshes on a timer and a second click lands inside that window.
             bool wornHere = a_list[a_slot].worn;
+            // ★★★GI88: ...AND ONE SWORD CANNOT BE IN BOTH HANDS.
+            //
+            // The correction above made "one in each hand" reachable and never
+            // asked whether there were two to begin with. With a single weapon
+            // in the right hand, right-clicking read `inL == false`, fell
+            // through, and asked the engine to put that same object in the left
+            // hand as well: the player sees it in both fists. Nothing is
+            // duplicated -- unequipping leaves one, as the reporter checked --
+            // but the equipped state is a lie for as long as it is held.
+            //
+            // So the count is asked, and it is asked the same way the rest of
+            // this file asks the engine things: at the click, of the engine,
+            // not of a snapshot. An equipped copy counts, so dual wielding
+            // needs TWO.
             if (auto* pc = RE::PlayerCharacter::GetSingleton()) {
                 const bool inL = pc->GetEquippedObject(true) == obj;
                 const bool inR = pc->GetEquippedObject(false) == obj;
                 if (inL || inR) wornHere = a_leftHand ? inL : inR;
+                const bool inOther = a_leftHand ? inR : inL;
+                if (!wornHere && inOther) {
+                    int held = 0;
+                    for (const auto& [o, n] : pc->GetInventoryCounts(
+                             [&](RE::TESBoundObject& x) { return &x == obj; })) {
+                        (void)o;
+                        held = n;
+                    }
+                    if (held < 2) {
+                        // ★★IT MOVES. One of something cannot be in two hands,
+                        // and the click already said which hand is wanted -- so
+                        // the other one gives it up and the equip below puts it
+                        // where it was asked for. No message: this is not a
+                        // refusal, it is the gesture doing what it looks like.
+                        // ★The equip still goes through the engine, so anything
+                        // that can only live in one hand (a shield, a torch) is
+                        // simply put back where it belongs. The engine decides;
+                        // we only stop asking it to hold one thing twice.
+                        SKSE::log::info("[WHEEL] '{}': only one held -- moving it to the {} hand",
+                            obj->GetName(), a_leftHand ? "left" : "right");
+                        Equip::UnequipItem(obj, a_list[a_slot].uid, a_list[a_slot].sig,
+                                           a_leftHand ? 0 : 2, 1);
+                    }
+                }
             }
             if (wornHere) {
                 // ★The second ring is not ENGINE-worn -- a carrier stands in
@@ -4648,6 +4686,7 @@ namespace FUI::Wheeler
                     // had been opened by hand. Asking loads it from the pak on
                     // the spot; a costume never captured before joins the
                     // normal queue instead of staying invisible forever.
+                    bool symbolFace = false;   // GI75b: the face is a school glyph
                     if (!icon && face) {
                         cache->QueueCapture(face);
                         // ★★★AND FALL BACK TO THE DRAWN ICON, exactly as the
@@ -4662,6 +4701,24 @@ namespace FUI::Wheeler
                         // the two surfaces agree instead of one of them being
                         // empty.
                         icon = Fallback::GetDrawn(face).icon;
+                        // ★★GI75: A SPELL HAS NO CATEGORY DRAWING. Fallback's
+                        // resolver knows weapons, armour, ammo, potions, books,
+                        // scrolls, keys, torches, ingredients -- and not
+                        // SpellItem, because the board never shows one. So in
+                        // the Drawn style the lookup above comes back empty and
+                        // a spell slot drew NOTHING at all (reported alongside
+                        // the purple icons). The wheel already owns a drawing
+                        // for every school -- the sigil pass behind the slot
+                        // uses it -- and it is the right face here as well.
+                        // Same Icon type, so the draw below needs no new case.
+                        if (!icon && magicUnder) {
+                            const char* key = SchoolOf(face);
+                            if (!key && UsesVoiceSlot(face)) key = "sym_power";
+                            if (key) {
+                                icon = Symbol(key);
+                                symbolFace = icon != nullptr;
+                            }
+                        }
                     }
                     if (icon && icon->srv) {
                         const auto tex = reinterpret_cast<ImTextureID>(icon->srv);
@@ -4686,7 +4743,13 @@ namespace FUI::Wheeler
                         // stores 160x155 and the part you can actually see on
                         // black is a fifth of it. At the item's 1.34 the core
                         // came out a dot (reported).
-                        const float faceFit = magicUnder ? 2.40f : 1.34f;
+                        // ★GI75b: 2.40 is for a CAPTURED spell -- a glow whose
+                        // sprite is mostly dark margin, so it needs the room. A
+                        // school glyph fills its PNG edge to edge; at 2.40 it
+                        // overran the slot and the ring (reported, screenshot).
+                        // Sized like the sigil pass sizes the same drawing.
+                        const float faceFit = symbolFace ? kSigilScale
+                                            : magicUnder ? 2.40f : 1.34f;
                         const float fit = (sz * faceFit) / (std::max)(aw, ah);
                         const float hw = aw * fit, hh = ah * fit;
                         // ★★A PICTURE WHOSE MIDDLE IS NOT ITS CENTRE gets the
