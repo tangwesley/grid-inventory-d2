@@ -1533,6 +1533,27 @@ namespace FUI::Equip
                 }
             }
 
+            // ★★★ASK WHETHER THE UNIT EXISTS BEFORE UNDRESSING ANYONE FOR IT.
+            //
+            // The resolver below ("named unit gone -- equip skipped") runs
+            // AFTER the conflict pass, so a named unit that could not be found
+            // still cost the player the piece they were wearing: measured with
+            // armour used straight out of a chest -- "slot conflict: unequip
+            // Fur Armor" and then "named unit gone", and the body slot left to
+            // the costume anchor. The real resolution stays where it is (the
+            // pass rewrites the entry's lists, and a pointer taken across it
+            // is a pointer to something else); this is only the QUESTION,
+            // asked while nothing has been touched yet, and its answer is
+            // thrown away. A unit that is not there now will not be there
+            // after the pass either.
+            if ((act.uid != 0 || act.sig != 0) &&
+                !Grid::ExtraForPool(Grid::LiveEntryOf(player, obj), act.uid, act.sig)) {
+                SKSE::log::info("[EQUIP] named unit u{:04X}/s{:04X} of '{}' not in the "
+                                "pack -- equip skipped before the conflict pass",
+                                act.uid, act.sig, obj->GetName() ? obj->GetName() : "?");
+                continue;
+            }
+
             // Same-slot conflict resolution BY HAND: while paused the engine's
             // own queued conflict pass is unreliable (stacked body armour) —
             // unequip everything sharing a biped slot with the incoming piece.

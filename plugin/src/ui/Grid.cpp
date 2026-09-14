@@ -14841,13 +14841,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // ★(1.5.0) the shelf USE MODE hint: a container's book reads
             // (a tome learns) in place on Shift+right-click -- the one verb
             // of this board that no click could discover.
-            const bool shelfUse =
+            // ★(1.6.x) ...and everything the player board's right-click
+            // would use or wear, taken and used in one gesture (the same gate
+            // as the click, LootBarter's use branch): a potion or food is
+            // "use", gear is "equip" -- the words the player's own board
+            // shows for the same kinds.
+            const auto* shelfBook = a_obj->As<RE::TESObjectBOOK>();
+            const bool  shelfUse =
                 a_tile.partner && LootBarter::IsLootMode(mode) &&
-                a_obj->As<RE::TESObjectBOOK>() != nullptr;
+                (shelfBook != nullptr || Equip::IsWearOrConsume(a_obj));
             const Lang::Str useVerb =
-                shelfUse && a_obj->As<RE::TESObjectBOOK>()->TeachesSpell()
-                    ? Lang::Str::ActLearn
-                    : Lang::Str::ActRead;
+                !shelfUse                ? Lang::Str::ActUse
+                : shelfBook              ? (shelfBook->TeachesSpell() ? Lang::Str::ActLearn
+                                                                      : Lang::Str::ActRead)
+                : (a_obj->Is(RE::FormType::AlchemyItem) ||
+                   a_obj->Is(RE::FormType::Ingredient)) ? Lang::Str::ActUse
+                                                        : Lang::Str::ActEquip;
             g_hoverPrompt = { ImGui::GetFrameCount(), canSplit, canCompare,
                               !sideBoard && !quest,                    // canDrop
                               // ★the doll and the drawer star things now too;

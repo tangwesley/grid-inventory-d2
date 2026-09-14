@@ -2044,12 +2044,17 @@ namespace FUI::LootBarter
                 // The name goes back (GI39 wants it), and the ownership is ours
                 // to state.
                 std::set<RE::ExtraDataList*> hadBefore;
-                if (anyStolen) {
+                // ★The same photograph serves USE MODE (below): the unit that
+                // arrives has to be named to the equip by the list it arrives
+                // IN, and "which list is new" is the only way to find it.
+                if (anyStolen || r.useAfter) {
                     if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
                         for (auto* l : *e->extraLists) {
                             if (l) hadBefore.insert(l);
                         }
                     }
+                }
+                if (anyStolen) {
                     // ★★SAY WHOSE IT IS WHILE IT IS STILL ON THE SHELF.
                     //
                     // Ownership lives on an ExtraDataList, and the engine hands
@@ -2216,7 +2221,49 @@ namespace FUI::LootBarter
                     // ★It is passing through, not moving in: a typed bag must not
                     // adopt a unit that is about to be drunk.
                     Grid::NoteTransientArrival(r.obj->GetFormID());
-                    Equip::UseItem(r.obj, r.uid, -1, r.sig, {}, r.count);
+                    // ★★★NAMED BY THE LIST IT ARRIVED IN, NOT BY THE SHELF'S UID.
+                    //
+                    // Reported: armour used straight out of a chest took the
+                    // worn piece OFF and put nothing on. The log has the whole
+                    // of it in two lines --
+                    //
+                    //   [EQUIP] slot conflict: unequip Fur Armor
+                    //   [EQUIP] named unit gone -- equip skipped
+                    //
+                    // -- because the equip was asked for r.uid, the unit's
+                    // ExtraUniqueID as the CHEST had stamped it. A uid is the
+                    // container's own numbering: the moment the unit lands in
+                    // the pack the engine numbers it again, and ExtraForPool
+                    // matches a uid exactly with no fallback (a named unit that
+                    // resolves to nothing is refused on purpose, GI53). So the
+                    // conflict pass had already undressed the player by the
+                    // time the resolver said "gone". Consumables never hit it:
+                    // a potion has no list and rides the bare count.
+                    //
+                    // The lists in the pack were photographed before the engine
+                    // call (hadBefore, above). Whatever list is there now and
+                    // was not then is the unit that just arrived, and ITS uid
+                    // and signature -- read the way the pool system reads them
+                    // (PoolUidOf, InstanceSigOf) -- are the name the equip can
+                    // resolve. No new list means the unit merged into the bare
+                    // count (a plain stackable), and uid 0 / sig 0 is the honest
+                    // name for that: the engine takes one from the count.
+                    std::uint16_t useUid = 0, useSig = 0;
+                    if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
+                        for (auto* l : *e->extraLists) {
+                            if (!l || hadBefore.contains(l)) continue;
+                            if (l->HasType<RE::ExtraWorn>() ||
+                                l->HasType<RE::ExtraWornLeft>()) continue;
+                            useUid = Grid::PoolUidOf(r.obj, l);
+                            useSig = Grid::InstanceSigOf(l);
+                            break;
+                        }
+                    }
+                    SKSE::log::info("[XFER] use-after-take '{}': shelf named "
+                                    "u{:04X}/s{:04X}, arrived as u{:04X}/s{:04X}",
+                                    r.obj->GetName() ? r.obj->GetName() : "?",
+                                    r.uid, r.sig, useUid, useSig);
+                    Equip::UseItem(r.obj, useUid, -1, useSig, {}, r.count);
                 }
                 break;
             }
@@ -6140,11 +6187,38 @@ namespace
                         // so that is what the mode does. Anything else falls
                         // through to an ordinary take, which is what shift+right
                         // did before this existed.
-                        } else if (useRc && it.obj->As<RE::TESObjectBOOK>()) {
+                        //
+                        // ★★★(1.6.x) ...AND EVERYTHING ELSE THE PLAYER BOARD'S
+                        // RIGHT-CLICK KNOWS, again (user ask: "use items from
+                        // the container being looted", Shift+RMB / RT+X).
+                        //
+                        // The CTD above was written against the key-by-numbers
+                        // board. The pointer it died on -- "valid at the
+                        // previous rebuild, gone by the time it was drawn" -- is
+                        // the shape of a tile whose key was RENAMED under it,
+                        // and that whole class of failure left with the cell
+                        // rework (a cell belongs to its item: keys are minted
+                        // once and never carry the item's mutable state). The
+                        // spell tome has run the exact take-then-use road the
+                        // potion used to crash on ever since, and the transit
+                        // bookkeeping (NoteTransientArrival) was built for that
+                        // road. So the gate is Equip::IsWearOrConsume -- the
+                        // same kinds a right-click on the player's own board
+                        // hands to the engine: potion, food, ingredient, scroll,
+                        // and gear, which is taken and put on in one gesture.
+                        // ★A unit the engine then REFUSES (a quest item it will
+                        // not eat) is not lost: the transit entry expires and
+                        // the rebuild surfaces it on the player's board, where
+                        // an ordinary take would have put it anyway.
+                        // ★Ammo goes by the CELL, as it does on the player's
+                        // board (EquipCountFor): a single arrow in the quiver
+                        // would be a gesture nobody meant.
+                        } else if (useRc && (it.obj->As<RE::TESObjectBOOK>() ||
+                                             Equip::IsWearOrConsume(it.obj))) {
+                            auto* bk = it.obj->As<RE::TESObjectBOOK>();
                             if (it.locked) {   // GI42: the twin is worn
                                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
-                            } else if (auto* bk = it.obj->As<RE::TESObjectBOOK>();
-                                       bk && !bk->TeachesSpell()) {
+                            } else if (bk && !bk->TeachesSpell()) {
                                 // ★READ IN PLACE. A book needs no owner to be
                                 // read, so taking one first would leave a note
                                 // you only meant to glance at sitting in the
@@ -6162,8 +6236,7 @@ namespace
                                 // book's own grammar
                                 NoteShelfBookRead(it.obj, it.uid, it.sig,
                                                   it.spotKey);
-                            } else if (auto* sp = it.obj->As<RE::TESObjectBOOK>()
-                                                      ->GetSpell();
+                            } else if (auto* sp = bk ? bk->GetSpell() : nullptr;
                                        sp &&
                                        RE::PlayerCharacter::GetSingleton() &&
                                        RE::PlayerCharacter::GetSingleton()
@@ -6178,9 +6251,11 @@ namespace
                                 // One unit, taken and then used: the engine can
                                 // only consume from the player's own inventory,
                                 // so passing through it is the only road there
-                                // is, not a shortcut.
+                                // is, not a shortcut. (Ammo: the cell, above.)
                                 g_actingSpot = it.spotKey;   // GI20
-                                RequestTake(it.obj, 1,
+                                RequestTake(it.obj,
+                                            it.obj->Is(RE::FormType::Ammo)
+                                                ? (std::max)(1, it.count) : 1,
                                             it.unit(),
                                             /*useAfter=*/true);
                             }
