@@ -430,13 +430,15 @@ namespace FUI::DualRing
             }
             if (owned <= 1) return Verdict::kAlreadyWorn;
         }
-        // The incoming unit is named here for the reason SharesEffect gives:
-        // unnamed, a same-form pair resolves a_ring through the WORN list --
-        // which is `other` -- so the test compares one ring with itself and
-        // refuses every same-base pair as a duplicate effect.
-        if (ShareAnEffect(other, a_ring, otherName, { a_uid, a_sig })) {
-            return Verdict::kSameEffect;
-        }
+        // ★★THE SAME-EFFECT REFUSAL IS GONE (user decision, 2026-09-13). It
+        // used to stand here -- ShareAnEffect(other, a_ring, ...) answering
+        // kSameEffect -- and it was the feature's founding rule: no stacking a
+        // duplicate. In play it meant two Fortify Heavy Armor rings could not
+        // be worn together, which is a thing the engine itself allows for any
+        // two enchanted items, and the player wanted the engine's answer. Two
+        // rings, any two enchantments, both slots; the helpers that asked the
+        // question are kept for the log and for whoever wants the rule back.
+        (void)otherName;
         if (FreeSlot(p) < 0) return Verdict::kNoFreeSlot;
         // ★An empty first slot is no longer a refusal. Where the ring lands is
         // Wear's decision -- it fills the first slot, or trades places with the

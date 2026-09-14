@@ -79,7 +79,11 @@ namespace FUI::DualRing
         kOk,
         kNotARing,
         kAlreadyWorn,    // this very ring is already on one of the two slots
-        kSameEffect,     // ★the feature's whole point: no stacking a duplicate
+        kSameEffect,     // ★RETIRED 2026-09-13 (user decision): CanWear no longer
+                         // answers this. It was the founding rule -- no stacking
+                         // a duplicate -- and it kept two Fortify Heavy Armor
+                         // rings apart, which the engine itself would allow. The
+                         // value stays so VerdictText and old logs still read.
         kNoCarrier,      // the ESP record is missing
         kNoFreeSlot,
     };

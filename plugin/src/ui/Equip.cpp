@@ -1237,17 +1237,17 @@ namespace FUI::Equip
         if (first && !Grid::IsRing(first)) first = nullptr;
         auto* second = DualRing::Second();
         bool  toSecond = false;
-        // The incoming unit is NAMED in every one of these. Without it a
-        // same-form pair compares the first ring against itself (see
-        // DualRing::SharesEffect) and the answer is "shares" no matter what the
-        // two units actually carry -- which sent every such ring to the first
-        // slot to replace the one already on it.
-        if (first && !second) {
-            toSecond = !DualRing::SharesEffect(first, ringIn, a_uid, a_sig);
-        } else if (first && second) {
-            toSecond = DualRing::SharesEffect(second, ringIn, a_uid, a_sig) &&
-                       !DualRing::SharesEffect(first, ringIn, a_uid, a_sig);
-        }
+        // ★★NO EFFECT TEST ANY MORE (user decision, 2026-09-13; see
+        // DualRing::CanWear). It used to read: join the second slot only when
+        // the incoming ring brings an effect the first does not, and with
+        // both slots taken let the duplicate name its own victim. Two rings
+        // sharing Fortify Heavy Armor could therefore never be worn together.
+        // Now a click JOINS whenever the second slot is free, and with both
+        // slots taken it trades with the first, as every other click always
+        // did. (Dropping on the second slot still targets it directly.)
+        (void)a_uid;
+        (void)a_sig;
+        if (first && !second) toSecond = true;
         // ★[RING] every routed click, decision and state -- the "all my rings
         // ended up worn" report needs the router's own words, not a
         // reconstruction.
@@ -1752,11 +1752,7 @@ namespace FUI::Equip
                             [&](RE::TESBoundObject& o) { return &o == obj; });
                         for (auto& [o2, d2] : inv2) owned = d2.first;
                     }
-                    letGo = owned <= 1 ||
-                            (ringIn && DualRing::WouldDuplicate(ringIn));
-                } else if (ringIn && Grid::IsRing(ringIn) &&
-                           DualRing::WouldDuplicate(ringIn)) {
-                    letGo = true;
+                    letGo = owned <= 1;
                 }
                 if (letGo) {
                     SKSE::log::info("[EQUIP] '{}' takes the first ring slot -- "
