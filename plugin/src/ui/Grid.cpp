@@ -7820,6 +7820,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             if (v.bagKey.empty()) continue;
                             if (v.bagKey == kTrashKey) continue;   // F2: never spill INTO the trash
                             if (IsTabKey(v.bagKey)) continue;      // (1.6) nor into a tab board
+                            // ★★NOR INTO A BAG THAT LIVES ON ANOTHER TAB. The
+                            // bag views carry no notion of where the bag's own
+                            // tile sits, so a quest satchel parked on the QUEST
+                            // board was as good a spill target as a backpack on
+                            // ITEMS -- and being closed, it was reached on the
+                            // second pass. Measured: a loadout switch took 11
+                            // bonus cells off the board and the armour at the
+                            // bottom of it walked into Sylgja's Satchel, one tab
+                            // over, where nobody thinks to look ("I genuinely do
+                            // not see it anywhere"). Overflow lands only in a
+                            // bag whose tile is on the main board; a quest item
+                            // is not storage.
+                            if (const auto bi = bags.find(v.bagKey);
+                                bi != bags.end() && IsTabKey(g_items[bi->second].inBag)) {
+                                continue;
+                            }
                             if (v.carried) continue;   // it is on the cursor, not on the board
                             if ((pass == 0) != v.open) continue;   // pass 0 = open bags
                             // ★A typed bag is not overflow space. Without this a
@@ -7841,6 +7857,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 cand->inBag = v.bagKey;
                                 v.items.push_back(static_cast<int>(cand - g_items.data()));
                                 v.rows = rows;
+                                // ★SAY SO. This was the one move on the board
+                                // that left no line behind: a tile the main
+                                // board can no longer hold (the CW bonus cells
+                                // shrinking under a loadout switch is enough)
+                                // walks into a bag -- a CLOSED one on the
+                                // second pass -- and the only trace was a wash
+                                // on the bag's tile. Reported as "the armour
+                                // disappeared completely".
+                                SKSE::log::info("[GRID] spilled '{}' off the main board "
+                                                "into {} bag '{}' ({}) at [{},{}]",
+                                    cand->obj->GetName() ? cand->obj->GetName() : "?",
+                                    v.open ? "open" : "CLOSED", v.bagName, v.bagKey,
+                                    cand->col, cand->row);
                                 // arrival into a CLOSED bag is invisible — light
                                 // the bag's own tile (the NEW wash: clears on
                                 // hover, exactly the "look in here" it means)
@@ -8179,10 +8208,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // "the background is missing" and "the cell looks empty" are the
             // same state seen from two distances. Name them; a count alone
             // would not say WHICH item, and the report is about one item.
+            // ★And with "!bagdump = 1" (the same switch that dumps the
+            // inventory classification), EVERY tile -- because "I do not see
+            // it anywhere" is a question about a placed tile, and a placed
+            // tile is exactly what the unplaced line above never names.
+            const bool dumpAll = BagFilter::DumpsEnabled();
             for (const auto& it : g_items) {
-                if (it.col >= 0 && !it.overflow) continue;
-                SKSE::log::info("[GRID]   unplaced: '{}' col={} row={} overflow={} "
+                const bool unplaced = it.col < 0 || it.overflow;
+                if (!unplaced && !dumpAll) continue;
+                SKSE::log::info("[GRID]   {}: '{}' col={} row={} overflow={} "
                                 "bag='{}' {}x{} count={}",
+                    unplaced ? "unplaced" : "placed",
                     it.obj ? it.obj->GetName() : "?", it.col, it.row,
                     it.overflow ? 1 : 0, it.inBag, it.mask.w, it.mask.h, it.count);
             }
