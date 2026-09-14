@@ -1738,13 +1738,13 @@ namespace FUI::Equip
             //   - the player owns a single unit of that form, so this equip is
             //     the very ring the carrier holds moving to the first slot,
             //     and leaving the carrier up would show it worn twice; or
-            //   - the incoming ring shares a base effect with the carried one
-            //     (the duplication the whole feature exists to prevent --
-            //     same-form enchanted pairs land here too, since one form is
-            //     one enchantment).
+            //   - (retired 2026-09-13, user decision) ...or the incoming ring
+            //     shared a base effect with the carried one. The same-effect
+            //     rule is gone everywhere (DualRing::CanWear), so a duplicate
+            //     enchantment on the first slot no longer knocks the carried
+            //     ring off the second.
             if (auto* second = DualRing::Second(); second) {
-                auto* ringIn = obj->As<RE::TESObjectARMO>();
-                bool  letGo = false;
+                bool letGo = false;
                 if (second == obj) {
                     int owned = 0;
                     {
