@@ -1767,6 +1767,103 @@ namespace FUI::Wheeler
 
         struct InputLock
         {
+            // ★★★A PRESS BORN UNDER THE MASK IS NEVER DELIVERED AT ALL.
+            //
+            // Reported: on a pad, LB/RB walk the board strip -- and RB also
+            // fires whatever sits in the shout slot (a Beast Form power, in
+            // the report), every time, with the grid open under "!nopause".
+            // The mask was up, this hook was blanking the button, and the
+            // power went off anyway.
+            //
+            // Blanking is the wrong tool for this press. Blanking zeroes the
+            // VALUE and hands the event on, on the theory that a handler shown
+            // "not pressed" does nothing. But a handler is shown the whole
+            // event -- value, held time, and the user-event NAME it was
+            // resolved to -- and what it does with a zero value is its own
+            // business: a release-driven handler reads value==0 with time on
+            // it as the player letting go (and casts on letting go), and a
+            // handler that keys on the name alone never looks at the value.
+            // Zeroing the held time as well (the first attempt at this) did
+            // not close it either. There is no shape of numbers that every
+            // handler agrees means "nothing happened".
+            //
+            // There IS a shape of CHAIN that means it: the event not being
+            // there. So a press that arrives while the mask holds is unlinked
+            // from the event list for the duration of the engine's call --
+            // PlayerControls walks a list it was never given the event on --
+            // and linked straight back afterwards, so every sink after this
+            // one (including ours, reading the pad for the board) still sees
+            // the complete chain. Unlink-call-relink, the same discipline as
+            // blank-call-restore, one level up.
+            //
+            // ★It cannot be done to EVERY masked button, and the reason is the
+            // one the header note gives for muting rather than skipping: a
+            // button the player was already holding when the grid opened has
+            // to read as released, so the handler holding it can tidy up. So
+            // the two are told apart by when the press began. Every button's
+            // pressed/released state is tracked on every frame (s_held, cheap:
+            // a handful of events a frame); a pressed event under the mask
+            // for a button NOT in that set is a press being born, and that
+            // press -- down, every held frame, and its release -- is hidden.
+            // A button that was already in the set is a hold from before the
+            // mask, and gets the old treatment: value blanked, handed on, so
+            // it reads as let go.
+            //
+            // ★The hiding outlives the mask on purpose. Close the grid with
+            // the button still down and the engine would otherwise meet a
+            // HELD with no DOWN before it and an UP after. An entry is only
+            // cleared by its own release, so a press the mask swallowed stays
+            // swallowed through its release, wherever that release lands. A
+            // DOWN (0s held) for a button still marked born means its release
+            // was missed; that press is the player's, and it is let through.
+            // ★Input-thread only, like everything else in this hook; no lock.
+            struct Key { std::uint32_t dev, code; };
+            static inline Key  s_held[32]{};    // buttons currently down, any device
+            static inline int  s_heldN = 0;
+            static inline Key  s_born[32]{};    // presses that began under the mask
+            static inline int  s_bornN = 0;
+
+            [[nodiscard]] static int Find(const Key* a_list, int a_n, Key a_k)
+            {
+                for (int i = 0; i < a_n; ++i) {
+                    if (a_list[i].dev == a_k.dev && a_list[i].code == a_k.code) return i;
+                }
+                return -1;
+            }
+
+            static void Drop(Key* a_list, int& a_n, int a_i) { a_list[a_i] = a_list[--a_n]; }
+
+            // Keeps both memories current for this event and answers "hide
+            // it from PlayerControls?". Runs for EVERY button event, masked
+            // or not, so the held set is complete when the mask goes up.
+            [[nodiscard]] static bool Hide(const RE::ButtonEvent* a_b, bool a_masked)
+            {
+                const Key k{ static_cast<std::uint32_t>(a_b->GetDevice()), a_b->GetIDCode() };
+                const int h = Find(s_held, s_heldN, k);
+                int       b = Find(s_born, s_bornN, k);
+                if (a_b->IsPressed()) {
+                    // A fresh DOWN closes any stale born entry: the release
+                    // it was waiting for never came (see above).
+                    if (b >= 0 && a_b->IsDown()) { Drop(s_born, s_bornN, b); b = -1; }
+                    const bool fresh = h < 0 || a_b->IsDown();
+                    if (h < 0 && s_heldN < 32) s_held[s_heldN++] = k;
+                    if (b >= 0) return true;              // mid-press, still hidden
+                    if (!a_masked || !fresh) return false; // a hold from before the mask
+                    if (s_bornN < 32) {
+                        s_born[s_bornN++] = k;
+                        SKSE::log::info("[INPUT] press born under the mask hidden from "
+                                        "PlayerControls: '{}' (dev {} code 0x{:X})",
+                                        a_b->QUserEvent().c_str(), k.dev, k.code);
+                        return true;
+                    }
+                    return false;   // no room: blanked like any other, not hidden
+                }
+                // a release
+                if (h >= 0) Drop(s_held, s_heldN, h);
+                if (b >= 0) { Drop(s_born, s_bornN, b); return true; }   // hidden to the end
+                return false;
+            }
+
             // ★★Blank, call, put back -- the same discipline as MenuLock and for
             // the same reason. The event is ONE object shared down the whole
             // sink chain: leaving it zeroed would silence every listener after
@@ -1779,9 +1876,17 @@ namespace FUI::Wheeler
             {
                 struct Saved { RE::ButtonEvent* b; float v; };
                 struct SavedT { RE::ThumbstickEvent* t; float x, y; };
+                struct Hidden { RE::InputEvent* prev; RE::InputEvent* e; };
                 Saved  saved[16]{};
                 SavedT savedT[4]{};
-                int    n = 0, nt = 0;
+                Hidden hidden[16]{};
+                int    n = 0, nt = 0, nh = 0;
+                // The chain PlayerControls will be given. Unlinking edits the
+                // `next` of the event BEFORE the hidden one, or this head when
+                // the hidden one is first; the hidden event's own `next` is
+                // left intact, which is what makes relinking a one-liner.
+                RE::InputEvent* head = a_event ? *a_event : nullptr;
+                const bool masked = UIRoot::IsGameplayMasked();
                 if (g_open && a_event) {
                     for (auto* e = *a_event; e; e = e->next) {
                         // ★★★BUTTONS, plus the LEFT stick. Mouse and RIGHT
@@ -1808,6 +1913,7 @@ namespace FUI::Wheeler
                         }
                         auto* b = e->AsButtonEvent();
                         if (!b) continue;
+                        (void)Hide(b, false);   // bookkeeping only; the wheel blanks
                         // ★Never blank what cannot be put back. If the save
                         // slots run out, this event is left alone -- a button
                         // muted without a restore stays muted for every sink
@@ -1817,22 +1923,38 @@ namespace FUI::Wheeler
                         saved[n++] = { b, b->Value() };
                         b->GetRuntimeData().value = 0.0f;
                     }
-                } else if (a_event && UIRoot::IsGameplayMasked()) {
+                } else if (a_event) {
                     // ★The grid's half (see the note above the helpers). An
                     // `else`, not a second pass: with the wheel up every button
                     // is already blanked, and blanking one twice would restore
                     // the zero rather than the value.
                     // ★No name filter any more -- every button, because there
                     // is no gameplay button we want while the board is up.
-                    for (auto* e = *a_event; e; e = e->next) {
+                    // Presses born under the mask are unlinked (Hide, above);
+                    // holds from before it are blanked and handed on.
+                    RE::InputEvent* prev = nullptr;
+                    for (auto* e = head; e; e = e->next) {
                         auto* b = e->AsButtonEvent();
-                        if (!b) continue;
+                        if (!b) { prev = e; continue; }
+                        if (Hide(b, masked) && nh < 16) {
+                            hidden[nh++] = { prev, e };
+                            if (prev) prev->next = e->next; else head = e->next;
+                            continue;   // prev stays: e is no longer in the chain
+                        }
+                        prev = e;
+                        if (!masked) continue;
                         if (n >= 16) continue;   // no blank without a restore
                         saved[n++] = { b, b->Value() };
                         b->GetRuntimeData().value = 0.0f;
                     }
                 }
-                const auto r = _ProcessEvent(a_this, a_event, a_src);
+                const auto r = _ProcessEvent(a_this, a_event ? &head : a_event, a_src);
+                // Relink in reverse, so each restored link lands on a chain
+                // that already has everything after it back in place.
+                for (int i = nh - 1; i >= 0; --i) {
+                    if (hidden[i].prev) hidden[i].prev->next = hidden[i].e;
+                    else                head = hidden[i].e;
+                }
                 for (int i = 0; i < n; ++i) saved[i].b->GetRuntimeData().value = saved[i].v;
                 for (int i = 0; i < nt; ++i) {
                     savedT[i].t->xValue = savedT[i].x;
