@@ -1895,6 +1895,57 @@ namespace FUI::LootBarter
         }
     }
 
+    // ★★★THE CONVERSATION BEHIND A SHOP MUST NOT TIME OUT WHILE THE BOARD IS UP.
+    //
+    // Reported: browse a merchant's shelf for too long and the NPC ends the
+    // dialogue as if the player had never answered. A shop is reached THROUGH
+    // a conversation: the engine closes the DialogueMenu a frame before
+    // BarterMenu opens and puts it back the moment BarterMenu closes -- which
+    // is the moment our grid opens in its place -- so the conversation is
+    // live under the board for the whole session. Vanilla's BarterMenu pauses
+    // the game, so nothing ever ran there. Under "!nopause" everything runs.
+    //
+    // What runs is the speaker's own patience. HighProcessData carries
+    // awarePlayerTimer, a countdown the engine decrements every frame the NPC
+    // is in dialogue with the player; at zero the NPC says goodbye and the
+    // menu shuts. Skyrim Souls RE (Vermunds) meets exactly this with
+    // its unpaused menus, and its answer is the one used here: hold the
+    // timer at 120 s for as long as a menu stands between the player and the
+    // conversation (DialogueMenuEx::UpdateAutoCloseTimer_Hook). It hooks the
+    // decrement; we do not need to. Our tick runs every unpaused frame from
+    // the PlayerCharacter::Update hook, and a value written every frame
+    // cannot be counted down to zero in between, whichever side of the
+    // engine's own write it lands on.
+    //
+    // ★Only a session a conversation is holding open: a merchant (kBarter),
+    // or a follower's pack -- loot mode with a LIVING actor for a partner. A
+    // chest or a corpse has no speaker, and a pickpocket mark is not
+    // talking to us. And only while the world is live: a paused game
+    // decrements nothing, so there is nothing to hold.
+    void KeepConversationAlive()
+    {
+        auto* partner = Partner();
+        auto* actor = partner ? partner->As<RE::Actor>() : nullptr;
+        if (!actor || actor->IsDead()) return;
+        if (g_mode != Mode::kBarter && !IsLootMode(g_mode)) return;
+        if (auto* ui = RE::UI::GetSingleton(); !ui || ui->GameIsPaused()) return;
+        auto* proc = actor->GetActorRuntimeData().currentProcess;
+        auto* high = proc ? proc->high : nullptr;
+        if (!high) return;
+        constexpr float kHold = 120.0f;   // Skyrim Souls' figure
+        if (high->awarePlayerTimer < kHold) {
+            static bool s_said = false;
+            if (!s_said) {
+                s_said = true;
+                SKSE::log::info("[BARTER] holding '{}'s dialogue timer at {:.0f}s while "
+                                "the board is up (was {:.1f}s)",
+                                actor->GetName() ? actor->GetName() : "?",
+                                kHold, high->awarePlayerTimer);
+            }
+            high->awarePlayerTimer = kHold;
+        }
+    }
+
     void ProcessTransfers()
     {
         if (g_xfer.empty()) return;

@@ -5767,6 +5767,7 @@ namespace FUI::UIRoot
         // back (sold, dropped, taken by a script) and stands the carrier down.
         DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
+        LootBarter::KeepConversationAlive();   // a live-world shop: the NPC waits
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
         GoldCoins::Tick();          // G1: mirror the gold ledger into coins

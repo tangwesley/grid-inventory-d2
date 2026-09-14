@@ -139,6 +139,11 @@ namespace FUI::LootBarter
                           const std::string& a_srcKey = {},
                           bool a_fav = false, int a_xlIdx = -1);                         // (reverse-pickpocket)
     void ProcessTransfers();   // UIRoot::Tick
+    // Holds the speaker's dialogue countdown (HighProcessData::awarePlayerTimer)
+    // while a merchant's shelf or a follower's pack is open on a live world,
+    // so the NPC does not end the conversation as unanswered. UIRoot::Tick;
+    // no-op in every other mode and whenever the game is paused.
+    void KeepConversationAlive();
 
     // ★(1.3.0) the gold riding the CARRIED shelf slot, or -1 when the
     // current carry did not come off a shelf. A pouch lifted inside the
