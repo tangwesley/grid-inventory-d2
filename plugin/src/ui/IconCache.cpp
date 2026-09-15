@@ -749,6 +749,31 @@ namespace FUI
         return a_obj;
     }
 
+    // Which body the engine dresses right now. Read live, never cached:
+    // showracemenu can change the answer mid-session (main.cpp's SexSuffix
+    // makes the same choice for the same reason). Male when nobody is there
+    // to ask -- see the "THIRD key" note in ModelSlot32.
+    [[nodiscard]] static bool PlayerIsFemale()
+    {
+        auto* pc = RE::PlayerCharacter::GetSingleton();
+        auto* base = pc ? pc->GetActorBase() : nullptr;
+        return base && base->GetSex() == RE::SEX::kFemale;
+    }
+
+    // Two ground models, BOTH present and DIFFERENT: the picture depends on
+    // who is wearing it. One side empty is one picture (the engine shows the
+    // side that exists to everybody -- and Capturable fills the gap anyway).
+    // Same predicate as main.cpp's SexSplitArmour and the shipping export's
+    // IsSexSpecific; the three must not disagree about a record.
+    [[nodiscard]] static bool SexSplitRecord(RE::TESBoundObject* a_obj)
+    {
+        auto* armo = a_obj ? a_obj->As<RE::TESObjectARMO>() : nullptr;
+        if (!armo) return false;
+        const char* m = armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
+        const char* f = armo->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
+        return m && *m && f && *f && _stricmp(m, f) != 0;
+    }
+
     static std::uint32_t ModelSlot32(RE::TESBoundObject* a_in)
     {
         // Key the PICTURE, not the asker -- see CaptureSourceOf.
@@ -795,7 +820,40 @@ namespace FUI
             }
         }
         if (!p || !*p) return a_obj->GetFormID();
-        if (altCount > 0) return a_obj->GetFormID();   // same nif, other pixels
+        if (altCount > 0) {
+            // Same nif, other pixels: the FORM is the picture's name here.
+            //
+            // ★★★BUT A FORM HAS NO SEX. The sex fold below lives on the path
+            // hash, and this early return walked past it -- so every armour
+            // with an alternate-texture swap AND two different ground models
+            // was one key for both bodies, whoever photographed it first
+            // answering for everyone. That is 39 records in Skyrim.esm alone,
+            // and they are the clothes: every enchanted mage robe, hood and
+            // boot variant, the barkeeper, blacksmith, merchant and farm
+            // clothes variants, the wedding dress. Reported on a male
+            // character: the shipped pak's female barkeeper bodice under the
+            // male's key, because the author's character wore the other body.
+            //
+            // ★The FormID is folded rather than XOR'd with a sex byte: an
+            // XOR would land the key on some OTHER record's FormID. Folding
+            // moves these records off the plain FormID space entirely, so the
+            // old sexless entries become orphans (never read, swept at the
+            // next compaction) and each body captures its own -- the same
+            // way the spell salt retired the magenta captures.
+            // ★Only the split records move. A cloak with a texture swap and
+            // one shared ground model keeps its FormID key, and the hundreds
+            // already in every pak stay found.
+            if (p2 && *p2 && _stricmp(p, p2) != 0) {
+                std::uint32_t h = 2166136261u;
+                const auto id = a_obj->GetFormID();
+                for (int i = 0; i < 4; ++i) {
+                    h = (h ^ ((id >> (8 * i)) & 0xFFu)) * 16777619u;
+                }
+                h = (h ^ (PlayerIsFemale() ? 0xF1u : 0x4Du)) * 16777619u;
+                return h;
+            }
+            return a_obj->GetFormID();
+        }
         std::uint32_t h = 2166136261u;
         const auto fold = [&h](const char* a_path) {
             const char* s = a_path;
@@ -849,10 +907,7 @@ namespace FUI
             // reads the male path -- the same rule the model-level def map
             // follows (main.cpp, "Sex-suffixed lines do not donate").
             if (_stricmp(p, p2) != 0) {
-                auto* pc = RE::PlayerCharacter::GetSingleton();
-                auto* base = pc ? pc->GetActorBase() : nullptr;
-                const bool female = base && base->GetSex() == RE::SEX::kFemale;
-                h = (h ^ (female ? 0xF1u : 0x4Du)) * 16777619u;
+                h = (h ^ (PlayerIsFemale() ? 0xF1u : 0x4Du)) * 16777619u;
             }
         }
         // ★★1.0.5 — the base-form ENCHANTMENT deliberately does NOT join this
@@ -954,6 +1009,14 @@ namespace FUI
 
     std::uint64_t IconCache::LegacyKeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
     {
+        // ★A pre-migration entry is keyed by FORM, and a form has no sex. For
+        // a record whose two ground models differ, that entry is whichever
+        // body photographed it -- exactly the picture the sex fold exists to
+        // keep away from the other body -- so there is nothing to fall back
+        // to. Answering the CURRENT key makes every caller's "legacy != key"
+        // guard skip the lookup, and the sexless entry stays where the
+        // texture-swap re-key already left it: on disk, never read.
+        if (SexSplitRecord(a_obj)) return KeyFor(a_obj, a_def);
         return (static_cast<std::uint64_t>(a_obj->GetFormID()) << 32) | RotHash(a_def);
     }
 
