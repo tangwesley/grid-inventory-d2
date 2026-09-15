@@ -13568,6 +13568,62 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             a_s = a_s.substr(b, a_s.find_last_not_of(" \t\r\n") - b + 1);
         }
 
+        // The learned marker in front of an ENCHANTMENT line (user request,
+        // 2026-09-13): a solid bullet (U+2022) when the player already knows
+        // this enchantment, a hollow one (U+25E6) when they do not -- the
+        // small pair, on purpose: a full-size circle (U+25CB) read as loud as
+        // the text it was labelling.
+        //
+        // ★WHAT "KNOWN" IS. Disenchanting teaches the BASE enchantment, not
+        // its effects: the engine stamps kKnown (form flag bit 6) on the ENCH
+        // record the arcane enchanter lists, which is data.baseEnchantment
+        // when the item's own ENCH is a variant ("Ring of Health" -> "Fortify
+        // Health") and the item's ENCH itself when it has no base. That is why
+        // Fiery Soul Trap must be learned on its own even when Fire Damage and
+        // Soul Trap are both known -- the flag was never per MGEF. The first
+        // cut of this read the MGEF's flag and every item in the pack came
+        // back unlearned (reported). The MGEF bit is kept as a last resort
+        // only, for a runtime-built enchantment that has neither.
+        //
+        // Both glyphs sit inside the Segoe UI Symbol range the atlas already
+        // merges for the gear and the pencil (UIRoot::BuildFonts).
+        // Enchantments only: a tome's spell and a potion's effects are not
+        // things you learn at an enchanter, so their lines stay bare.
+        [[nodiscard]] bool EnchantKnown(const RE::EnchantmentItem* a_ench, const RE::Effect* a_e)
+        {
+            constexpr std::uint32_t kKnown = RE::TESForm::RecordFlags::kKnown;
+            if (a_ench) {
+                if (a_ench->GetFormFlags() & kKnown) return true;
+                if (const auto* base = a_ench->data.baseEnchantment;
+                    base && (base->GetFormFlags() & kKnown)) {
+                    return true;
+                }
+            }
+            const auto* mgef = a_e ? a_e->baseEffect : nullptr;
+            return mgef && (mgef->GetFormFlags() & kKnown) != 0;
+        }
+
+        [[nodiscard]] const char* EnchantMark(const RE::EnchantmentItem* a_ench, const RE::Effect* a_e)
+        {
+            // ★Once per enchantment record, so a wrong reading can be argued
+            // with from the log rather than guessed at again: which of the
+            // three flags is set, and on which form.
+            if (a_ench) {
+                static std::set<RE::FormID> s_said;
+                if (s_said.size() < 64 && s_said.insert(a_ench->GetFormID()).second) {
+                    const auto* base = a_ench->data.baseEnchantment;
+                    const auto* mgef = a_e ? a_e->baseEffect : nullptr;
+                    SKSE::log::info("[ENCH] '{}' {:08X} flags={:08X} base={:08X} baseFlags={:08X} "
+                                    "mgef={:08X} mgefFlags={:08X} -> {}",
+                                    a_ench->GetName(), a_ench->GetFormID(), a_ench->GetFormFlags(),
+                                    base ? base->GetFormID() : 0u, base ? base->GetFormFlags() : 0u,
+                                    mgef ? mgef->GetFormID() : 0u, mgef ? mgef->GetFormFlags() : 0u,
+                                    EnchantKnown(a_ench, a_e) ? "known" : "unknown");
+                }
+            }
+            return EnchantKnown(a_ench, a_e) ? "• " : "◦ ";
+        }
+
         // ★ONE effect line, produced as TEXT rather than drawn. The tooltip
         // prints these with a widget; the SHIFT-compare card paints on a
         // foreground draw list and needs the string. The RULE for which
@@ -13997,7 +14053,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     for (auto* e : ench->effects) {
                         std::string line;
                         if (EffectText(e, a_survivalOn, line)) {
-                            add(std::move(line), Theme::TipGood(), true);
+                            add(EnchantMark(ench, e) + line, Theme::TipGood(), true);
                         }
                     }
                     // charge (weapons drain per hit; armour enchants don't)
@@ -14373,9 +14429,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // Once per tooltip, not once per effect line — the answer cannot change
         // between two lines of the same card.
         const bool survivalOn = SurvivalModeOn();
-        auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col) {
+        auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col, const char* a_prefix = "") {
             std::string line;
             if (!EffectText(a_e, survivalOn, line)) return;
+            if (a_prefix && a_prefix[0]) line.insert(0, a_prefix);
             // Descriptions are sentences — wrap them at the same width as the
             // flavour text below rather than stretching the tooltip.
             ImGui::PushTextWrapPos(300.0f * Theme::Scale());
@@ -14666,7 +14723,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             if (ench) {
-                for (auto* e : ench->effects) effectLine(e, Theme::TipGood());
+                for (auto* e : ench->effects) effectLine(e, Theme::TipGood(), EnchantMark(ench, e));
                 // charge (weapons drain per hit; armour enchants don't)
                 if (a_obj->Is(RE::FormType::Weapon) && maxCharge > 0) {
                     float cur = static_cast<float>(maxCharge);
