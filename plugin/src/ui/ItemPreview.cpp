@@ -70,6 +70,117 @@ namespace FUI
             return false;
         }
 
+        // ★★★GI84: THE TWO FIELDS NO GUARD HERE EVER READ.
+        //
+        // The two guards above ask about the MODEL half of an entry, and both
+        // of them reach it THROUGH spModel -- so once either has answered,
+        // spModel is known to be mapped and readable. The head of the entry is
+        // not: itemBase (+00) and modelObj (+08) are raw form pointers, and
+        // FindCurrentModel's note is the measurement saying those can be dead
+        // while everything around them still looks perfect.
+        //
+        // ★Reporter CTD (2026-09-18, "a few minutes after using AddItem"):
+        //     SkyrimSE.exe+088867D     mov rax, [rcx]   <- a vtable load
+        //     SkyrimSE.exe+088786B     add rbx, 0x20    <- the caller's stride
+        //     GridInventory.dll+70157  TeardownWhenIdle (ItemPreview.cpp:721)
+        //     GridInventory.dll+6DB69  End (ItemPreview.cpp:685)
+        // 0x20 is sizeof(LoadedInventoryModel), so the engine was stepping
+        // loadedModels one entry at a time and making a virtual call on
+        // something it read out of one -- reached from OUR End3D, on the direct
+        // close path (End -> TeardownWhenIdle, no deferral), with both guards
+        // above having just passed TWICE over that same array. Every spModel in
+        // it was therefore mapped and had geometry; the pointer the engine
+        // could not use was not one this side had ever looked at.
+        //
+        // ★A mass AddItem is the shape that finds it: every added item is
+        // another precache request, so the array churns for minutes on end.
+        //
+        // ★Still a GUARD, NOT A DIAGNOSIS -- the crash log names no field and
+        // there is no repro here. What it buys is that the engine is never
+        // handed an entry this side could not walk either.
+        bool FormIsDead(RE::TESForm* a_form)
+        {
+            if (!a_form) return false;   // an empty slot is not a dead one
+            const auto raw = reinterpret_cast<std::uintptr_t>(a_form);
+            // a live form is heap-allocated and 8-aligned; a value that is
+            // neither cannot be one, and handing THAT to the RTTI would be the
+            // very crash this is written to avoid
+            if (raw < 0x10000 || (raw & 7u) != 0) return true;
+            try {
+                // the same vtable read the engine is about to make, wrapped for
+                // the same reason FindCurrentModel wraps its cast: on a
+                // recycled object the RTTI machinery throws instead of answering
+                (void)skyrim_cast<RE::TESBoundObject*>(a_form);
+            } catch (...) {
+                return true;
+            }
+            // ...and the registry has the last word, because the MEMORY can
+            // outlive the form that used to be in it, vtable and all -- and a
+            // created object's id is handed out again afterwards (Diablo In
+            // Skyrim's release path documents that reuse from the other side).
+            return RE::TESForm::LookupByID(a_form->GetFormID()) != a_form;
+        }
+
+        // ★The engine's own root node for the inventory scheme. GI83's finding
+        // was a close that called End3D on a scene the engine had already taken
+        // apart, and no log ever said whether the scene was still there. Read
+        // and printed, and deliberately NOT used as a gate: what a null here
+        // means for a scene we still believe we hold has not been measured, and
+        // guessing it wrong strands the scene (GI73) for the whole session.
+        std::uintptr_t InventorySceneRoot()
+        {
+            auto* sm = RE::UI3DSceneManager::GetSingleton();
+            if (!sm) return 0;
+            constexpr auto idx = static_cast<std::size_t>(RE::INTERFACE_LIGHT_SCHEME::kInventory);
+            return reinterpret_cast<std::uintptr_t>(sm->menuObjects[idx].get());
+        }
+
+        // Entries the engine's own teardown could not walk, taken out of its
+        // way -- and one line naming every entry either way, because the
+        // reporter log could be read no further than "something in an entry"
+        // and the entries themselves had never been in any log.
+        //
+        // ★ONLY in the breath before End3D. The array is about to be emptied
+        // whatever happens, so dropping an entry here costs a model that
+        // unloads a moment early even when the call is wrong, while leaving one
+        // in costs the session when it is right. Anywhere else the same edit
+        // would be the engine losing track of a model still on screen.
+        //
+        // ★DROPPED, not skipped. Skipping End3D leaves a scene outstanding and
+        // GI73 measured what that looks like: the item and the player drawn,
+        // and no world behind them. A dead pointer never heals, so a skip would
+        // not cost one close -- it would cost every close after it.
+        int DropDeadEntriesBeforeTeardown(RE::Inventory3DManager* a_mgr, const char* a_why)
+        {
+            auto& models  = a_mgr->GetRuntimeData().loadedModels;
+            int   dropped = 0;
+            for (std::size_t i = models.size(); i-- > 0;) {
+                auto&      lm       = models[i];
+                const bool baseDead = FormIsDead(lm.itemBase);
+                const bool objDead  = FormIsDead(lm.modelObj);
+                if (baseDead || objDead) {
+                    SKSE::log::warn("[PREVIEW] {}: loadedModels[{}] is not walkable -- "
+                                    "itemBase {:X} {}, modelObj {:X} {}, spModel {:X} -- "
+                                    "dropped before End3D (GI84)",
+                        a_why, i, reinterpret_cast<std::uintptr_t>(lm.itemBase),
+                        baseDead ? "DEAD" : "ok",
+                        reinterpret_cast<std::uintptr_t>(lm.modelObj),
+                        objDead ? "DEAD" : "ok",
+                        reinterpret_cast<std::uintptr_t>(lm.spModel.get()));
+                    models.erase(models.begin() + i);
+                    ++dropped;
+                    continue;
+                }
+                SKSE::log::info("[PREVIEW] {}: loadedModels[{}] base [{:08X}] obj [{:08X}] "
+                                "spModel {:X} r {:.1f}",
+                    a_why, i, lm.itemBase ? lm.itemBase->GetFormID() : 0u,
+                    lm.modelObj ? lm.modelObj->GetFormID() : 0u,
+                    reinterpret_cast<std::uintptr_t>(lm.spModel.get()),
+                    lm.spModel ? lm.spModel->worldBound.radius : -1.0f);
+            }
+            return dropped;
+        }
+
         // ★★1.0.5 — the capture rig, measured from the shipped scene:
         //   item (-12.4,-500,-26.25)   lamp (100,-350,100)   |d| = 226
         // Read as spherical about the item, with the camera at the origin
@@ -717,6 +828,9 @@ namespace FUI
             });
             return;
         }
+        // ★GI84: nothing the engine cannot walk goes into End3D. See FormIsDead.
+        const int     dead = DropDeadEntriesBeforeTeardown(mgr, "close");
+        const auto    root = InventorySceneRoot();
         Inv3D::End3D(mgr);
         m_scene3D = false;   // GI73: the pair is closed; the next open opens a scene
         // ★GI73: ALWAYS, not only when it was deferred. A successful teardown
@@ -725,7 +839,9 @@ namespace FUI
         // the unbalanced pair could not be seen in any of the three reporter
         // logs that went past it. One line per menu close buys the whole
         // question back.
-        SKSE::log::info("[PREVIEW] End3D (deferred {} tasks)", a_tries);
+        SKSE::log::info("[PREVIEW] End3D (deferred {} tasks, {} dead entr{} dropped, "
+                        "scene root {:X})",
+            a_tries, dead, dead == 1 ? "y" : "ies", root);
     }
 
     RE::NiAVObject* ItemPreview::FindCurrentModel() const
@@ -875,6 +991,7 @@ namespace FUI
         // written rather than left implied because the two calls have to move
         // together: dropping the Begin3D here without clearing the flag would
         // leave Begin() adopting a scene that is no longer there.
+        DropDeadEntriesBeforeTeardown(mgr, "scene reset");   // GI84
         Inv3D::End3D(mgr);
         Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
         m_scene3D = true;
