@@ -529,6 +529,51 @@ namespace FUI::Theme
     // reasoning, the measurements and why they were misleading are recorded at
     // the implementation in Theme.cpp. Read that before trying a third time.
     [[nodiscard]] ImU32 OccupiedGround();
+    // ★★RARITY MARK — WHERE the rarity colour goes, and it is the only thing
+    // this switch moves. Off (the default) is the corner wedge that shipped;
+    // on paints the item's own ground in the same colour instead.
+    //
+    // The wedge's argument is written out at Grid::DrawRarityWedge and still
+    // holds: a small accent sits outside the skin's palette without looking
+    // foreign, and the icon keeps its ground. But a board read at arm's length
+    // on a 1x1 tile gives that accent about 10 pixels, and a player who sorts
+    // by rarity wants the colour to be the FIRST thing seen, not the smallest.
+    // Both are right for different players, which is what makes it a setting
+    // rather than a decision. How strongly the ground is painted is the
+    // player's too — see RarityGroundA below.
+
+    //
+    // ★GLOBAL, not per skin, unlike every other DISPLAY row. Those tune how a
+    // look is rendered and a skin can want its own number; this one answers
+    // "how loudly should the board state rarity", which is about the player's
+    // eyes and the way they play, not about the wallpaper. Storing it per skin
+    // would mean re-choosing it on every skin chip.
+    [[nodiscard]] bool RarityGround();
+    void SetRarityGround(bool a_on);
+
+    // ★★...AND HOW STRONGLY, 0..1, because there is no one right answer and
+    // the history above is what proves it. The opaque ground of 1.0.5 was too
+    // loud and the wedge that replaced it was too small, and both of those are
+    // this number at its extremes. It is a slider rather than a constant so
+    // the choice belongs to the player and their skin, not to this file.
+    //
+    // ★The default is DELIBERATELY FAINT — a tinted ground, not a coloured
+    // tile. At 0.10 the cell is unmistakably warm or cool once you look at it
+    // while the icon, the count badge and the marker tray keep the contrast
+    // they were designed with, so turning the setting on never costs
+    // legibility; anyone who wants the loud version drags the slider and sees
+    // it happen. Starting at the loud end would have meant every player who
+    // tried the setting once judged it at its worst.
+    //
+    // ★It SCALES the colour's own alpha rather than replacing it, so an
+    // extension's deliberately faint tier stays fainter than the rest of its
+    // palette. 0 means the ground is not drawn at all, which is a legitimate
+    // way to ask for no rarity mark anywhere.
+    inline constexpr float kDefRarityGroundA = 0.10f;
+    [[nodiscard]] float RarityGroundA();
+    void SetRarityGroundA(float a_a);
+
+
 
     // ★Does this skin want the item shadow drawn LIGHT instead of black? A
     // black shadow separates a sprite from a pale board; on a dark one it is

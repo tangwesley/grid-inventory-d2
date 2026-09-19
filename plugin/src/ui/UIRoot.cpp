@@ -2311,7 +2311,73 @@ namespace FUI::UIRoot
             ImGui::PopStyleVar();
         }
 
+        // ★★RARITY MARK — Corner / Background: where an item's rarity colour
+        // goes. The wedge is the accent that shipped; the ground is the same
+        // colour under the whole item, for a board that is read at arm's
+        // length or sorted by rarity. Nothing else moves — the colours, the
+        // relic rule and the extension tint are one function either way
+        // (Grid::RarityColour).
+        //
+        // ★It sits in DISPLAY under ICON STYLE and above the shadow rows: those
+        // three all answer "what does a tile look like", and this one changes
+        // the tile more than any of them.
+        // ★No rebuild on the flip. The board asks Theme at draw time, so the
+        // next frame already has it — unlike the icon style above, which
+        // changes which sprite a tile resolves to.
+        void RowRarityMark(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::RarityMarkLabel);
+            ImGui::PushID("raritymark");
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            RightAlign(BtnRowW({ Lang::T(Lang::Str::RarityMarkWedge),
+                                 Lang::T(Lang::Str::RarityMarkGround) }));
+            for (int ground : { 0, 1 }) {
+                const bool on = Theme::RarityGround() == (ground == 1);
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
+                }
+                if (Sfx::Button(Lang::T(ground ? Lang::Str::RarityMarkGround
+                                               : Lang::Str::RarityMarkWedge))) {
+                    Theme::SetRarityGround(ground == 1);
+                    WinManager::GetSingleton()->Save();
+                }
+                if (on) ImGui::PopStyleColor(2);
+                if (ground == 0) ImGui::SameLine(0.0f, 6.0f * a_c.S);
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopID();
+        }
+
+        // ★★RARITY STRENGTH — how hard the ground is painted, 0 to 100%.
+        //
+        // ★IT APPEARS ONLY WHILE BACKGROUND IS PICKED, the way DEFERRED ICONS
+        // appears only when something is owed. A strength slider under a board
+        // drawing corner wedges controls nothing, and a control that does
+        // nothing is worse than a missing one: the player drags it, sees no
+        // change, and concludes the setting above is broken too. Showing up
+        // directly beneath the chip that turned it on explains itself.
+        //
+        // ★Stored 0..1 and shown as a percentage, exactly as SHADOW OPACITY is
+        // — the conversion lives here so no /100 can ever reach the draw path.
+        void RowRarityStrength(const SettingsCtx& a_c)
+        {
+            if (!Theme::RarityGround()) return;
+            SettingLabel(a_c, Lang::Str::RarityStrengthLabel);
+            RightAlign(a_c.trackW);
+            float v = Theme::RarityGroundA() * 100.0f;
+            if (SettingSlider("##raritystrength", &v, 0.0f, 100.0f, a_c.trackW,
+                              Theme::kDefRarityGroundA * 100.0f, "%.0f%%")) {
+                Theme::SetRarityGroundA(v / 100.0f);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                WinManager::GetSingleton()->Save();
+            }
+        }
+
         // ★★★1.0.5 ITEM SHADOW — three rows, and they are the three controls a
+
+
         // drop shadow has in every tool that has ever had one: DISTANCE, BLUR,
         // OPACITY. What stood here before was a strength slider plus a
         // Soft/Sharp pair, and that pair was an implementation detail dressed
@@ -2678,8 +2744,12 @@ namespace FUI::UIRoot
         // ★1.0.5: the GLOW STYLE row (silhouette / radial) is gone with the
         // halo it selected between. What is left is the drop shadow, which
         // has one shape and only a strength.
-        constexpr SettingsRowFn kRowsDisplay[] = { RowSkin, RowIconStyle, RowShadowDist,
-                                                   RowShadowBlur, RowShadowOpac, RowIconGain };
+        constexpr SettingsRowFn kRowsDisplay[] = { RowSkin, RowIconStyle,
+                                                   RowRarityMark, RowRarityStrength,
+                                                   RowShadowDist, RowShadowBlur,
+                                                   RowShadowOpac, RowIconGain };
+
+
         constexpr SettingsRowFn kRowsTrade[]   = { RowMerchantGold, RowMerchantStock };
         // ★CAPTURE LIGHT leads the section: it decides what the captures look
         // like, and the rows under it (reset, precache) are how you re-take

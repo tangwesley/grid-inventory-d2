@@ -874,6 +874,14 @@ namespace FUI::Theme
         // per-skin block below — see Theme.h.
         float g_capLightAz = kDefCapLightAz;
         float g_capLightEl = kDefCapLightEl;
+        // ★Rarity mark: false = the corner wedge that shipped, true = the
+        // item's ground. One value for the whole UI, deliberately not in the
+        // per-skin block below — see Theme.h for why this one is not a skin's
+        // to decide.
+        bool  g_rarityGround  = false;
+        float g_rarityGroundA = kDefRarityGroundA;
+
+
 
         // GI59: glow and icon light are kept PER ICON STYLE — [0] realistic
         // (3D captures), [1] drawn (flat art), [2] pixel. A photographed model
@@ -1954,6 +1962,20 @@ namespace FUI::Theme
         ++g_inkGen;
         SKSE::log::info("[THEME] ink art dropped ({} sheet(s))", n);
     }
+
+    bool  RarityGround()  { return g_rarityGround; }
+    float RarityGroundA() { return g_rarityGroundA; }
+    void SetRarityGround(bool a_on) { g_rarityGround = a_on; }
+
+    void SetRarityGroundA(float a_a)
+    {
+        // ★NEGATED, so NaN lands on the floor instead of sailing through —
+        // the same guard ClampShadow explains. A hand-edited "nan" in the ini
+        // would otherwise reach ImU32 as an undefined alpha, and every tile on
+        // the board would be whatever that cast happened to produce.
+        g_rarityGroundA = !(a_a > 0.0f) ? 0.0f : (a_a > 1.0f ? 1.0f : a_a);
+    }
+
 
     ImU32 OccupiedGround()
     {

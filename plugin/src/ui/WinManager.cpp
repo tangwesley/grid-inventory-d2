@@ -680,10 +680,20 @@ namespace FUI
                 try { EachSkin([&](int s) { Theme::SetIconGainOf(s, 2, std::stof(rest)); }); } catch (...) {}
                 continue;
             }
+            if (key == "!raritybg") {       // rarity mark: ground instead of wedge
+                try { Theme::SetRarityGround(std::stoi(rest) != 0); } catch (...) {}
+                continue;
+            }
+            if (key == "!raritybga") {      // ...and how hard it is painted
+                try { Theme::SetRarityGroundA(std::stof(rest)); } catch (...) {}
+                continue;
+            }
+
             if (key == "!wheelon") {        // quick wheel on/off
                 try { Wheeler::SetEnabled(std::stoi(rest) != 0); } catch (...) {}
                 continue;
             }
+
             // ★The wheel's own key. Re-applied on every load precisely BECAUSE
             // this file is re-read on every inventory open: the override has to
             // outlive that, or the game's Favourites binding takes the wheel
@@ -812,7 +822,15 @@ namespace FUI
         // one: the point of sharing a preset is that the recipient can switch
         // skins and still see what the author tuned.
         EachSkin([&](int s) { WriteDispLine(out, s); });
+        // ★A LINE OF ITS OWN, not a fourteenth field on !disp. That line is
+        // read positionally by every build since 1.0.x, so widening it would
+        // make this preset unreadable to them; and the value is not per skin
+        // anyway (Theme.h says why).
+        out << "!raritybg = " << (Theme::RarityGround() ? 1 : 0) << "\n";
+        out << "!raritybga = " << Theme::RarityGroundA() << "\n";
         // ★The merchant toggles travel too (author's call). They were held back
+
+
         // as "cheats" while window layout and language were, but those two are
         // properties of the READER's setup — a screen size and a language — and
         // these are a property of the SETUP BEING SHARED: a preset built around
@@ -936,10 +954,20 @@ namespace FUI
                             }
                         }
                     }
+                    // The rarity mark travels with the look, like the skin
+                    // and the display blocks above it.
+                    else if (key == "!raritybg") {
+                        Theme::SetRarityGround(std::stoi(rest) != 0);
+                    }
+                    else if (key == "!raritybga") {
+                        Theme::SetRarityGroundA(std::stof(rest));
+                    }
+
                     // Merchant options: same keys and same tolerance as Load.
                     else if (key == "!wheelon") {
                         Wheeler::SetEnabled(std::stoi(rest) != 0);
                     }
+
                     else if (key == "!merchgoldinf") {
                         LootBarter::SetMerchantGoldInfinite(std::stoi(rest) != 0);
                     }
@@ -1110,7 +1138,16 @@ namespace FUI
         out << "; !disp[skin] = iconStyle, glowStyle x3, glowGain x6, iconGain x3\n";
         out << "; !shad[skin] = [shadow dist, blur, opacity] x3 icon styles\n";
         EachSkin([&](int s) { WriteDispLine(out, s); });
+        out << "; !raritybg = 1 to colour an item's whole tile by rarity,\n";
+        out << ";   0 for the corner wedge (default)\n";
+        out << "; !raritybga = how hard that colour is painted, 0 to 1 (default 0.1)\n";
+        out << "; !raritybg = 1이면 아이템 칸 전체를 등급 색으로, 0이면 모서리 삼각형 (기본값)\n";
+        out << "; !raritybga = 그 색의 진하기, 0~1 (기본값 0.1)\n";
+        out << "!raritybg = " << (Theme::RarityGround() ? 1 : 0) << "\n";
+        out << "!raritybga = " << Theme::RarityGroundA() << "\n";
+
         out << "!wheelon = " << (Wheeler::Enabled() ? 1 : 0) << "\n";
+
         out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";
         out << "!merchbuyall = " << (LootBarter::MerchantBuysAll() ? 1 : 0) << "\n";
         // ★The wheel's key: the OVERRIDE, never the resolved value. Writing

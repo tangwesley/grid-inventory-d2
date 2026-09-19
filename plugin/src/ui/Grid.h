@@ -784,7 +784,9 @@ namespace FUI::Grid
     void DrawItemShadow(ImDrawList* a_dl, void* a_srv, const ImVec2& a_centre,
                         float a_dw, float a_dh, float a_deg);
 
-    // ★★★1.0.5 — rarity is a CORNER WEDGE, and nothing else.
+    // ★★★1.0.5 — rarity is a CORNER WEDGE, and nothing else. (1.5.x: unless
+    // the player says otherwise — see the RARITY MARK note at the end.)
+
     //
     // Everything that tried to colour the item's own area failed, and the
     // reason is worth keeping: a translucent halo is iso-luminant against a
@@ -804,6 +806,37 @@ namespace FUI::Grid
     // the item's own rarity, or to nothing at all if it has none. There is no
     // "already donated" colour; that was tried and removed. Full reasoning at
     // the implementation.
+    //
+    // ★★★1.5.x — ...OR THE ITEM'S GROUND, when the player asks for it
+    // (Theme::RarityGround). Same colour, same rule, a different surface.
+    //
+    // ★ONE function answers "what colour is this item", and that is the point
+    // rather than a tidy-up. The wedge, the ground and anything that marks
+    // rarity later must never disagree about an item, and the surest way to
+    // guarantee that is for there to be one answer. 0 = nothing to mark.
+    [[nodiscard]] ImU32 RarityColour(std::uint8_t a_haloBits, Lotd::Status a_relic);
+
+    // ★The ground's strength is Theme::RarityGroundA, a slider, and the number
+    // is the whole difference between this mode and the opaque fill that 1.0.5
+    // threw out.
+    //
+    // At 1.0 the colour becomes the loudest thing on the tile and the sprite
+    // sits ON it like a sticker — that was the "rarity is the cell's ground"
+    // build, and it is why the wedge exists. The default 0.10 is the other
+    // end: a tint on the cell that names the band without competing with the
+    // icon, the count badge or the marker tray. Everything between is a
+    // legitimate taste, which is why it is not a constant here any more.
+    //
+    // The ground is painted OVER Theme::OccupiedGround, never instead of it,
+    // so a white-band item and a blue one still share the same cell material.
+
+    // ★a_haloBits / a_relic exactly as DrawRarityWedge takes them. Draws the
+    // ONE cell it is handed — the board calls it per occupied cell so a
+    // free-form footprint tints its own shape and nothing else, while the doll
+    // and the partner window hand over the whole tile they drew.
+    void DrawRarityGround(ImDrawList* a_dl, const ImVec2& a_min, const ImVec2& a_max,
+                          std::uint8_t a_haloBits, Lotd::Status a_relic);
+
     void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
                          const ImVec2& a_boxMax, std::uint8_t a_haloBits,
                          Lotd::Status a_relic);

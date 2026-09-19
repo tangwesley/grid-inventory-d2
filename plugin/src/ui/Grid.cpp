@@ -3018,6 +3018,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // alpha, so the same colour said "occupied" loudly on one half of
             // the window and almost nothing on the other.
             const ImU32 shadeCol = Theme::OccupiedGround();
+            // Asked ONCE for the whole pass: it cannot change mid-frame, and
+            // the answer decides both the lookup below and the fill itself.
+            const bool rarityGround = Theme::RarityGround();
+
             // ★GI69: the NEW mark rides along here — a flat wash over the whole
             // cell instead of light bleeding in from the tile's border.
             //
@@ -3103,6 +3107,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const auto& it = *itP;
                 if (it.overflow || it.col < 0) continue;
                 const bool bagOpen = it.def.bag != 0 && g_openBags.contains(it.key);
+                // ★RARITY AS THE GROUND, when the player asked for it. ONE
+                // museum lookup per item rather than one per cell -- a 2x4
+                // shield would otherwise pay for the same answer eight times,
+                // every frame, and this is the hot pass.
+                const Lotd::Status relic = (rarityGround && it.obj)
+                    ? Lotd::Of(it.obj->GetFormID()) : Lotd::Status::kNotRelic;
+
                 for (int y = 0; y < it.mask.h; ++y) {
                     for (int x = 0; x < it.mask.w; ++x) {
                         if (!it.mask.rows[y][x]) continue;
@@ -3120,8 +3131,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             p1.y - (gr + 1 < a_view.rows ? shadeIn1 : shadeIn0));
                         dl->AddRectFilled(q0, q1, shadeCol);
                         // (rarity is a corner wedge drawn once per item in
-                        //  pass 4 now — nothing rarity-related belongs in this
-                        //  per-cell loop any more. See Grid.h.)
+                        //  pass 4 — nothing rarity-related belonged in this
+                        //  per-cell loop. See Grid.h.)
+                        // ★★★...UNLESS IT IS THE GROUND, and then this is
+                        // exactly where it belongs, for the two reasons the
+                        // wedge could not use.
+                        //
+                        // It must follow the item's MASK. A free-form footprint
+                        // has empty notches inside its bounding box, and a
+                        // rectangle drawn over the box would colour cells this
+                        // item does not own -- reading as "the thing parked in
+                        // that notch is legendary too". The wedge never had to
+                        // care: it is one mark in one cell.
+                        //
+                        // And it must land UNDER the sprite, which is what this
+                        // pass is. Painted in pass 4 the colour would sit on
+                        // top of the icon and hide it -- a wash, not a ground.
+                        //
+                        // ★It follows q0/q1, the SHADED area, so the ground
+                        // stops where the occupied fill stops and the skin's
+                        // own divider still shows between two cells of the same
+                        // item. The rule is "where does a groove exist", not
+                        // "where does this item end" -- see the note above.
+                        if (rarityGround) {
+                            DrawRarityGround(dl, q0, q1, it.glow, relic);
+                        }
+
                         if (bagOpen) dl->AddRectFilled(q0, q1, kOpenBagCol);
                     }
                 }
@@ -3675,12 +3710,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // ★1.0.5 rarity: one wedge at the footprint's top-right, over
                 // the sprite. Drawn here rather than in the occupancy pass so a
                 // multi-cell item gets ONE mark instead of one per cell.
+                // ★★THE BOARD IS THE ONE CALLER THAT ASKS ABOUT THE SETTING
+                // ITSELF, and it has to. DrawRarityWedge answers the RARITY
+                // MARK switch by drawing a ground over the box it was given --
+                // right for the doll and the partner window, wrong here twice
+                // over: the box is one anchor cell of a footprint that may be
+                // eight, and pass 4 is on top of the sprite. The board's ground
+                // is painted per mask cell in pass 2 instead, so all this call
+                // site has left to do in ground mode is stay out of the way.
                 const ImVec2 wedgeCell = AnchorCell(it.mask, p0, /*bottom*/ false);
-                DrawRarityWedge(dl, wedgeCell,
-                                ImVec2(wedgeCell.x + CellPx(), wedgeCell.y + CellPx()),
-                                it.glow,
-                                it.obj ? Lotd::Of(it.obj->GetFormID())
-                                       : Lotd::Status::kNotRelic);
+                if (!Theme::RarityGround()) {
+                    DrawRarityWedge(dl, wedgeCell,
+                                    ImVec2(wedgeCell.x + CellPx(), wedgeCell.y + CellPx()),
+                                    it.glow,
+                                    it.obj ? Lotd::Of(it.obj->GetFormID())
+                                           : Lotd::Status::kNotRelic);
+                }
+
 
                 // ★★★THE NEW MARK, and it goes AFTER the wedge on purpose.
                 //
@@ -12219,42 +12265,29 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (sil) UIRoot::EndSilhouette(a_dl);
     }
 
-    // ★★See Grid.h. ONE wedge per item, at the footprint's top-right.
-    // Black underneath so the colour reads on a pale sheet as well as on a
-    // dark panel — the same trick every marker on this tile already uses.
-    void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
-                         const ImVec2& a_boxMax, std::uint8_t a_haloBits,
-                         Lotd::Status a_relic)
+    // ★★See Grid.h. The ONE answer to "what colour is this item", asked by the
+    // wedge and by the ground. It was inlined in the wedge until the ground
+    // needed the same answer, and two copies of this switch is exactly how a
+    // board ends up disagreeing with the doll about a sword.
+    ImU32 RarityColour(std::uint8_t a_haloBits, Lotd::Status a_relic)
     {
         const std::uint8_t bits = a_haloBits & 0x3;
-        // ★An EXTENSION TINT earns the wedge on the same terms as an owed relic
+        // ★An EXTENSION TINT earns the mark on the same terms as an owed relic
         // -- outright, with no rarity of its own. An extension that colours by
         // its own rules is not obliged to agree with ours about which items are
         // interesting, and an item it has ranked while the host sees nothing
         // special is precisely the case it was added for.
         const std::uint8_t tint = TintTierOf(a_haloBits);
-        if (!a_dl || (!bits && !tint && a_relic != Lotd::Status::kUndonated)) return;
-        const float cell = CellPx();
-        const float d    = cell * kWedgeFrac;
-        const float rim  = RimPx();
-        // ★★Pull in to the SHADED area, not to the tile rectangle. The occupied
-        // cell's fill steps back from the hairline (DrawOccupancyPass: shadeIn),
-        // so a wedge anchored to the raw box straddles the grid line and looks
-        // pasted on top of the board rather than set into the item's own ground.
-        // Same rule the fill uses, so the two edges land together.
-        const float in  = Theme::S().engravedCells
-                        ? Theme::kGrooveW * Theme::Scale() * 0.5f : 1.0f;
-        const float x1  = a_boxMax.x - in;
-        const float y0  = a_boxMin.y + in;
+        if (!bits && !tint && a_relic != Lotd::Status::kUndonated) return 0;
         // ★GI67: unique wins outright over enchanted — see DrawMarkerTray.
         // ★★1.4.4, AND THE ORDER IS THE WHOLE DESIGN. A relic still owed to the
-        // museum takes the wedge from whatever rarity the item has, because
+        // museum takes the mark from whatever rarity the item has, because
         // "carry this home" is the only urgent thing about it. Once it is
-        // donated the wedge goes BACK to its rarity -- there is nothing urgent
+        // donated the mark goes BACK to its rarity -- there is nothing urgent
         // left, and hiding "unique" on 1273 weapons and armours forever would
         // cost more than it buys.
         //
-        // ★★★AND A DONATED RELIC WITH NO RARITY GETS NOTHING, which is a wedge
+        // ★★★AND A DONATED RELIC WITH NO RARITY GETS NOTHING, which is a mark
         // this feature shipped with and then lost on purpose.
         //
         // It was grey, and read as "already handed in, safe to sell". Two
@@ -12263,7 +12296,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // states that lead to the same act; and a donated UNIQUE relic shows
         // gold, so the reading was not even available in the case a player
         // would most want it. The line above already says the real rule --
-        // once donated, the museum has no claim on the wedge -- and the grey
+        // once donated, the museum has no claim on the mark -- and the grey
         // was that rule failing to apply to the leftovers.
         //
         // It also got worse the better you played. Plain relics are the
@@ -12272,7 +12305,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the purple ones were hardest to pick out.
         //
         // The fact itself is never lost: the tooltip says it in every case.
-        // Now the wedge says one thing only -- the museum still wants this.
+        // Now the mark says one thing only -- the museum still wants this.
         constexpr ImU32 kUnique   = IM_COL32(232, 182, 74, 255);
         constexpr ImU32 kEnchant  = IM_COL32(79, 143, 240, 255);
         constexpr ImU32 kRelicOwe = IM_COL32(169, 123, 232, 255);   // #A97BE8
@@ -12290,10 +12323,76 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // out-ranked by a roll. And an owed relic still takes everything,
         // because "carry this home" outlives any opinion about quality.
         const std::uint32_t tintCol = tint ? HostApi::TintColour(tint) : 0u;
-        const ImU32 col = (a_relic == Lotd::Status::kUndonated) ? kRelicOwe
-                        : (bits & 0x2)                          ? kUnique
-                        : tintCol                               ? static_cast<ImU32>(tintCol)
-                                                                : kEnchant;
+        return (a_relic == Lotd::Status::kUndonated) ? kRelicOwe
+             : (bits & 0x2)                          ? kUnique
+             : tintCol                               ? static_cast<ImU32>(tintCol)
+                                                     : kEnchant;
+    }
+
+    // ★★See Grid.h. The same colour, painted as the cell's ground instead of
+    // cut into its corner -- the RARITY MARK setting, and the only thing that
+    // setting moves.
+    //
+    // ★NO BLACK UNDER IT, unlike the wedge. The wedge is a 14px shape that has
+    // to hold an edge against whatever it lands on; a ground IS the thing
+    // underneath, and outlining it would draw a box around every item on the
+    // board. What keeps it legible is the alpha instead -- Theme::RarityGroundA.
+    void DrawRarityGround(ImDrawList* a_dl, const ImVec2& a_min, const ImVec2& a_max,
+                          std::uint8_t a_haloBits, Lotd::Status a_relic)
+    {
+        if (!a_dl) return;
+        // ★The slider's floor is a real setting, not a degenerate one: dragged
+        // to 0 the player has asked for no rarity mark at all, and leaving
+        // early is how they get it -- a rect at alpha 0 is a draw command the
+        // board pays for on every cell of every item to change nothing.
+        const float strength = Theme::RarityGroundA();
+        if (strength <= 0.0f) return;
+        const ImU32 col = RarityColour(a_haloBits, a_relic);
+        if (!col) return;
+        // ★SCALED, not overwritten. Every colour above is opaque, but an
+        // extension's tint arrives over the ABI with an alpha of its own, and
+        // stamping the slider on top of it would make a deliberately faint
+        // tier louder than the palette it came from.
+        const float a = static_cast<float>((col >> IM_COL32_A_SHIFT) & 0xFF) * strength;
+        const ImU32 ga = static_cast<ImU32>(a + 0.5f) & 0xFFu;
+        a_dl->AddRectFilled(a_min, a_max,
+                            (col & ~IM_COL32_A_MASK) | (ga << IM_COL32_A_SHIFT));
+    }
+
+    // ★★See Grid.h. ONE wedge per item, at the footprint's top-right.
+    // Black underneath so the colour reads on a pale sheet as well as on a
+    // dark panel — the same trick every marker on this tile already uses.
+    //
+    // ★SILENT IN GROUND MODE, and the guard lives HERE rather than at the call
+    // sites. The doll and the partner window mark rarity by calling DrawGlow
+    // and nothing else; making each of them ask about the setting first is how
+    // one of them ends up with both marks, or neither, the next time this file
+    // is touched. The board is the one caller that needs its own branch,
+    // because its ground is painted per CELL and under the sprite.
+    void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
+                         const ImVec2& a_boxMax, std::uint8_t a_haloBits,
+                         Lotd::Status a_relic)
+    {
+        if (!a_dl) return;
+        if (Theme::RarityGround()) {
+            DrawRarityGround(a_dl, a_boxMin, a_boxMax, a_haloBits, a_relic);
+            return;
+        }
+        const ImU32 col = RarityColour(a_haloBits, a_relic);
+        if (!col) return;
+        const float cell = CellPx();
+
+        const float d    = cell * kWedgeFrac;
+        const float rim  = RimPx();
+        // ★★Pull in to the SHADED area, not to the tile rectangle. The occupied
+        // cell's fill steps back from the hairline (DrawOccupancyPass: shadeIn),
+        // so a wedge anchored to the raw box straddles the grid line and looks
+        // pasted on top of the board rather than set into the item's own ground.
+        // Same rule the fill uses, so the two edges land together.
+        const float in  = Theme::S().engravedCells
+                        ? Theme::kGrooveW * Theme::Scale() * 0.5f : 1.0f;
+        const float x1  = a_boxMax.x - in;
+        const float y0  = a_boxMin.y + in;
 
         // outer: the full wedge, in black. Both legs are d, so the top and the
         // right side are the same length — it is a right ISOSCELES triangle.
