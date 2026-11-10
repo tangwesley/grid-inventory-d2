@@ -2,6 +2,8 @@
 #include "game/Ledger.h"
 
 #include <SKSE/SKSE.h>
+#include "api/HostApi.h"
+#include "ui/Badges.h"
 #include "ui/Fallback.h"
 #include "game/Costume.h"
 #include "game/DualRing.h"
@@ -81,6 +83,10 @@ namespace FUI::Equip
             std::uint16_t       uid = 0;
             std::uint16_t       sig = 0;
             int                 hand = 0;   // 0 none, 1 right, 2 left
+            // The SOCKETER's row for the worn unit, copied where CollectEquipment
+            // has its list in hand (HostApi::Sockets) -- the slot is redrawn
+            // from this copy, never from a kept list.
+            GridInvAPI::Overlay sockets{};
         };
 
         // equip/unequip actions deferred to the game-update hook (Tick):
@@ -305,11 +311,12 @@ namespace FUI::Equip
                     accs.push_back({ obj, count, glow, xl, hand, PrimarySlotOf(obj) });
                     return;
                 }
-                std::uint16_t uid = 0;
-                if (xl) {
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
-                }
-                a_out[slot] = { obj, count, glow, uid, Grid::InstanceSigOf(xl), hand };
+                // ★PoolUidOf: a worn quiver's uid must not name the unit, or the
+                // doll's record (uid N) and the board's plain pool (uid 0) never
+                // match on the way back down
+                const std::uint16_t uid = Grid::PoolUidOf(obj, xl);
+                auto& e = a_out[slot] = { obj, count, glow, uid, Grid::InstanceSigOf(xl), hand };
+                if (HostApi::HasSocketer()) HostApi::Sockets(obj->GetFormID(), xl, e.sockets);
             };
 
             // ...and hand out the accessory cells, in slot-number order, once
@@ -331,14 +338,12 @@ namespace FUI::Equip
                     const std::string id =
                         (i < std::size(kDollAcc)) ? std::string(kDollAcc[i])
                                                   : ("acc" + std::to_string(i + 1));
-                    std::uint16_t uid = 0;
-                    if (a.xl) {
-                        if (const auto* xu = a.xl->GetByType<RE::ExtraUniqueID>()) {
-                            uid = xu->uniqueID;
-                        }
+                    const std::uint16_t uid = Grid::PoolUidOf(a.obj, a.xl);
+                    auto& e = a_out[id] = { a.obj, a.count, a.glow, uid,
+                                            Grid::InstanceSigOf(a.xl), a.hand };
+                    if (HostApi::HasSocketer()) {
+                        HostApi::Sockets(a.obj->GetFormID(), a.xl, e.sockets);
                     }
-                    a_out[id] = { a.obj, a.count, a.glow, uid,
-                                  Grid::InstanceSigOf(a.xl), a.hand };
                 }
                 g_drawerCount = static_cast<int>(
                     accs.size() > std::size(kDollAcc) ? accs.size() - std::size(kDollAcc) : 0);
@@ -916,6 +921,33 @@ namespace FUI::Equip
                     UIRoot::DrawItemIconRot(dl, icon->srv,
                         ImVec2(c.x + eqOff, c.y), ImVec2(dw, dh), eqRot);
                 }
+                // GI8: the socket wells, on the worn unit as on the boards.
+                // ★Laid out on the item's OWN FOOTPRINT at the grid's cell
+                // size, centred on the slot -- not on the slot box, which is
+                // taller than most things worn in it. A two-socket cuirass then
+                // shows the same two wells, the same size and the same distance
+                // apart, here as in the pack. A slot smaller than the footprint
+                // shrinks the cell instead, so the wells stay inside it.
+                // ★Socketer rows only. The doll never drew a provider's badges,
+                // and starting to here is not this change's business.
+                if (eq->sockets.count > 0) {
+                    const auto bdef = Grid::ResolveDef(eq->obj);
+                    const int  fw   = (std::max)(1, bdef.w);
+                    const int  fh   = (std::max)(1, bdef.h);
+                    const float cpx = (std::min)({ Grid::CellPx(), a_w * 0.92f / fw,
+                                                   a_h * 0.92f / fh });
+                    const ImVec2 c((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+                    Badges::TileShape shape;
+                    shape.w = fw;
+                    shape.h = fh;
+                    // ★Same gate the partner board uses: geometry alone would
+                    // light a slot that sits under another window.
+                    const bool hov = UIRoot::CursorOwnsWindow() &&
+                                     ImGui::IsMouseHoveringRect(p0, p1, false);
+                    Badges::Draw(dl, ImVec2(c.x - fw * cpx * 0.5f, c.y - fh * cpx * 0.5f),
+                                 fw * cpx, fh * cpx, shape, 0x14u, eq->obj->GetFormID(),
+                                 eq->uid, hov, &eq->sockets);
+                }
                 // GI30: this slot wears the pool's favourite -- draw the mark
                 // here so it does not read as "the star disappeared".
                 // ★★1.0.5: through the SHARED tray, at the grid's size. It used
@@ -1242,17 +1274,17 @@ namespace FUI::Equip
         if (first && !Grid::IsRing(first)) first = nullptr;
         auto* second = DualRing::Second();
         bool  toSecond = false;
-        // The incoming unit is NAMED in every one of these. Without it a
-        // same-form pair compares the first ring against itself (see
-        // DualRing::SharesEffect) and the answer is "shares" no matter what the
-        // two units actually carry -- which sent every such ring to the first
-        // slot to replace the one already on it.
-        if (first && !second) {
-            toSecond = !DualRing::SharesEffect(first, ringIn, a_uid, a_sig);
-        } else if (first && second) {
-            toSecond = DualRing::SharesEffect(second, ringIn, a_uid, a_sig) &&
-                       !DualRing::SharesEffect(first, ringIn, a_uid, a_sig);
-        }
+        // ★★NO EFFECT TEST ANY MORE (user decision, 2026-09-13; see
+        // DualRing::CanWear). It used to read: join the second slot only when
+        // the incoming ring brings an effect the first does not, and with
+        // both slots taken let the duplicate name its own victim. Two rings
+        // sharing Fortify Heavy Armor could therefore never be worn together.
+        // Now a click JOINS whenever the second slot is free, and with both
+        // slots taken it trades with the first, as every other click always
+        // did. (Dropping on the second slot still targets it directly.)
+        (void)a_uid;
+        (void)a_sig;
+        if (first && !second) toSecond = true;
         // ★[RING] every routed click, decision and state -- the "all my rings
         // ended up worn" report needs the router's own words, not a
         // reconstruction.
@@ -1342,11 +1374,10 @@ namespace FUI::Equip
 
     namespace
     {
-        std::uint16_t UidOfList(RE::ExtraDataList* a_xl)
+        // The pool system's answer, not the raw ExtraUniqueID (see PoolUidOf).
+        std::uint16_t UidOfList(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl)
         {
-            if (!a_xl) return 0;
-            const auto* xu = a_xl->GetByType<RE::ExtraUniqueID>();
-            return xu ? xu->uniqueID : 0;
+            return Grid::PoolUidOf(a_obj, a_xl);
         }
     }
 
@@ -1456,35 +1487,31 @@ namespace FUI::Equip
                 continue;
             }
 
-            // Spell tome: right-click = LEARN (a BookMenu can't open inside
-            // our movie-less UI, so teach directly and consume the tome —
-            // same net result as vanilla reading)
-            if (auto* book = obj->As<RE::TESObjectBOOK>(); book && book->TeachesSpell()) {
-                auto* spell = book->GetSpell();
-                if (spell && !player->HasSpell(spell)) {
-                    player->AddSpell(spell);
-                    FUI::Sfx::Notify(spell->GetName(), "UISpellLearned");
-                    // GI36: name the copy being consumed instead of letting the
-                    // engine pick, and let rule 58 take its star with it.
-                    // ★Resolved the way the RemoveItem below resolves, so the
-                    // star we test for and the copy that actually leaves are
-                    // the same unit: ResolveExitUnit treats the position as a
-                    // refinement to be VERIFIED, and an unverified one here
-                    // could read a sibling's star (or miss this copy's).
-                    auto* bxl = Grid::ExtraForUnit(
-                        Grid::LiveEntryOf(player, book), act.uid, act.xlIdx,
-                        act.sig, /*namePlainPool*/ true);
-                    const int starred =
-                        (bxl && bxl->HasType<RE::ExtraHotkey>()) ? 1 : 0;
-                    player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,
-                        Grid::ResolveExitUnit(book, act.uid, act.sig, 1, starred,
-                                              act.xlIdx),
-                        nullptr);
-                    Grid::RequestRebuild();
-                    SKSE::log::info("[EQUIP] learned spell '{}'", spell->GetName());
-                }
-                continue;
-            }
+            // ★★★GI85: THE SPELL TOME FALLS THROUGH TO THE ENGINE NOW.
+            //
+            // A branch used to stand here that taught the spell and removed the
+            // book by hand, on the reasoning that a BookMenu cannot open inside
+            // our movie-less UI so this was "the same net result as vanilla
+            // reading". It is not the same, and the difference is a quest that
+            // cannot be finished: vanilla reads a book by EQUIPPING it, and the
+            // equip is what raises OnEquipped. Teaching the spell ourselves
+            // reproduces the visible half and skips the event entirely.
+            //
+            // ★This is the SECOND door the tome was kept away from, and the
+            // reason GI84 alone changed nothing. GI84 stopped ProcessBookRead
+            // from skipping the Use -- and the Use arrived here, hit this
+            // branch, found the spell already taught by Read() a few lines
+            // earlier, and did NOTHING AT ALL before `continue`. Two guards,
+            // one behind the other, both built on the same wrong idea.
+            // (Reported twice by the same player: Destruction Ritual Spell,
+            // 1.6.1 and the first 1.6.2 test build.)
+            //
+            // Nothing replaces it: a book is an ordinary object here and the
+            // generic EquipObject below is the door every other book already
+            // uses (measured: 'Line and Lure' Read=false Use=true). The engine
+            // teaches, the engine spends, and the event reaches the scripts
+            // that were waiting for it. ProcessBookRead's deferred stage sees
+            // the count move and knows not to spend it a second time.
 
             // ★★RING ROUTER for SLOTLESS equips (right-click, wheel). The
             // engine always swaps the first slot, but two slots exist -- so a
@@ -1543,6 +1570,27 @@ namespace FUI::Equip
                 }
             }
 
+            // ★★★ASK WHETHER THE UNIT EXISTS BEFORE UNDRESSING ANYONE FOR IT.
+            //
+            // The resolver below ("named unit gone -- equip skipped") runs
+            // AFTER the conflict pass, so a named unit that could not be found
+            // still cost the player the piece they were wearing: measured with
+            // armour used straight out of a chest -- "slot conflict: unequip
+            // Fur Armor" and then "named unit gone", and the body slot left to
+            // the costume anchor. The real resolution stays where it is (the
+            // pass rewrites the entry's lists, and a pointer taken across it
+            // is a pointer to something else); this is only the QUESTION,
+            // asked while nothing has been touched yet, and its answer is
+            // thrown away. A unit that is not there now will not be there
+            // after the pass either.
+            if ((act.uid != 0 || act.sig != 0) &&
+                !Grid::ExtraForPool(Grid::LiveEntryOf(player, obj), act.uid, act.sig)) {
+                SKSE::log::info("[EQUIP] named unit u{:04X}/s{:04X} of '{}' not in the "
+                                "pack -- equip skipped before the conflict pass",
+                                act.uid, act.sig, obj->GetName() ? obj->GetName() : "?");
+                continue;
+            }
+
             // Same-slot conflict resolution BY HAND: while paused the engine's
             // own queued conflict pass is unreliable (stacked body armour) —
             // unequip everything sharing a biped slot with the incoming piece.
@@ -1568,7 +1616,7 @@ namespace FUI::Equip
                         auto* w2 = Grid::WornExtraOf(d2.second.get());
                         const std::uint16_t s2 = Grid::InstanceSigOf(w2);
                         const bool sameUnit = (act.sig == s2) &&
-                                              (act.uid == 0 || act.uid == UidOfList(w2));
+                                              (act.uid == 0 || act.uid == UidOfList(o2, w2));
                         if (sameUnit) continue;
                     }
                     auto* a2 = o2->As<RE::TESObjectARMO>();
@@ -1727,13 +1775,13 @@ namespace FUI::Equip
             //   - the player owns a single unit of that form, so this equip is
             //     the very ring the carrier holds moving to the first slot,
             //     and leaving the carrier up would show it worn twice; or
-            //   - the incoming ring shares a base effect with the carried one
-            //     (the duplication the whole feature exists to prevent --
-            //     same-form enchanted pairs land here too, since one form is
-            //     one enchantment).
+            //   - (retired 2026-09-13, user decision) ...or the incoming ring
+            //     shared a base effect with the carried one. The same-effect
+            //     rule is gone everywhere (DualRing::CanWear), so a duplicate
+            //     enchantment on the first slot no longer knocks the carried
+            //     ring off the second.
             if (auto* second = DualRing::Second(); second) {
-                auto* ringIn = obj->As<RE::TESObjectARMO>();
-                bool  letGo = false;
+                bool letGo = false;
                 if (second == obj) {
                     int owned = 0;
                     {
@@ -1741,11 +1789,7 @@ namespace FUI::Equip
                             [&](RE::TESBoundObject& o) { return &o == obj; });
                         for (auto& [o2, d2] : inv2) owned = d2.first;
                     }
-                    letGo = owned <= 1 ||
-                            (ringIn && DualRing::WouldDuplicate(ringIn));
-                } else if (ringIn && Grid::IsRing(ringIn) &&
-                           DualRing::WouldDuplicate(ringIn)) {
-                    letGo = true;
+                    letGo = owned <= 1;
                 }
                 if (letGo) {
                     SKSE::log::info("[EQUIP] '{}' takes the first ring slot -- "
@@ -1789,7 +1833,7 @@ namespace FUI::Equip
                             continue;
                         }
                         ++wornUnits;
-                        wUid = UidOfList(xl);
+                        wUid = UidOfList(obj, xl);
                         wSig = Grid::InstanceSigOf(xl);
                     }
                 }

@@ -181,6 +181,15 @@ namespace FUI::Grid
     // grid's drop ghost / drop-cell math. False when nothing is carried.
     bool HeldFootprint(int& a_w, int& a_h, float& a_offX, float& a_offY);
 
+    // ★GI71b: the carried FOOTPRINT, not just its bounding box. HeldFootprint
+    // hands out w/h, which is all a rectangle ever needed -- and it is why the
+    // partner board's drop ghost stayed a rectangle after its tiles learned to
+    // be L-shaped: the shape was there, the accessor simply could not say it.
+    // The player's own grid has always drawn its ghost from the mask; this is
+    // how the other board reads the same thing.
+    // Null when nothing is carried. Valid only for the current frame.
+    [[nodiscard]] const FUI::Shape* HeldShape();
+
     // v9.2: start carrying an item that is NOT in the grid (equipment doll
     // pickup — the unequip runs deferred, the carry starts immediately).
     // GI25: a_uid/a_sig identify the sub-stack being lifted (the doll's pickup
@@ -320,8 +329,11 @@ namespace FUI::Grid
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig);
     // ★(1.5.x) a SHELF book (not owned): raise the page in place -- no
     // engine Use, which needs the player's own copy.
+    // ★GI79: a_owner names the container holding the book (0 = the player), so
+    // the page can reach the unit's own ExtraDataList and the quest that fills
+    // its <Alias=...> tokens.
     void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                              std::uint16_t a_sig);
+                              std::uint16_t a_sig, RE::FormID a_owner = 0);
     void ProcessBookRead();   // UIRoot::Tick
 
     // GI32: apply queued favourite toggles. MUST run on the game thread --
@@ -477,6 +489,9 @@ namespace FUI::Grid
     // left" (take-all budget included). Both halves span the main board plus
     // every owned bag, open or closed; the trash is storage for neither.
     [[nodiscard]] int SpaceUsed();
+    // ★GI90: tiles on the board right now. Diagnostic only -- the open timer
+    // needs a size to report its milliseconds against.
+    [[nodiscard]] int TileCount();
     [[nodiscard]] int SpaceTotal();
     [[nodiscard]] int CellSpanOf(RE::TESBoundObject* a_obj);   // grid cells an item occupies
     // shift+lclick split -> held fragment. a_srcKey = the tile it leaves.
@@ -769,7 +784,9 @@ namespace FUI::Grid
     void DrawItemShadow(ImDrawList* a_dl, void* a_srv, const ImVec2& a_centre,
                         float a_dw, float a_dh, float a_deg);
 
-    // ★★★1.0.5 — rarity is a CORNER WEDGE, and nothing else.
+    // ★★★1.0.5 — rarity is a CORNER WEDGE, and nothing else. (1.5.x: unless
+    // the player says otherwise — see the RARITY MARK note at the end.)
+
     //
     // Everything that tried to colour the item's own area failed, and the
     // reason is worth keeping: a translucent halo is iso-luminant against a
@@ -789,9 +806,54 @@ namespace FUI::Grid
     // the item's own rarity, or to nothing at all if it has none. There is no
     // "already donated" colour; that was tried and removed. Full reasoning at
     // the implementation.
+    //
+    // ★★★1.5.x — ...OR THE ITEM'S GROUND, when the player asks for it
+    // (Theme::RarityGround). Same colour, same rule, a different surface.
+    //
+    // ★★★AND THE MUSEUM MARK IS NOT PART OF THAT MOVE. RARITY MARK moves
+    // rarity; an owed relic keeps the corner wedge in both modes, always the
+    // same purple in always the same corner. It is an ERRAND, not a quality --
+    // true of a common book, false the moment it is donated -- and a ground
+    // that ranges from a whisper to the whole tile is the wrong instrument for
+    // "walk this to Solitude". In ground mode a relic with rarity therefore
+    // shows BOTH facts at once, which the single wedge never could.
+    //
+    // ★ONE function answers "what RARITY colour is this item", and that is the
+    // point rather than a tidy-up. The wedge, the ground and anything that
+    // marks rarity later must never disagree about an item, and the surest way
+    // to guarantee that is for there to be one answer. It takes no museum
+    // status, because that answer is not a rarity. 0 = nothing to mark.
+    [[nodiscard]] ImU32 RarityColour(std::uint8_t a_haloBits);
+
+
+    // ★The ground's strength is Theme::RarityGroundA, a slider, and the number
+    // is the whole difference between this mode and the opaque fill that 1.0.5
+    // threw out.
+    //
+    // At 1.0 the colour becomes the loudest thing on the tile and the sprite
+    // sits ON it like a sticker — that was the "rarity is the cell's ground"
+    // build, and it is why the wedge exists. The default 0.10 is the other
+    // end: a tint on the cell that names the band without competing with the
+    // icon, the count badge or the marker tray. Everything between is a
+    // legitimate taste, which is why it is not a constant here any more.
+    //
+    // The ground is painted OVER Theme::OccupiedGround, never instead of it,
+    // so a white-band item and a blue one still share the same cell material.
+
+    // ★a_haloBits exactly as DrawRarityWedge takes it, and NO museum status --
+    // see above. Draws the ONE cell it is handed: the board calls it per
+    // occupied cell so a free-form footprint tints its own shape and nothing
+    // else, while the doll and the partner window hand over the whole tile they
+    // drew. Callers check Theme::RarityGround() first; this only paints.
+    void DrawRarityGround(ImDrawList* a_dl, const ImVec2& a_min, const ImVec2& a_max,
+                          std::uint8_t a_haloBits);
+
+    // ★Answers the RARITY MARK setting itself: in ground mode it draws the
+    // museum wedge alone, and nothing at all for an item that is merely rare.
     void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
                          const ImVec2& a_boxMax, std::uint8_t a_haloBits,
                          Lotd::Status a_relic);
+
 
     // Rarity glow, shared with the partner (loot/barter) window so its items
     // glow exactly like the player grid's.
@@ -1018,6 +1080,14 @@ namespace FUI::Grid
 
     // Content signature of a sub-stack (0 = none). Stable across container moves.
     [[nodiscard]] std::uint16_t InstanceSigOf(RE::ExtraDataList* a_xl);
+    // The uid the pool system sees for a list: the engine's ExtraUniqueID for
+    // gear, and ALWAYS 0 for a stackable form -- units of a stack are
+    // interchangeable, so a uid never names one of them (a save that stamps
+    // every unit would otherwise split a quiver into single-arrow tiles).
+    // Every uid read that feeds pool identity (a doll slot, a preset entry,
+    // the worn ledger, a worn-restore) must use this, or the two sides of a
+    // match disagree about the same list.
+    [[nodiscard]] std::uint16_t PoolUidOf(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl);
     // GI62: a_rot = the tile's quarter-turn, so the SILHOUETTE halo lies at the
     // same angle as the sprite it was cut from (the radial style is symmetric).
     void DrawGlow(ImDrawList* a_dl, RE::TESBoundObject* a_obj, std::uint8_t a_bits,
@@ -1039,6 +1109,11 @@ namespace FUI::Grid
     [[nodiscard]] bool IsRechargeOpen();
     bool CloseRecharge();               // I/ESC layering
     void ProcessRecharge();             // UIRoot::Tick -- engine mutations
+    // ★Pad d-pad up/down while the gem list is up: the row above / below the
+    // pointer (a_dir -1 / +1), clamped to the list. a_out is the row's centre.
+    // False when the window is closed or empty -- the caller then falls back
+    // to its ordinary one-cell nudge.
+    bool RechargeRowStep(const ImVec2& a_cur, int a_dir, ImVec2& a_out);
 
     // ★(1.3.1) shelf-bag intake: the held PLAYER-side item, when it may be
     // stored into a shelf bag (not a bag itself, not a coin tile, not
@@ -1211,6 +1286,26 @@ namespace FUI::Grid
     // scales, and a player who lowers SCALE to get their board back must
     // actually get it back. Returns true when the effective rows moved.
     bool ClampBaseRowsToDisplay(float a_displayH, float a_chromeH);
+
+    // ★★HOW TALL THE BOARD IS DRAWN, which is a third row count. The base
+    // board is what the player owns outright; carry weight appends rows past
+    // it; and the board on screen used to be pinned to the base rows however
+    // many bonus rows there were, so every bonus row lived behind a scroll.
+    // Now the board grows to show the owned rows up to "!viewrows" (default
+    // 14), and only rows past THAT scroll. The window is sized from
+    // ShownRows(), so it grows and shrinks with the bonus.
+    //
+    // The setting is the cap, not a computation from the screen -- the
+    // player knows how many rows their window fits. The display check that
+    // already guards the base rows is applied to this cap as well, purely so
+    // an oversized setting cannot walk the gold bar off the bottom edge; on a
+    // screen that fits the setting it changes nothing.
+    inline constexpr int kDefViewRows = 14;
+    void SetViewRows(int a_rows);          // "!viewrows": rows shown before scrolling
+    [[nodiscard]] int ViewRowsSetting();   // the request -- persistence only
+    [[nodiscard]] int ShownRows();         // rows the board child actually shows
+    // Same contract as ClampBaseRowsToDisplay, for the view cap.
+    bool ClampViewRowsToDisplay(float a_displayH, float a_chromeH);
 
     inline constexpr float kCell    = 48.0f;   // base cell at UI scale 1.0
 

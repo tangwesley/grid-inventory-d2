@@ -52,12 +52,12 @@ namespace FUI::Grid
     {
         constexpr const char* kLayoutPath = "Data/SKSE/Plugins/GridInventory_layout.ini";
 
-        struct Mask
-        {
-            std::vector<std::vector<bool>> rows;
-            int w = 1;
-            int h = 1;
-        };
+        // ★GI71: the footprint moved to ItemDef.h so the partner board can build
+        // one too (it could resolve a def but not a shape, which is why a
+        // container laid every tile out as a rectangle). Same type, same
+        // arithmetic -- this name stays because the file says `mask` in about
+        // sixty places and renaming them would bury the change that matters.
+        using Mask = FUI::Shape;
 
         struct Item
         {
@@ -98,6 +98,11 @@ namespace FUI::Grid
             // the one unit allowed to be in two places at once (see the worn
             // exception in EnumerateUnitRefs), so the tray can say so.
             bool                worn = false;
+            // ★The SOCKETER's row for this unit (HostApi::Sockets), taken in
+            // MakeDisplayTile where the unit's own list is in hand -- the same
+            // place, and the same reason, as the tint bits in `glow`. A COPY:
+            // the list itself is never kept (see uid/xlIdx above).
+            GridInvAPI::Overlay sockets{};
         };
 
         struct LayoutEntry
@@ -210,6 +215,12 @@ namespace FUI::Grid
             // of two identical daggers looked like picking up both.
             int                 partnerOrd = 0;
             std::uint16_t       sig = 0;   // GI25: survives the queue delay
+            // ★Lifted off a partner cell the CORPSE / MARK is wearing. The take
+            // resolver names the worn list only when told the unit came from a
+            // worn slot; the right-click road says so through PartnerCell::unit()
+            // and the drag road did not, so a dragged worn weapon was refused as
+            // "can't tell it apart from the worn copy" while right-click worked.
+            bool                partnerWorn = false;
             // ★GI36's argument, applied to the two markers as well: once the unit
             // is mid-flight there is no tile left to ask, so the answers travel
             // WITH the carry. Set at pickup from the tile that was lifted.
@@ -329,6 +340,10 @@ namespace FUI::Grid
         int g_baseCols = kDefCols;
         int g_baseRows = kDefRows;         // effective (display-clamped)
         int g_baseRowsWanted = kDefRows;   // what "!basegrid" asked for
+        // "!viewrows": how many rows the board shows before it scrolls. The
+        // request, and the display-clamped cap derived from it -- see Grid.h.
+        int g_viewRows = kDefViewRows;
+        int g_viewRowsCap = kDefViewRows;
 
         bool g_overloaded = false;      // W2: hard board can't hold everything
         bool g_capacityDirty = true;    // recompute on next CapacityTick
@@ -539,6 +554,38 @@ namespace FUI::Grid
             return a_key.find_first_of("@~#", bar == std::string::npos ? 0 : bar + 1);
         }
 
+        // ★★★A LIST THE ENGINE HAS ALREADY EMPTIED IS NOT A UNIT.
+        //
+        // Hand RemoveItem a list whose only contents do not travel -- measured
+        // on one carrying nothing but ExtraLeveledItem (0x2E), which is every
+        // piece of gear a chest rolled from a leveled list -- and the engine
+        // does not move it. It mints the arrival a fresh list, lowers the
+        // entry's count, and leaves the old list where it was with an
+        // ExtraCount of -1 written on it:
+        //
+        //   BEFORE [0] count  1 types [2E]      <- named
+        //   AFTER  [0] count -1 types [24 2E]      still in the chest
+        //
+        // Alone in its entry that husk is harmless: the count reaches zero and
+        // the entry goes with it. Beside a second unit of the same form it is
+        // not. GetCount() floors at 1 everywhere below, so the husk counted as
+        // a unit, "listed" overran the entry's count, and the GI2 clamp dropped
+        // units from the BACK of the list -- the real one. Reported as the
+        // Companions heirloom (CR06, 2026-09-20): a leveled Steel Battleaxe
+        // and the quest's own in one boss chest. Taking the plain one hid the
+        // quest unit and left the husk drawn in its place; the second click
+        // named the husk again, the count hit zero, and the quest reference
+        // was orphaned in a chest that claimed to hold nothing.
+        //
+        // Only an EXPLICIT count at or below zero. No ExtraCount means one
+        // unit, which is what nearly every list is.
+        bool IsSpentList(const RE::ExtraDataList* a_xl)
+        {
+            if (!a_xl) return false;
+            const auto* xc = const_cast<RE::ExtraDataList*>(a_xl)->GetByType<RE::ExtraCount>();
+            return xc && xc->count <= 0;
+        }
+
         // GI14: a CONTENT signature for a sub-stack the engine never gave a
         // uniqueID -- which is most of them (tempering, poison, charge, a
         // rename all create a list, none of them a uid).
@@ -682,6 +729,40 @@ namespace FUI::Grid
         // cursor is holding); declared here because the pool walker calls it.
         void ReleaseWornPendingEquips(const std::string& a_baseKey,
                                       RE::InventoryEntryData* a_entry);
+
+        int EffectiveCap(RE::TESBoundObject* a_obj);   // defined with StackCapOf below
+
+        // ★★★A STACK HAS NO UNIT NAMES. The uid the POOL system sees for a list.
+        //
+        // The engine's ExtraUniqueID names ONE unit, and for gear that is the
+        // whole point of GI1: a tile is bound to the sub-stack it shows, so
+        // equipping one sword never shifts its neighbour onto the wrong cell.
+        // PoolPrefix therefore lets a uid win over everything -- "form@XXXX"
+        // is a pool of exactly one.
+        //
+        // Applied to a STACKABLE that rule is wrong, and on a save that stamps
+        // a uid on every unit it is wrong for every arrow. Seven iron arrows
+        // recovered one at a time each sat on their own list carrying nothing
+        // but a uid, and unequipping the quiver put a 38-stack on the board
+        // and then seven single-arrow tiles across the free cells (user
+        // report). Every one of those lists is interchangeable with the plain
+        // stack -- InstanceSig already says so by hashing nothing on it and
+        // answering 0 -- so the uid must not split them either.
+        //
+        // ★The gate is the form's CAP, not the list's contents: a stolen arrow
+        // (sig != 0) still pools by signature with the other stolen arrows,
+        // and never by uid. Every read of a list's uid that feeds pool
+        // identity goes through here, so the walk that mints tiles, the
+        // matchers that release a pending equip, and the resolvers that pick
+        // a list to remove all agree about what a uid means for the form.
+        std::uint16_t PoolUid(RE::TESBoundObject* a_obj, const RE::ExtraDataList* a_xl)
+        {
+            if (!a_xl) return 0;
+            if (a_obj && EffectiveCap(a_obj) > 1) return 0;
+            auto* xl = const_cast<RE::ExtraDataList*>(a_xl);
+            const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+            return xu ? xu->uniqueID : 0;
+        }
 
         // ---- GI20: pools ----------------------------------------------------
         //
@@ -845,11 +926,14 @@ namespace FUI::Grid
                 // reasoning that a plain unit owns no ExtraDataList and so a
                 // star for it has nowhere to live -- the engine writes into a
                 // variant sibling's list instead. That measurement was real,
-                // and it stopped being the whole story the day ProcessFavorites
-                // learned to LIFT every existing star before calling
-                // SetFavorite: with the entry momentarily bare, the engine
-                // mints a fresh list, and the plain pool ends up owning one
-                // like everybody else. The line outlived the problem.
+                // and it stopped being the whole story once ProcessFavorites
+                // learned to HIDE the entry's lists for the SetFavorite call
+                // (GI81): with the entry genuinely bare, the engine mints a
+                // fresh list, and the plain pool ends up owning one like
+                // everybody else. (Lifting the STARS first, which is what this
+                // comment used to credit, never did that -- the engine reads
+                // the lists, not the stars; that is the bug GI81 fixed.) The
+                // line outlived the problem.
                 //
                 // What it cost while it stayed: star the tempered sword and the
                 // plain one lit up beside it, because "any star on this entry"
@@ -980,7 +1064,10 @@ namespace FUI::Grid
             // instead: the item in the player's hand gets sold, or destroyed.
             // Everything that genuinely wants the worn list goes through
             // WornExtraOf() instead, so excluding it here costs nothing.
+            // ★A spent list is excluded on the same terms and by the same
+            // lambda: it is never the answer to "which unit", whoever asks.
             const auto worn = [a_allowWorn](const RE::ExtraDataList* a_xl) {
+                if (IsSpentList(a_xl)) return true;
                 if (a_allowWorn) return false;
                 auto* xl = const_cast<RE::ExtraDataList*>(a_xl);
                 return xl->HasType<RE::ExtraWorn>() || xl->HasType<RE::ExtraWornLeft>();
@@ -1007,8 +1094,12 @@ namespace FUI::Grid
                 // so it can never be the answer to a sig- or plain-pool request.
                 // The star-clearing loop in ResolveExitUnit already had this
                 // filter -- same concept, one implementation now.
-                if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
-                    xu && xu->uniqueID != 0) continue;
+                // ★PoolUid, not the raw ExtraUniqueID: a stackable's uid-only
+                // list IS a plain unit (see PoolUid), and this is the resolver
+                // a plain arrow tile asks when it wants a list to hand the
+                // engine. Skipping those lists answered nullptr for a quiver
+                // whose every arrow the save had stamped.
+                if (PoolUid(a_entry->object, xl) != 0) continue;
                 return xl;
             }
             return nullptr;   // genuinely listless (or every candidate is worn)
@@ -1102,11 +1193,16 @@ namespace FUI::Grid
         // GI44: resolved by POOL (uid, sig), never by recorded position -- the
         // tile was collected at rebuild time and list positions drift, and the
         // sale itself already resolves by pool, so the price must match it.
+        // ★AND A PRICER'S SAY ON TOP, on the SELL side. Every caller of this is
+        // pricing a sale -- the barter tooltip, the click-sell, the fragment
+        // dropped on the merchant -- so the extension is asked here, once, with
+        // the same list the value came from, rather than at three sites that
+        // could drift apart.
         int TileValue(RE::TESBoundObject* a_obj, std::uint16_t a_uid, std::uint16_t a_sig)
         {
-            auto* p = RE::PlayerCharacter::GetSingleton();
-            return UnitValueWith(a_obj,
-                ExtraForPoolImpl(LiveEntry(p, a_obj), a_uid, a_sig));
+            auto* p  = RE::PlayerCharacter::GetSingleton();
+            auto* xl = ExtraForPoolImpl(LiveEntry(p, a_obj), a_uid, a_sig);
+            return LootBarter::PricedValue(a_obj, xl, UnitValueWith(a_obj, xl), false);
         }
 
 
@@ -1838,10 +1934,41 @@ namespace FUI::Grid
             // asked for never happened -- reported the moment the aimed-drop
             // decline went in.
             bool onTile = false;
+            // ★★★THE CARRIED UNIT'S NAME AS THE SOURCE KNEW IT. `pool` above is
+            // that name spelled the way the board keys pools, and for a unit
+            // with an ExtraUniqueID that spelling is `base@UID` -- the uid, and
+            // nothing else. A uid is the CONTAINER's numbering (InventoryChanges
+            // hands them out from its own counter, SetUniqueID re-stamps on
+            // arrival), so a unit lifted out of a chest turns up on the player's
+            // board under a uid the hint never heard of. Wants() then answered
+            // no, and every tempered or enchanted piece of gear -- anything the
+            // engine had given a list to -- first-fit into the front gap while
+            // the arrows dropped beside it landed where they were aimed. That
+            // is the "equippables ignore the aimed square" report, both ways
+            // (the shelf side is ReconcileContainer's adoption pass).
+            //
+            // What DOES survive the trip is the content signature: temper,
+            // enchantment, charge, poison, a typed name -- the item's own facts,
+            // hashed. So the hint carries both halves, and WantsUnit() falls
+            // back to the signature when the hint was armed by uid. sig 0 is a
+            // real answer here (a listed unit with nothing distinguishing about
+            // it), and it matches the same way.
+            std::uint16_t uid = 0;
+            std::uint16_t sig = 0;
             [[nodiscard]] bool Wants(const std::string& a_base,
                                      const std::string& a_pool) const
             {
                 return col >= 0 && baseKey == a_base && (pool.empty() || pool == a_pool);
+            }
+            // The per-UNIT question the gear paths ask: may THIS arriving unit
+            // take the hint? Exact pool first -- a unit that kept its uid, or
+            // one named by signature all along -- then the renumbered case.
+            [[nodiscard]] bool WantsUnit(const std::string& a_base, std::uint16_t a_uid,
+                                         std::uint16_t a_sig) const
+            {
+                if (!WantsForm(a_base)) return false;
+                if (pool.empty() || pool == PoolPrefix(a_base, a_uid, a_sig)) return true;
+                return uid != 0 && a_sig == sig;
             }
             // ★★THE FORM ALONE: "is an aimed drop of this thing in flight?"
             //
@@ -2083,8 +2210,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // (!simdrift) corrupt EVERY off-board identity, not just the
             // carry: a queued sale, a queued store and a trash park go through
             // the same exclusion and can be caught by the same drift.
-            // ★★A uniqueID DOES NOT DRIFT. The engine assigns it once and it
-            // stays; nothing in the game makes one vanish. Zeroing it here (the
+            // ★★A uniqueID DOES NOT DRIFT -- within one inventory. The engine
+            // assigns it once and it stays for as long as the unit stays;
+            // nothing in the game makes one vanish. (Crossing into another
+            // container is a different matter: the destination re-stamps it,
+            // which is DropHint::uid's whole subject. The off-board set is the
+            // player's own inventory, so that never applies here.) Zeroing it
+            // here (the
             // original behaviour) did not model a hostile reality -- it modelled
             // an IMPOSSIBLE one, in which an off-board unit has no identity at
             // all. Placement survives that by design (its last tier keeps the
@@ -2173,9 +2305,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             for (const auto& u : g_pendingEquip) {                     // equip queued
                 if (u.base == a_base) out.push_back(u);
             }
-            // held back by an INACTIVE preset: the preset recorded which unit
-            for (const std::uint16_t sg : Loadout::ReservedSigs(a_obj->GetFormID())) {
-                out.push_back({ a_base, 0, sg, "reserved" });
+            // held back by an INACTIVE preset: the preset recorded which unit,
+            // uid included -- a uid unit is its own pool, and a record naming
+            // only the signature never matched it (the "same pool" tier in
+            // takeOne covers a uid that arrived AFTER the record was made, not
+            // a plain uid unit, whose signature is 0 and matches nothing).
+            for (const auto& ru : Loadout::ReservedUnits(a_obj->GetFormID())) {
+                out.push_back({ a_base, ru.uid, ru.sig, "reserved" });
             }
             // engine removal queued (sold / stored / dropped) -- read from the
             // LEDGER since B4-3c: the request's own record, uid and sig
@@ -2311,8 +2447,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     if (!L && !R) continue;
                     if (u.hand == 1 && !R) continue;
                     if (u.hand == 2 && !L) continue;
-                    std::uint16_t uid = 0;
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
+                    const std::uint16_t uid = PoolUid(a_entry->object, xl);
                     if (uid == u.uid && InstanceSig(xl) == u.sig) {
                         matching += (std::max)(1, xl->GetCount());
                     }
@@ -2483,29 +2618,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         // ---- placement (JS maskOf / placeItems 1:1) ----
 
+        // ★GI71: the body of these three now lives in ItemDef.h, next to the def
+        // they read, so LootBarter can build the same footprint for a container
+        // or a merchant. The clamp is the only grid-specific part and is the one
+        // thing passed in -- a partner board has its own width.
         Mask MaskOf(const GridDef& a_def)
         {
-            Mask m;
-            if (!a_def.shape.empty()) {
-                std::istringstream ss(a_def.shape);
-                std::string tok;
-                int w = 1;
-                while (std::getline(ss, tok, '|')) {
-                    std::vector<bool> row;
-                    for (char c : tok) row.push_back(c == '1');
-                    w = (std::max)(w, static_cast<int>(row.size()));
-                    m.rows.push_back(std::move(row));
-                }
-                if (m.rows.empty()) m.rows.push_back({ true });
-                for (auto& r : m.rows) r.resize(w, false);
-                m.w = (std::min)(w, BaseCols());
-                m.h = static_cast<int>(m.rows.size());
-                return m;
-            }
-            m.w = (std::min)(BaseCols(), (std::max)(1, a_def.w));
-            m.h = (std::max)(1, a_def.h);
-            m.rows.assign(m.h, std::vector<bool>(m.w, true));
-            return m;
+            return FUI::ShapeOf(a_def, BaseCols());
         }
 
         // GI62: the footprint turned a_rot quarter-turns CLOCKWISE (0..3).
@@ -2515,20 +2634,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // every one of those sites instead of a special case in each.
         [[nodiscard]] Mask RotateMask(const Mask& a_mask, int a_rot)
         {
-            Mask m = a_mask;
-            for (int i = 0; i < (a_rot & 3); ++i) {
-                Mask r;
-                r.w = m.h;
-                r.h = m.w;
-                r.rows.assign(r.h, std::vector<bool>(r.w, false));
-                for (int y = 0; y < m.h; ++y) {
-                    for (int x = 0; x < m.w; ++x) {
-                        if (m.rows[y][x]) r.rows[x][m.h - 1 - y] = true;
-                    }
-                }
-                m = std::move(r);
-            }
-            return m;
+            return FUI::RotateShape(a_mask, a_rot);
         }
 
         // A footprint's def + rotation in one call (the pairing is always this).
@@ -2952,6 +3058,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // alpha, so the same colour said "occupied" loudly on one half of
             // the window and almost nothing on the other.
             const ImU32 shadeCol = Theme::OccupiedGround();
+            // Asked ONCE for the whole pass: it cannot change mid-frame, and
+            // the answer decides both the lookup below and the fill itself.
+            const bool rarityGround = Theme::RarityGround();
+
             // ★GI69: the NEW mark rides along here — a flat wash over the whole
             // cell instead of light bleeding in from the tile's border.
             //
@@ -3037,6 +3147,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const auto& it = *itP;
                 if (it.overflow || it.col < 0) continue;
                 const bool bagOpen = it.def.bag != 0 && g_openBags.contains(it.key);
+
                 for (int y = 0; y < it.mask.h; ++y) {
                     for (int x = 0; x < it.mask.w; ++x) {
                         if (!it.mask.rows[y][x]) continue;
@@ -3054,8 +3165,36 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             p1.y - (gr + 1 < a_view.rows ? shadeIn1 : shadeIn0));
                         dl->AddRectFilled(q0, q1, shadeCol);
                         // (rarity is a corner wedge drawn once per item in
-                        //  pass 4 now — nothing rarity-related belongs in this
-                        //  per-cell loop any more. See Grid.h.)
+                        //  pass 4 — nothing rarity-related belonged in this
+                        //  per-cell loop. See Grid.h.)
+                        // ★★★...UNLESS IT IS THE GROUND, and then this is
+                        // exactly where it belongs, for the two reasons the
+                        // wedge could not use.
+                        //
+                        // It must follow the item's MASK. A free-form footprint
+                        // has empty notches inside its bounding box, and a
+                        // rectangle drawn over the box would colour cells this
+                        // item does not own -- reading as "the thing parked in
+                        // that notch is legendary too". The wedge never had to
+                        // care: it is one mark in one cell.
+                        //
+                        // And it must land UNDER the sprite, which is what this
+                        // pass is. Painted in pass 4 the colour would sit on
+                        // top of the icon and hide it -- a wash, not a ground.
+                        //
+                        // ★It follows q0/q1, the SHADED area, so the ground
+                        // stops where the occupied fill stops and the skin's
+                        // own divider still shows between two cells of the same
+                        // item. The rule is "where does a groove exist", not
+                        // "where does this item end" -- see the note above.
+                        // ★It takes the glow byte and NOTHING ELSE. The museum
+                        // mark never comes down here -- it stays the wedge
+                        // pass 4 draws, in both modes -- so this pass asks
+                        // Lotd nothing and costs the board no lookup.
+                        if (rarityGround) {
+                            DrawRarityGround(dl, q0, q1, it.glow);
+                        }
+
                         if (bagOpen) dl->AddRectFilled(q0, q1, kOpenBagCol);
                     }
                 }
@@ -3561,7 +3700,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     const bool bh = (idx == ownerIdx);
                     Badges::Draw(dl, p0, w, h, shape,
                                  0x14u,   // the player's own grid
-                                 it.obj->GetFormID(), it.uid, bh);
+                                 it.obj->GetFormID(), it.uid, bh, &it.sockets);
                 }
 
                 // (★GI69: the NEW mark moved to pass 2 -- it is a wash on the
@@ -3609,6 +3748,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // ★1.0.5 rarity: one wedge at the footprint's top-right, over
                 // the sprite. Drawn here rather than in the occupancy pass so a
                 // multi-cell item gets ONE mark instead of one per cell.
+                // ★★AND IT IS CALLED IN BOTH MODES, because the wedge is where
+                // the museum mark lives whatever RARITY MARK says. In ground
+                // mode DrawRarityWedge draws only that -- the board's rarity
+                // ground was painted per mask cell in pass 2, where it belongs
+                // (under the sprite, following the real footprint) rather than
+                // over this one anchor cell.
                 const ImVec2 wedgeCell = AnchorCell(it.mask, p0, /*bottom*/ false);
                 DrawRarityWedge(dl, wedgeCell,
                                 ImVec2(wedgeCell.x + CellPx(), wedgeCell.y + CellPx()),
@@ -3896,6 +4041,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             !ImGui::GetIO().WantTextInput &&
                             !GoldCoins::IsCoinForm(fid)) {
                             ToggleFavorite(it.key, it.obj, it.uid, it.xlIdx, it.sig);
+                            // GI81 diag: the press itself, so a toggle that
+                            // never reaches the engine can be told from one
+                            // that did and had no effect. One line per click.
+                            SKSE::log::info("[FAV] F on '{}' key='{}' uid {:04X} xl {} sig {:04X} count {}",
+                                it.obj->GetName(), it.key, it.uid, it.xlIdx, it.sig, it.count);
                             Sfx::Favorite();
                             // ★S1: no rebuild -- the star lands when the engine
                             // applies it (ProcessFavorites), and THAT refreshes
@@ -4559,6 +4709,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return true;
     }
 
+    const FUI::Shape* HeldShape()
+    {
+        return g_held ? &g_held->mask : nullptr;
+    }
+
     namespace
     {
         // ★Ring session: the cursor's exits, by ORIGIN (user spec). A carry
@@ -4771,10 +4926,24 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         h.partnerValue = a_value;
         h.uid = a_uid;       // D4: which sub-stack was picked up
         h.xlIdx = a_xlIdx;
+        h.partnerWorn = a_unit.worn;   // the worn slot travels with the carry (see Held)
         h.partnerOrd = a_ord;   // GI19: and which cell, for plain look-alikes
         if (auto* p = LootBarter::Partner()) {   // GI25: signature for the transfer
             RE::InventoryEntryData* pe = LiveEntry(p, a_obj);
-            h.sig = InstanceSig(ExtraForTile(pe, a_uid, a_xlIdx));
+            // ★★★VERIFIED, NOT WALKED TO. This hashed whatever list sat at the
+            // recorded position, and a partner cell's position is written at
+            // birth and never again: AddExtraList prepends, so one item stored
+            // into the container puts the ARRIVAL at the worn cell's old
+            // index. A uid-less worn unit -- a follower's enchanted boots --
+            // then picked up wearing the newcomer's signature, and the take
+            // that followed resolved by that signature and moved the wrong
+            // pair (2026-09-10; the tooltip lied the same way, see
+            // DrawItemTooltip). The caller now passes the cell's signature and
+            // the position is held against it; the live list still answers
+            // when it can (a uid match, or a verified position), so charge
+            // spent since the cell was born is not lost either.
+            auto* sx = ExtraForUnitImpl(pe, a_uid, a_xlIdx, a_unit.sig, true);
+            h.sig = sx ? InstanceSig(sx) : a_unit.sig;
             // ★(1.6) ...and whether it is a quest object, asked HERE for the
             // reason GI36 gives about the star and the stolen mark: once the
             // unit is on the cursor there is no cell left on either side to
@@ -5039,10 +5208,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         xl->HasType<RE::ExtraWornLeft>()) {
                         continue;
                     }
-                    std::uint16_t xuid = 0;
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                        xuid = xu->uniqueID;
-                    }
+                    // ★PoolUid: a stackable's uid never names a pool -- its
+                    // uid-only lists are the plain remainder like any other
+                    const std::uint16_t xuid = PoolUid(a_entry->object, xl);
                     const std::string p = PoolPrefix(a_base, xuid, InstanceSig(xl));
                     if (p == a_base) continue;   // plain: the caller's remainder
                     const int n = (std::max)(1, xl->GetCount());
@@ -5112,6 +5280,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 for (auto* xl : *a_entry->extraLists) {
                     const int idx = xi++;
                     if (!xl) continue;
+                    // A husk holds no unit (see IsSpentList). The index above
+                    // still advances: xlIdx is a position in the ENGINE's list.
+                    if (IsSpentList(xl)) continue;
                     const int n = (std::max)(1, xl->GetCount());
                     listed += n;
                     if (a_skipWorn && !wornBagStays &&
@@ -5120,16 +5291,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // remember WHICH units these were: the off-board pass below
                         // has to tell "this unit never entered the set" from "this
                         // unit is on the board and must come out".
-                        std::uint16_t wuid = 0;
-                        if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                            wuid = xu->uniqueID;
-                        }
+                        const std::uint16_t wuid = PoolUid(a_entry->object, xl);
                         wornUnits.push_back({ wuid, InstanceSig(xl), n, idx,
                                               xl->HasType<RE::ExtraWornLeft>() ? 2 : 1 });
                         continue;
                     }
-                    std::uint16_t uid = 0;
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
+                    const std::uint16_t uid = PoolUid(a_entry->object, xl);
                     // GI41: only reachable with a_skipWorn=false (partner boards
                     // show what the NPC wears). Record it HERE, where it is a
                     // fact, instead of leaving the consumer to guess by position.
@@ -5339,6 +5506,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // store is NOT certain -- it may still fail -- so those
                     // keep the strict rule, where a wrong guess would hide
                     // something the player still owns.
+                    // ★A RESERVED unit is named by its uid when it has one, and
+                    // the uid is the one handle that cannot drift: the tab
+                    // holds THAT unit whatever its signature has done since
+                    // (a charge spent, a temper applied while the tab was
+                    // worn). The strict tier above wants both halves to agree;
+                    // this one settles for the half that is proof. It is not
+                    // the guess the held block below makes -- a uid match is
+                    // exact -- so a reserved unit never takes a sibling.
+                    if (uid != 0 && why && std::strcmp(why, "reserved") == 0) {
+                        for (auto it = insts.begin(); it != insts.end(); ++it) {
+                            if (it->uid != uid) continue;
+                            if (--it->units <= 0) insts.erase(it);
+                            trace("REMOVED by uid (reserved, signature drifted)");
+                            return;
+                        }
+                    }
                     const bool held = why &&
                         (std::strcmp(why, "held") == 0 ||
                          std::strcmp(why, "trash") == 0);
@@ -5511,10 +5694,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // which prefers the plain pool and so hid the plain dagger while the
             // preset was wearing the tempered one, swapping them on screen.
             if (surplus > 0 && a_instanceKeys && a_entry && a_entry->object) {
-                for (const std::uint16_t rs :
-                     Loadout::ReservedSigs(a_entry->object->GetFormID())) {
+                for (const auto& ru :
+                     Loadout::ReservedUnits(a_entry->object->GetFormID())) {
                     if (surplus <= 0) break;
-                    const std::string prefix = PoolPrefix(a_base, 0, rs);
+                    const std::string prefix = PoolPrefix(a_base, ru.uid, ru.sig);
                     const auto pit = pools.find(prefix);
                     if (pit == pools.end()) continue;
                     if (static_cast<int>(pit->second.size()) - hide[prefix] <= 0) continue;
@@ -5830,9 +6013,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // worse failure than a forgotten cell.
                 std::set<std::string> reserved;
                 if (a_instanceKeys && a_entry && a_entry->object) {
-                    for (const std::uint16_t rs :
-                         Loadout::ReservedSigs(a_entry->object->GetFormID())) {
-                        reserved.insert(PoolPrefix(a_base, 0, rs));
+                    for (const auto& ru :
+                         Loadout::ReservedUnits(a_entry->object->GetFormID())) {
+                        reserved.insert(PoolPrefix(a_base, ru.uid, ru.sig));
                     }
                 }
                 for (std::size_t s = 0; s < slots.size(); ++s) {
@@ -6044,14 +6227,15 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         xl->HasType<RE::ExtraWornLeft>()) {
                         continue;
                     }
-                    const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+                    const std::uint16_t xuid = PoolUid(a_entry->object, xl);
                     if (it.uid != 0) {
-                        if (xu && xu->uniqueID == it.uid) { it.xlIdx = here; break; }
+                        if (xuid == it.uid) { it.xlIdx = here; break; }
                         continue;
                     }
                     // a uid unit is the sole member of its own pool, so it
-                    // can never answer a signature-pool request
-                    if (xu && xu->uniqueID != 0) continue;
+                    // can never answer a signature-pool request (PoolUid: a
+                    // stackable's uid-only list is not a uid unit)
+                    if (xuid != 0) continue;
                     if (InstanceSig(xl) == it.sig) { it.xlIdx = here; break; }
                 }
             }
@@ -6100,6 +6284,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (HostApi::HasTinter()) {
                     SetTintTier(it.glow,
                         HostApi::TintTier(a_obj ? a_obj->GetFormID() : 0, xl));
+                }
+                // ★The socket row, from the same list for the same reason.
+                if (HostApi::HasSocketer()) {
+                    HostApi::Sockets(a_obj ? a_obj->GetFormID() : 0, xl, it.sockets);
                 }
             }
             // GI40: the star belongs to the POOL, not to one list.
@@ -6174,10 +6362,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // answer nobody would defend. It has no ownership boundary to
             // measure against (that is the encumbrance line, and these boards
             // are outside it), so the hard board is the whole test.
+            // ★ShownRows for the tab boards: they are drawn that tall (see
+            // the tab views in Rebuild), and a tile seated in a visible row
+            // must not be uprooted by the next rebuild.
             if (it.col >= 0 && it.row >= 0 &&
                 (it.inBag.empty() ? !OwnedFootprint(it.col, it.row, it.mask)
                                   : (IsTabKey(it.inBag) &&
-                                     it.row + it.mask.h > BaseRows()))) {
+                                     it.row + it.mask.h > ShownRows()))) {
                 it.col = -1;
                 it.row = -1;
             }
@@ -6530,10 +6721,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 if (!L && !R) continue;
                                 if (o.hand == 1 && !R) continue;
                                 if (o.hand == 2 && !L) continue;
-                                std::uint16_t u = 0;
-                                if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                                    u = xu->uniqueID;
-                                }
+                                const std::uint16_t u = PoolUid(entry->object, xl);
                                 if (u == o.uid && InstanceSig(xl) == o.sig) return true;
                             }
                             return false;
@@ -6641,9 +6829,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // entry-missing test permanently false, and every dragged
                         // loot silently first-fit into the front gap instead of
                         // landing where it was dropped.
+                        // ★WantsUnit, not Wants: a partner carry's uid is the
+                        // container's numbering and does not cross over (see
+                        // DropHint::uid), so the unit is matched by signature
+                        // when it arrives renumbered.
                         if (le.col < 0 &&
-                            g_dropHint.Wants(baseKey,
-                                PoolPrefix(baseKey, u.uid, u.sig))) {
+                            g_dropHint.WantsUnit(baseKey, u.uid, u.sig)) {
                             le.col = g_dropHint.col;
                             le.row = g_dropHint.row;
                             le.bag = g_dropHint.bag;
@@ -7715,6 +7906,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             if (v.bagKey.empty()) continue;
                             if (v.bagKey == kTrashKey) continue;   // F2: never spill INTO the trash
                             if (IsTabKey(v.bagKey)) continue;      // (1.6) nor into a tab board
+                            // ★★NOR INTO A BAG THAT LIVES ON ANOTHER TAB. The
+                            // bag views carry no notion of where the bag's own
+                            // tile sits, so a quest satchel parked on the QUEST
+                            // board was as good a spill target as a backpack on
+                            // ITEMS -- and being closed, it was reached on the
+                            // second pass. Measured: a loadout switch took 11
+                            // bonus cells off the board and the armour at the
+                            // bottom of it walked into Sylgja's Satchel, one tab
+                            // over, where nobody thinks to look ("I genuinely do
+                            // not see it anywhere"). Overflow lands only in a
+                            // bag whose tile is on the main board; a quest item
+                            // is not storage.
+                            if (const auto bi = bags.find(v.bagKey);
+                                bi != bags.end() && IsTabKey(g_items[bi->second].inBag)) {
+                                continue;
+                            }
                             if (v.carried) continue;   // it is on the cursor, not on the board
                             if ((pass == 0) != v.open) continue;   // pass 0 = open bags
                             // ★A typed bag is not overflow space. Without this a
@@ -7736,6 +7943,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                 cand->inBag = v.bagKey;
                                 v.items.push_back(static_cast<int>(cand - g_items.data()));
                                 v.rows = rows;
+                                // ★SAY SO. This was the one move on the board
+                                // that left no line behind: a tile the main
+                                // board can no longer hold (the CW bonus cells
+                                // shrinking under a loadout switch is enough)
+                                // walks into a bag -- a CLOSED one on the
+                                // second pass -- and the only trace was a wash
+                                // on the bag's tile. Reported as "the armour
+                                // disappeared completely".
+                                SKSE::log::info("[GRID] spilled '{}' off the main board "
+                                                "into {} bag '{}' ({}) at [{},{}]",
+                                    cand->obj->GetName() ? cand->obj->GetName() : "?",
+                                    v.open ? "open" : "CLOSED", v.bagName, v.bagKey,
+                                    cand->col, cand->row);
                                 // arrival into a CLOSED bag is invisible — light
                                 // the bag's own tile (the NEW wash: clears on
                                 // hover, exactly the "look in here" it means)
@@ -7784,7 +8004,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 v.bagKey = tabKey;
                 v.bagName = Lang::T(t == 1 ? Lang::Str::QuestTab : Lang::Str::KeysTab);
                 v.cols = BaseCols();
-                v.minRows = BaseRows();
+                // ★As tall as the board on screen. The child is sized from
+                // ShownRows for every tab, so a tab board that stopped at the
+                // base rows would sit in a frame with a blank strip under it.
+                // These boards are outside the encumbrance line anyway (see
+                // MakeDisplayTile), so the extra rows are ordinary cells.
+                v.minRows = ShownRows();
                 v.maxRows = 4096;
                 std::vector<Item*> list;
                 for (auto& it : g_items) {
@@ -8069,10 +8294,17 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // "the background is missing" and "the cell looks empty" are the
             // same state seen from two distances. Name them; a count alone
             // would not say WHICH item, and the report is about one item.
+            // ★And with "!bagdump = 1" (the same switch that dumps the
+            // inventory classification), EVERY tile -- because "I do not see
+            // it anywhere" is a question about a placed tile, and a placed
+            // tile is exactly what the unplaced line above never names.
+            const bool dumpAll = BagFilter::DumpsEnabled();
             for (const auto& it : g_items) {
-                if (it.col >= 0 && !it.overflow) continue;
-                SKSE::log::info("[GRID]   unplaced: '{}' col={} row={} overflow={} "
+                const bool unplaced = it.col < 0 || it.overflow;
+                if (!unplaced && !dumpAll) continue;
+                SKSE::log::info("[GRID]   {}: '{}' col={} row={} overflow={} "
                                 "bag='{}' {}x{} count={}",
+                    unplaced ? "unplaced" : "placed",
                     it.obj ? it.obj->GetName() : "?", it.col, it.row,
                     it.overflow ? 1 : 0, it.inBag, it.mask.w, it.mask.h, it.count);
             }
@@ -8957,8 +9189,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // the same honour CollectDisplayTiles pays it (GI21/B2). ★S3:
                 // a hint into a GENERAL bag seats there now; an occupied hint
                 // falls through to first-fit, matching the placer.
-                if (!hintTaken && g_dropHint.Wants(baseKey,
-                        PoolPrefix(baseKey, u->uid, u->sig))) {
+                // ★WantsUnit: same renumbering allowance as the rebuild's gear
+                // branch (DropHint::uid) -- the two paths must agree, or a take
+                // would land right under one and wrong under the other.
+                if (!hintTaken && g_dropHint.WantsUnit(baseKey, u->uid, u->sig)) {
                     auto* hOcc = occOf(g_dropHint.bag);
                     const int  hrot = CanRotate(gdef) ? (g_dropHint.rot & 3) : 0;
                     const Mask hm = MaskOf(gdef, hrot);
@@ -9847,8 +10081,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     //
     // The one thing only the engine can do is favourite a unit that owns NO
     // list, because that unit has to be split off the stack first -- and it
-    // refuses to split while the entry already carries a hotkey. So lift the
-    // other hotkeys for the duration of that one call and put them straight back.
+    // only splits for an entry that has no lists at all. So the entry's lists
+    // are hidden from it for the duration of that one call (GI81, in
+    // ProcessFavorites) and the list it mints is spliced back in.
     // ★The doll's and the drawer's way in. A board tile has a key and a list
     // index; a WORN unit has neither -- it owns no cell, and its position in
     // the entry shifts every time something is equipped. uid+sig names it
@@ -9871,18 +10106,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         for (const auto& f : q) {
             // tripwire witness: this form's star state is changing on purpose
             if (f.obj) g_starChangeOk.insert(f.obj->GetFormID());
+            bool found = false;
             for (auto* entry : *changes->entryList) {
                 if (!entry || entry->object != f.obj) continue;
+                found = true;
                 const std::string base = FormKey(f.obj);
                 // The pool a list belongs to, by CONTENT -- never by pointer.
                 // RemoveFavorite/SetFavorite create and destroy lists, so a
                 // pointer captured before a call may be freed by it (this is
                 // what crashed: RemoveByType deleting an ExtraHotkey the engine
                 // had already reclaimed). Pool keys survive that.
-                auto poolOf = [&base](RE::ExtraDataList* a_xl) {
-                    std::uint16_t u = 0;
-                    if (const auto* xu = a_xl->GetByType<RE::ExtraUniqueID>()) u = xu->uniqueID;
-                    return PoolPrefix(base, u, InstanceSig(a_xl));
+                auto poolOf = [&base, &f](RE::ExtraDataList* a_xl) {
+                    return PoolPrefix(base, PoolUid(f.obj, a_xl), InstanceSig(a_xl));
                 };
                 // Every hotkey removal goes through the engine. We only ever ADD
                 // an ExtraHotkey ourselves -- deleting one we did not create is
@@ -9929,6 +10164,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // nothing changed on screen.
                 const std::uint16_t tsig = xl ? InstanceSig(xl) : 0;
                 const bool on = PoolHasStar(entry, f.uid, tsig);
+                // ★GI81 diag: one line per press, UNCONDITIONALLY. The first
+                // TEST 10 log had no trace of the press at all, and a whole
+                // test cycle went on telling the silent branches apart. A
+                // favourite is a click, not a frame; the line is cheap.
+                // The snapshot is taken BEFORE any branch mutates the lists,
+                // and `hit` is resolved now because RemoveFavorite may free
+                // the very list `xl` points at (that was a real crash once).
+                auto listsNow = [&]() {
+                    std::string ls;
+                    if (entry->extraLists) {
+                        for (auto* x2 : *entry->extraLists) {
+                            if (!x2) continue;
+                            std::uint16_t u = 0;
+                            if (const auto* xu = x2->GetByType<RE::ExtraUniqueID>()) {
+                                u = xu->uniqueID;
+                            }
+                            ls += std::format("[{} n{}{}{}] ",
+                                PoolPrefix(base, u, InstanceSig(x2)), x2->GetCount(),
+                                x2->HasType<RE::ExtraHotkey>() ? " HOT" : "",
+                                (x2->HasType<RE::ExtraWorn>() ||
+                                 x2->HasType<RE::ExtraWornLeft>()) ? " WORN" : "");
+                        }
+                    }
+                    return ls.empty() ? std::string("-") : ls;
+                };
+                const std::string before = listsNow();
+                const std::string hit    = xl ? poolOf(xl) : std::string("-");
+                const char*       via    = "?";
                 // ★★Tell the wheel the moment the star comes off, not the next
                 // time it happens to look. It re-reads the favourites only when
                 // it opens, so unstar-and-restar inside one inventory visit was
@@ -9951,11 +10214,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // A toggle that cannot be untoggled is the one outcome worth
                     // avoiding here.
                     // ★This is now the rare path, not the plain pool's normal
-                    // one: lifting the other stars before SetFavorite gets the
-                    // engine to mint a list for a plain unit too, so it usually
-                    // owns one and takes the precise branch below. Reached only
-                    // when that failed -- and then we do not know which list
-                    // holds this pool's mark, so coarse is the honest answer.
+                    // one: hiding the entry's lists from SetFavorite (GI81,
+                    // below) gets the engine to mint a list for a plain unit
+                    // too, so it usually owns one and takes the precise branch.
+                    // Reached only when that failed -- and then we do not know
+                    // which list holds this pool's mark, so coarse is the honest
+                    // answer.
                     std::vector<std::string> all;
                     if (entry->extraLists) {
                         for (auto* x : *entry->extraLists) {
@@ -9963,82 +10227,138 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                     clearPools(all);
+                    via = "off-all";
                 } else if (on) {
                     clearPools({ PoolPrefix(base, f.uid, tsig) });
+                    via = "off-pool";
                 } else if (xl) {
                     xl->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
+                    via = "self";
                 } else {
                     // No list of its own, and the pool has no star anywhere else.
-                    // Only the engine can split the unit off the stack, and it
-                    // refuses while the entry already carries a hotkey -- so lift
-                    // the others across the call.
-                    std::vector<std::string> lifted;
-                    if (entry->extraLists) {
-                        for (auto* x : *entry->extraLists) {
-                            if (x && x->HasType<RE::ExtraHotkey>()) lifted.push_back(poolOf(x));
-                        }
-                    }
-                    clearPools(lifted);
-                    // ★★SetFavorite's second parameter names the UNIT, and null
-                    // is the only honest value for a plain unit: it has no list
-                    // to point at, which is the whole reason this branch exists.
-                    // The engine then picks for itself, and MEASUREMENT settled
-                    // what it picks -- it mints a fresh list only when the entry
-                    // has none at all; with even one variant present it writes
-                    // into that variant's list instead. Calling again does not
-                    // move it along either (verified: a second call is refused
-                    // outright while any star exists).
+                    // Only the engine can split a unit off the stack, and
+                    // MEASUREMENT settled when it does: SetFavorite(entry, null)
+                    // mints a fresh list only for an entry with NO lists at all;
+                    // with even one variant present it writes the hotkey into
+                    // that variant's list instead, and calling again is refused
+                    // outright while any star exists. Lifting the other stars
+                    // across the call (what this branch did) changed nothing,
+                    // because what the engine looks at is the LISTS, not the
+                    // stars -- a torch with a stolen sibling, a potion with an
+                    // owned one, never got a list of its own, and the tile the
+                    // player pointed at stayed dark while the sibling lit up.
+                    // (Reported: "starring registers, but no star unless the
+                    // item was equipped once, or dropped and picked up" -- both
+                    // of which hand the unit a list by other means.)
                     //
-                    // So there is no way to aim this call at a plain unit, and
-                    // the star it produces is ACCEPTED where it lands rather
-                    // than reverted. Reverting was tried first and it removed
-                    // the wrong thing -- it left the player unable to favourite
-                    // an ordinary dagger at all, which is worse than the star
-                    // being coarse. PoolHasStar reads any entry star as the
-                    // plain pool's, so the tile the player pointed at does light
-                    // up; its variant sibling lights up with it. Same dagger,
-                    // one mark between them.
+                    // ★★GI81: SO HIDE THE LISTS. For this one call the entry's
+                    // container is detached; the engine sees the ordinary bare
+                    // entry it handles every day, mints a {Hotkey} list into a
+                    // fresh container, and that list is then spliced into the
+                    // real one. Nothing here constructs an ExtraDataList (the
+                    // library cannot, in a cross-runtime build: no ctor, and
+                    // the object's size differs by runtime) -- the engine does,
+                    // on its usual path. countDelta is untouched: lists only
+                    // partition the entry's count, and AddExtraList is a
+                    // push_front. The fresh list hashes to the plain pool
+                    // (nothing but the hotkey), which is exactly the shape the
+                    // engine mints for a bare entry, so PoolHasStar and the
+                    // untoggle path read it as they always have.
+                    // ★The one container deleted here is one the engine just
+                    // made and nothing else references; ~BSSimpleList frees its
+                    // nodes only (the payloads are pointers), and the library's
+                    // own ~InventoryEntryData deletes containers the same way.
+                    // ★Game thread only (ProcessFavorites runs on the Tick), so
+                    // nothing reads extraLists inside the window.
+                    auto* const hidden = entry->extraLists;
+                    entry->extraLists = nullptr;
                     changes->SetFavorite(entry, nullptr);
-                    // Re-walk the CURRENT list and restore by POOL, so a list
-                    // the split rebuilt is matched by what it holds, not by an
-                    // address that may no longer mean anything.
-                    if (entry->extraLists && !lifted.empty()) {
-                        for (auto* x : *entry->extraLists) {
-                            if (!x || x->HasType<RE::ExtraHotkey>()) continue;
-                            if (std::find(lifted.begin(), lifted.end(), poolOf(x)) ==
-                                lifted.end()) continue;
-                            x->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
+                    auto* const minted = entry->extraLists;
+                    entry->extraLists = hidden;
+                    int spliced = 0;
+                    if (minted && hidden) {
+                        for (auto* x : *minted) {
+                            if (!x) continue;
+                            entry->AddExtraList(x);   // into `hidden`, the real container
+                            ++spliced;
+                        }
+                        delete minted;   // nodes only -- the lists live on in `hidden`
+                    } else if (minted) {
+                        entry->extraLists = minted;   // no container before: the engine's IS it
+                        for (auto* x : *minted) {
+                            if (x) ++spliced;
                         }
                     }
-                }
-                // ★Back behind the trace switch. It was unconditional while the
-                // question was open, and it answered it: the engine mints a list
-                // only for an entry that has none, so "via=engine" on an entry
-                // with variants always lands on a sibling. Nothing left to catch
-                // here every press.
-                if (g_poolTrace) {
-                    std::string ls;
-                    if (entry->extraLists) {
-                        for (auto* x2 : *entry->extraLists) {
-                            if (!x2) continue;
-                            std::uint16_t u = 0;
-                            if (const auto* xu = x2->GetByType<RE::ExtraUniqueID>()) {
-                                u = xu->uniqueID;
-                            }
-                            ls += std::format("[{}{}] ",
-                                PoolPrefix(FormKey(f.obj), u, InstanceSig(x2)),
-                                x2->HasType<RE::ExtraHotkey>() ? " HOT" : "");
-                        }
+                    if (spliced == 0) {
+                        via = "mint-none";
+                        SKSE::log::warn("[FAV] '{}': the engine minted no list for the plain "
+                                        "unit -- the star has nowhere to sit",
+                            f.obj->GetName());
+                    } else {
+                        via = hidden ? "mint-hidden" : "mint-bare";
                     }
-                    SKSE::log::info("[FAV] toggle uid {:04X} xl {} was={} via={}"
-                                    " asked='{}' hit='{}' | {}",
-                        f.uid, f.xlIdx, on ? "on" : "off",
-                        xl ? "self" : "engine",
-                        PoolPrefix(base, f.uid, tsig),
-                        xl ? poolOf(xl) : std::string("-"),
-                        ls.empty() ? "-" : ls);
                 }
+                // ★The one line that says what happened: the branch, the lists
+                // before and after, and whether the pool the player pointed at
+                // reads as starred NOW -- which is exactly what the tile will
+                // draw. (This used to sit behind g_poolTrace; see the diag note
+                // at the snapshot above for why it is unconditional.)
+                SKSE::log::info("[FAV] toggle '{}' uid {:04X} xl {} sig {:04X} was={} via={} "
+                                "asked='{}' hit='{}' delta={} | before {}| after {}| star now={}",
+                    f.obj->GetName(), f.uid, f.xlIdx, tsig, on ? "on" : "off", via,
+                    PoolPrefix(base, f.uid, tsig), hit, entry->countDelta,
+                    before, listsNow(), PoolHasStar(entry, f.uid, tsig) ? "yes" : "no");
                 break;
+            }
+            if (!found) {
+                // ★★★GI82: THE UNIT HAS NO ENTRY, SO MAKE ONE.
+                //
+                // The board counts through GetInventory, which walks the base
+                // container AND the changes; InventoryChanges::entryList holds
+                // only the changes. A unit nothing has ever happened to lives
+                // in the base container alone and has NO entry here -- and
+                // this loop, finding nothing, used to return without a word.
+                // Measured (TEST 10 diag): 'Iron War Axe', count 1, no entry.
+                // That IS the report: "an item never equipped will not take a
+                // star; equip and unequip it once, or drop and pick it up, and
+                // it will" -- each of those is the engine creating the entry.
+                // (The sibling-list case above, GI81, is real too; it is just
+                // not the common one.)
+                //
+                // ★The engine does exactly this for a base unit the moment it
+                // is worn: an entry with countDelta 0 (the unit is still the
+                // container's) carrying the worn list. Same shape here, with
+                // the hotkey list the engine mints on a bare entry. The class
+                // is 0x18 in every runtime, the ctor is the library's, the
+                // allocation is the game heap (TES_HEAP_REDEFINE_NEW), and
+                // AddEntryData is the library's push_front + changed=true.
+                // ★A request that NAMES a unit (uid or sig) cannot be for a
+                // listless base unit -- that is a stale click, not a licence
+                // to invent an entry for something else.
+                if (!f.obj || f.uid != 0 || f.sig != 0 || f.worn) {
+                    SKSE::log::warn("[FAV] '{}' ({:08X}): no InventoryChanges entry and the "
+                                    "request names a unit (uid {:04X} sig {:04X} worn={}) -- "
+                                    "stale, ignored",
+                        f.obj ? f.obj->GetName() : "-", f.obj ? f.obj->GetFormID() : 0u,
+                        f.uid, f.sig, f.worn);
+                    continue;
+                }
+                auto* fresh = new RE::InventoryEntryData(f.obj, 0);
+                changes->AddEntryData(fresh);
+                changes->SetFavorite(fresh, nullptr);   // bare entry: the engine mints {Hotkey}
+                const bool starred = PoolHasStar(fresh, 0, 0);
+                if (starred) {
+                    Wheeler::NoteStarred(f.obj->GetFormID());
+                    SKSE::log::info("[FAV] '{}' ({:08X}): had no InventoryChanges entry -- "
+                                    "made one (delta 0) and the engine starred it",
+                        f.obj->GetName(), f.obj->GetFormID());
+                } else {
+                    SKSE::log::warn("[FAV] '{}' ({:08X}): had no InventoryChanges entry -- "
+                                    "made one (delta 0) but the engine minted no hotkey list "
+                                    "on it (lists: {})",
+                        f.obj->GetName(), f.obj->GetFormID(),
+                        fresh->extraLists ? static_cast<int>(fresh->extraLists->size()) : 0);
+                }
             }
         }
         // GI33: the star is read back OUT of the engine once the change has
@@ -10949,6 +11269,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     int SpaceUsed() { return g_spaceUsed; }
+    int TileCount() { return static_cast<int>(g_items.size()); }
 
     // ⛔The old companion `BagFreeCells()` is gone. It existed because the
     //  total counted only the main board, so the take-all budget had to add
@@ -11274,6 +11595,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     int CwBase() { return g_cwBase; }
     int CwMaxCells() { return g_cwMaxCells; }
     int CwBonusCells() { return g_cwBonusCells; }
+
+    void SetViewRows(int a_rows)
+    {
+        g_viewRows = std::clamp(a_rows, kMinBoardRows, kMaxBoardRows);
+        g_viewRowsCap = g_viewRows;   // re-clamped to the display on the next frame
+    }
+    int ViewRowsSetting() { return g_viewRows; }
+
+    // The base board always shows whole; the owned bonus rows show on top of
+    // it up to the cap; anything past the cap is what scrolls.
+    int ShownRows()
+    {
+        const int cap = (std::max)(BaseRows(), g_viewRowsCap);
+        return std::clamp(OwnedRowSpan(), BaseRows(), cap);
+    }
+
+    bool ClampViewRowsToDisplay(float a_displayH, float a_chromeH)
+    {
+        const float cell = CellPx();
+        if (cell <= 0.0f || a_displayH <= 0.0f) return false;
+        const int fits = static_cast<int>((a_displayH - a_chromeH) / cell);
+        // From the REQUEST, like the base rows: lowering SCALE gives the
+        // rows back.
+        const int eff = std::clamp(fits, kMinBoardRows, g_viewRows);
+        if (eff == g_viewRowsCap) return false;
+        g_viewRowsCap = eff;
+        return true;
+    }
 
     void ClaimIncomingPouchGold()
     {
@@ -11709,11 +12058,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!a_entry || !a_entry->extraLists) return { PickKind::kAnyIsSafe, nullptr };
         bool ambiguous = false;
         for (auto* xl : *a_entry->extraLists) {
-            if (!xl) continue;
+            if (!xl || IsSpentList(xl)) continue;   // a husk is nobody's unit
             const bool wornHere = xl->HasType<RE::ExtraWorn>() ||
                                   xl->HasType<RE::ExtraWornLeft>();
-            const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
-            const bool plain = InstanceSig(xl) == 0 && !(xu && xu->uniqueID != 0);
+            const bool plain = InstanceSig(xl) == 0 && PoolUid(a_entry->object, xl) == 0;
             if (wornHere && !a_wornLegal) return {};   // the body's unit is grabbable
             if (!plain) ambiguous = true;
         }
@@ -11721,6 +12069,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     }
 
     std::uint16_t InstanceSigOf(RE::ExtraDataList* a_xl) { return InstanceSig(a_xl); }
+    std::uint16_t PoolUidOf(RE::TESBoundObject* a_obj, RE::ExtraDataList* a_xl)
+    {
+        return PoolUid(a_obj, a_xl);
+    }
 
     bool IsBagForm(RE::TESBoundObject* a_obj)
     {
@@ -11773,8 +12125,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (!L && !R) continue;
             if (a_hand == 1 && !R) continue;
             if (a_hand == 2 && !L) continue;
-            std::uint16_t uid = 0;
-            if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) uid = xu->uniqueID;
+            const std::uint16_t uid = PoolUid(a_entry->object, xl);
             if (uid == a_uid && InstanceSig(xl) == a_sig) return xl;
         }
         return WornExtraOf(a_entry, a_hand);   // fall back rather than show nothing
@@ -11954,43 +12305,39 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (sil) UIRoot::EndSilhouette(a_dl);
     }
 
-    // ★★See Grid.h. ONE wedge per item, at the footprint's top-right.
-    // Black underneath so the colour reads on a pale sheet as well as on a
-    // dark panel — the same trick every marker on this tile already uses.
-    void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
-                         const ImVec2& a_boxMax, std::uint8_t a_haloBits,
-                         Lotd::Status a_relic)
+    // ★★★THE MUSEUM'S COLOUR IS NOT A RARITY, and keeping it out of the switch
+    // below is what lets it stay a wedge when rarity moves to the ground.
+    //
+    // "The museum still wants this" is an ERRAND, not a quality: it is true of
+    // a common book, it stops being true the moment the thing is donated, and
+    // what the player does about it is walk to Solitude. Rarity is a permanent
+    // fact about the item and reads as the board's wallpaper once it is a
+    // ground. Painting an errand across the whole tile would have been the
+    // loudest thing on the board saying the least lasting thing on it.
+    constexpr ImU32 kRelicOwe = IM_COL32(169, 123, 232, 255);   // #A97BE8
+
+    // ★★See Grid.h. The ONE answer to "what RARITY colour is this item", asked
+    // by the wedge and by the ground. It was inlined in the wedge until the
+    // ground needed the same answer, and two copies of this switch is exactly
+    // how a board ends up disagreeing with the doll about a sword.
+    ImU32 RarityColour(std::uint8_t a_haloBits)
     {
         const std::uint8_t bits = a_haloBits & 0x3;
-        // ★An EXTENSION TINT earns the wedge on the same terms as an owed relic
-        // -- outright, with no rarity of its own. An extension that colours by
-        // its own rules is not obliged to agree with ours about which items are
-        // interesting, and an item it has ranked while the host sees nothing
-        // special is precisely the case it was added for.
+        // ★An EXTENSION TINT earns the mark outright, with no rarity of its
+        // own. An extension that colours by its own rules is not obliged to
+        // agree with ours about which items are interesting, and an item it has
+        // ranked while the host sees nothing special is precisely the case it
+        // was added for.
         const std::uint8_t tint = TintTierOf(a_haloBits);
-        if (!a_dl || (!bits && !tint && a_relic != Lotd::Status::kUndonated)) return;
-        const float cell = CellPx();
-        const float d    = cell * kWedgeFrac;
-        const float rim  = RimPx();
-        // ★★Pull in to the SHADED area, not to the tile rectangle. The occupied
-        // cell's fill steps back from the hairline (DrawOccupancyPass: shadeIn),
-        // so a wedge anchored to the raw box straddles the grid line and looks
-        // pasted on top of the board rather than set into the item's own ground.
-        // Same rule the fill uses, so the two edges land together.
-        const float in  = Theme::S().engravedCells
-                        ? Theme::kGrooveW * Theme::Scale() * 0.5f : 1.0f;
-        const float x1  = a_boxMax.x - in;
-        const float y0  = a_boxMin.y + in;
+        if (!bits && !tint) return 0;
         // ★GI67: unique wins outright over enchanted — see DrawMarkerTray.
-        // ★★1.4.4, AND THE ORDER IS THE WHOLE DESIGN. A relic still owed to the
-        // museum takes the wedge from whatever rarity the item has, because
-        // "carry this home" is the only urgent thing about it. Once it is
-        // donated the wedge goes BACK to its rarity -- there is nothing urgent
-        // left, and hiding "unique" on 1273 weapons and armours forever would
-        // cost more than it buys.
+        // ★★1.4.4: A RELIC STILL OWED used to be decided here, ahead of
+        // everything, and the rule has not changed -- it moved to the wedge,
+        // which is the only surface it is ever drawn on now. See kRelicOwe.
         //
-        // ★★★AND A DONATED RELIC WITH NO RARITY GETS NOTHING, which is a wedge
+        // ★★★AND A DONATED RELIC WITH NO RARITY GETS NOTHING, which is a mark
         // this feature shipped with and then lost on purpose.
+
         //
         // It was grey, and read as "already handed in, safe to sell". Two
         // things were wrong with that. A plain item that is NOT a relic is
@@ -11998,7 +12345,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // states that lead to the same act; and a donated UNIQUE relic shows
         // gold, so the reading was not even available in the case a player
         // would most want it. The line above already says the real rule --
-        // once donated, the museum has no claim on the wedge -- and the grey
+        // once donated, the museum has no claim on the mark -- and the grey
         // was that rule failing to apply to the leftovers.
         //
         // It also got worse the better you played. Plain relics are the
@@ -12007,10 +12354,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // the purple ones were hardest to pick out.
         //
         // The fact itself is never lost: the tooltip says it in every case.
-        // Now the wedge says one thing only -- the museum still wants this.
-        constexpr ImU32 kUnique   = IM_COL32(232, 182, 74, 255);
-        constexpr ImU32 kEnchant  = IM_COL32(79, 143, 240, 255);
-        constexpr ImU32 kRelicOwe = IM_COL32(169, 123, 232, 255);   // #A97BE8
+        // Now the mark says one thing only -- the museum still wants this.
+        constexpr ImU32 kUnique  = IM_COL32(232, 182, 74, 255);
+        constexpr ImU32 kEnchant = IM_COL32(79, 143, 240, 255);
 
         // ★★★AND THE TINT SITS DIRECTLY ABOVE "ENCHANTED", WHICH IS THE WHOLE
         // PLACEMENT ARGUMENT.
@@ -12022,13 +12368,97 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //
         // Unique keeps its gold, for the reason GI67 gave it: unique is a
         // property of the FORM and there is exactly one, so it can never be
-        // out-ranked by a roll. And an owed relic still takes everything,
-        // because "carry this home" outlives any opinion about quality.
+        // out-ranked by a roll.
         const std::uint32_t tintCol = tint ? HostApi::TintColour(tint) : 0u;
+        return (bits & 0x2) ? kUnique
+             : tintCol      ? static_cast<ImU32>(tintCol)
+                            : kEnchant;
+    }
+
+    // ★★See Grid.h. The RARITY colour, painted as the cell's ground instead of
+    // cut into its corner -- the RARITY MARK setting, and the only thing that
+    // setting moves.
+    //
+    // ★NO MUSEUM STATUS HERE, which is why it takes no Lotd::Status at all.
+    // An owed relic keeps its wedge in both modes (see DrawRarityWedge), so
+    // this function cannot be handed a status it would have to remember not to
+    // paint -- the one argument it never receives is the one that would be a
+    // bug. The two marks can now sit on one tile: the ground says what the
+    // item IS, the wedge says the museum still wants it.
+    //
+    // ★NO BLACK UNDER IT, unlike the wedge. The wedge is a 14px shape that has
+    // to hold an edge against whatever it lands on; a ground IS the thing
+    // underneath, and outlining it would draw a box around every item on the
+    // board. What keeps it legible is the alpha instead -- Theme::RarityGroundA.
+    void DrawRarityGround(ImDrawList* a_dl, const ImVec2& a_min, const ImVec2& a_max,
+                          std::uint8_t a_haloBits)
+    {
+        if (!a_dl) return;
+
+        // ★The slider's floor is a real setting, not a degenerate one: dragged
+        // to 0 the player has asked for no rarity mark at all, and leaving
+        // early is how they get it -- a rect at alpha 0 is a draw command the
+        // board pays for on every cell of every item to change nothing.
+        const float strength = Theme::RarityGroundA();
+        if (strength <= 0.0f) return;
+        const ImU32 col = RarityColour(a_haloBits);
+        if (!col) return;
+
+        // ★SCALED, not overwritten. Every colour above is opaque, but an
+        // extension's tint arrives over the ABI with an alpha of its own, and
+        // stamping the slider on top of it would make a deliberately faint
+        // tier louder than the palette it came from.
+        const float a = static_cast<float>((col >> IM_COL32_A_SHIFT) & 0xFF) * strength;
+        const ImU32 ga = static_cast<ImU32>(a + 0.5f) & 0xFFu;
+        a_dl->AddRectFilled(a_min, a_max,
+                            (col & ~IM_COL32_A_MASK) | (ga << IM_COL32_A_SHIFT));
+    }
+
+    // ★★See Grid.h. ONE wedge per item, at the footprint's top-right.
+    // Black underneath so the colour reads on a pale sheet as well as on a
+    // dark panel — the same trick every marker on this tile already uses.
+    //
+    // ★★★THE MUSEUM KEEPS ITS WEDGE IN BOTH MODES, and that is a rule about
+    // what the two marks MEAN, not a special case.
+    //
+    // RARITY MARK moves rarity, and rarity only. An owed relic is an errand
+    // with a deadline the player sets ("stop carrying this, walk to Solitude"),
+    // and an errand wants a mark that is always in the same corner, always the
+    // same size and always the same purple, whatever the board is doing behind
+    // it. A ground cannot be that: at 10% it is a whisper, at 100% it is the
+    // tile, and either way it competes with the rarity it is sharing a surface
+    // with. So in ground mode the wedge goes quiet about rarity -- the ground
+    // is saying it -- and says the one thing the ground never does.
+    //
+    // A relic with rarity therefore shows BOTH in ground mode, which is more
+    // than corner mode could ever say: there is one wedge there, and the
+    // museum takes it. Nothing is lost either way; the tooltip says both.
+    void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
+                         const ImVec2& a_boxMax, std::uint8_t a_haloBits,
+                         Lotd::Status a_relic)
+    {
+        if (!a_dl) return;
+        // ★GI67 / 1.4.4: an owed relic outranks any rarity the item has, in
+        // corner mode as it always did -- "carry this home" outlives any
+        // opinion about quality, and there is only one wedge to say it with.
         const ImU32 col = (a_relic == Lotd::Status::kUndonated) ? kRelicOwe
-                        : (bits & 0x2)                          ? kUnique
-                        : tintCol                               ? static_cast<ImU32>(tintCol)
-                                                                : kEnchant;
+                        : Theme::RarityGround()                 ? 0u
+                                                                : RarityColour(a_haloBits);
+        if (!col) return;
+
+        const float cell = CellPx();
+
+        const float d    = cell * kWedgeFrac;
+        const float rim  = RimPx();
+        // ★★Pull in to the SHADED area, not to the tile rectangle. The occupied
+        // cell's fill steps back from the hairline (DrawOccupancyPass: shadeIn),
+        // so a wedge anchored to the raw box straddles the grid line and looks
+        // pasted on top of the board rather than set into the item's own ground.
+        // Same rule the fill uses, so the two edges land together.
+        const float in  = Theme::S().engravedCells
+                        ? Theme::kGrooveW * Theme::Scale() * 0.5f : 1.0f;
+        const float x1  = a_boxMax.x - in;
+        const float y0  = a_boxMin.y + in;
 
         // outer: the full wedge, in black. Both legs are d, so the top and the
         // right side are the same length — it is a right ISOSCELES triangle.
@@ -12142,9 +12572,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // base form, and routing it through here is what gives the doll and the
         // partner window the same mark the board has, for free.
         (void)a_iconMin; (void)a_iconMax; (void)a_rot;
+        // ★The ground FIRST and the wedge after, because the wedge may now be
+        // a museum mark sitting on a tinted tile -- the two are separate facts
+        // as of the RARITY MARK setting, and both belong to this one call site.
+        // These windows draw a single box per item, so the whole box is the
+        // item's ground; the board paints its own, per mask cell, in pass 2.
+        if (Theme::RarityGround()) {
+            DrawRarityGround(a_dl, a_boxMin, a_boxMax, a_bits);
+        }
         DrawRarityWedge(a_dl, a_boxMin, a_boxMax, a_bits,
                         a_obj ? Lotd::Of(a_obj->GetFormID()) : Lotd::Status::kNotRelic);
     }
+
 
     namespace
     {
@@ -12154,6 +12593,19 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             RE::FormID    form = 0;
             std::uint16_t uid = 0;
             std::uint16_t sig = 0;
+            // ★GI79: WHO HOLDS THE BOOK. 0 = the player. A shelf read names the
+            // container, so the page can find the unit's own ExtraDataList --
+            // which is where a quest note keeps the quest that fills its
+            // <Alias=...> tokens. Looking it up in the player's pack found
+            // nothing, and a page with no quest context cut off at the first
+            // token (reported).
+            RE::FormID    owner = 0;
+            // ★GI84: what the book was worth BEFORE the read, carried into the
+            // deferred stage so the tome's spending can be decided once the
+            // engine's queued Use has actually landed. See ProcessBookRead.
+            int           heldBefore = 0;
+            bool          hadSpell   = false;
+            bool          took       = false;   // Read() accepted it
         };
         std::optional<PendingRead> g_pendingRead;
         // ★(1.5.x) a SHELF book's page (no owner involved) -- see
@@ -12315,10 +12767,232 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // needs no owner: ShowBookPage raises TESBookReadEvent, so a skill book
     // still teaches exactly as reading it in the world does.
     void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                              std::uint16_t a_sig)
+                              std::uint16_t a_sig, RE::FormID a_owner)
     {
         if (!a_book) return;
-        g_pendingShelfPage = PendingRead{ a_book->GetFormID(), a_uid, a_sig };
+        g_pendingShelfPage = PendingRead{ a_book->GetFormID(), a_uid, a_sig, a_owner };
+    }
+
+    namespace
+    {
+        // ★★★GI79: THE ENGINE'S OWN TEXT REPLACEMENT, DONE THE ENGINE'S WAY.
+        //
+        // A book's DESC can carry <Alias=Name>, <Alias.ShortName=Name>, the
+        // pronoun forms, <Alias.Race=..>, <Alias.Sex=..> and <Global=EditorID>.
+        // The engine fills them from the QUEST that handed the note over: a
+        // quest-owned unit carries ExtraTextDisplayData with the quest and the
+        // instance id, and TESQuest::instanceData holds, per instance, "alias
+        // id -> the form whose name goes here" and "global -> its value at the
+        // time". GetDescription on the base form knows none of that, so the
+        // page we raise ourselves showed the tokens raw -- and the BookMenu's
+        // text field reads '<Alias=..>' as an HTML tag it does not know and
+        // swallows everything after it. That is the cut-off (reported: the
+        // jarl's inheritance letter, missives, notice-board notes).
+        //
+        // ★Resolved from the instance the note names when it exists, which is
+        // right even for a note from a finished radiant quest whose aliases
+        // have since moved on; the quest's live aliases are the fallback. A
+        // token nothing can answer is removed rather than left: an unanswered
+        // name reads wrong, a truncated letter reads as nothing at all.
+        [[nodiscard]] const char* SexWord(RE::SEX a_sex, const char* a_m,
+                                          const char* a_f, const char* a_n)
+        {
+            return a_sex == RE::SEX::kFemale ? a_f : a_sex == RE::SEX::kMale ? a_m : a_n;
+        }
+
+        // ★GI87: the list on this entry that carries the quest context, which is
+        // not necessarily the one the pool named. a_preferred wins when it has
+        // the data; otherwise the entry is scanned. Null when nobody has it --
+        // and that is a fact worth logging, not a silent empty page.
+        [[nodiscard]] const RE::ExtraDataList* TextContextList(
+            RE::InventoryEntryData* a_entry, const RE::ExtraDataList* a_preferred)
+        {
+            auto has = [](const RE::ExtraDataList* x) {
+                if (!x) return false;
+                const auto* t = const_cast<RE::ExtraDataList*>(x)
+                                    ->GetByType<RE::ExtraTextDisplayData>();
+                return t && t->ownerQuest;
+            };
+            if (has(a_preferred)) return a_preferred;
+            if (a_entry && a_entry->extraLists) {
+                for (const auto* x : *a_entry->extraLists) {
+                    if (has(x)) return x;
+                }
+            }
+            return a_preferred;   // nothing better; the resolver reports why
+        }
+
+        void ResolveTextTokens(std::string& a_text, const RE::ExtraDataList* a_xl,
+                               const char* a_what)
+        {
+            if (a_text.find('<') == std::string::npos) return;
+            const RE::ExtraTextDisplayData* xt = nullptr;
+            if (a_xl) {
+                xt = const_cast<RE::ExtraDataList*>(a_xl)->GetByType<RE::ExtraTextDisplayData>();
+            }
+            RE::TESQuest* quest = xt ? xt->ownerQuest : nullptr;
+            // ★★★GI87 DIAGNOSTIC: NAME THE BOOK AND THE MISSING PIECE.
+            //
+            // "The alias is a blank space" is what an unresolved tag looks like
+            // from the outside, and from the inside it can be any of four
+            // different failures. One line per page says which, and names the
+            // book so a reporter's save can be pointed at directly.
+            const char* what = a_what && *a_what ? a_what : "?";
+            SKSE::log::info("[BOOK] tokens in '{}': list={} textdata={} quest={} instance={}",
+                what, a_xl ? "yes" : "NONE", xt ? "yes" : "NONE",
+                quest ? (quest->GetFormEditorID() && *quest->GetFormEditorID()
+                             ? quest->GetFormEditorID()
+                             : "(unnamed)")
+                      : "NONE",
+                xt ? static_cast<int>(xt->ownerInstance.get()) : -1);
+            const std::int32_t instId =
+                xt ? static_cast<std::int32_t>(xt->ownerInstance.get()) : -1;
+            const RE::BGSQuestInstanceText* inst = nullptr;
+            if (quest && instId >= 0) {
+                for (const auto* it : quest->instanceData) {
+                    if (it && it->id == static_cast<std::uint32_t>(instId)) { inst = it; break; }
+                }
+            }
+            auto ieq = [](std::string_view a, std::string_view b) {
+                if (a.size() != b.size()) return false;
+                for (size_t i = 0; i < a.size(); ++i) {
+                    if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                        std::tolower(static_cast<unsigned char>(b[i]))) return false;
+                }
+                return true;
+            };
+            // The form that fills an alias: the instance's record first, the
+            // quest's live alias second.
+            // ★GI87: and it SAYS WHY when it comes back empty. Four different
+            // failures used to look identical on the page (a blank space), and
+            // telling them apart from a report was impossible.
+            auto formOf = [&](std::string_view a_alias) -> RE::TESForm* {
+                if (!quest) {
+                    SKSE::log::warn("[BOOK] '{}': <{}> has no quest behind it -- "
+                                    "the note carries no ExtraTextDisplayData we can see",
+                        what, a_alias);
+                    return nullptr;
+                }
+                for (const auto* al : quest->aliases) {
+                    if (!al || !ieq(al->aliasName.c_str(), a_alias)) continue;
+                    if (inst) {
+                        for (const auto& sd : inst->stringData) {
+                            if (sd.aliasID == al->aliasID && sd.fullNameFormID) {
+                                if (auto* f = RE::TESForm::LookupByID(sd.fullNameFormID)) return f;
+                            }
+                        }
+                    }
+                    if (al->GetVMTypeID() == RE::BGSRefAlias::VMTYPEID) {
+                        auto* ref = static_cast<const RE::BGSRefAlias*>(al)->GetReference();
+                        if (!ref) {
+                            SKSE::log::warn("[BOOK] '{}': alias '{}' (id {}) is in the quest "
+                                            "but holds no reference right now",
+                                what, a_alias, al->aliasID);
+                        }
+                        return ref;
+                    }
+                    SKSE::log::warn("[BOOK] '{}': alias '{}' (id {}) is not a reference alias "
+                                    "and the instance had no name for it",
+                        what, a_alias, al->aliasID);
+                    return nullptr;
+                }
+                SKSE::log::warn("[BOOK] '{}': quest '{}' has no alias named '{}' "
+                                "({} alias(es) searched)",
+                    what, quest->GetFormEditorID() ? quest->GetFormEditorID() : "?",
+                    a_alias, quest->aliases.size());
+                return nullptr;
+            };
+            auto nameOf = [](RE::TESForm* a_f) -> std::string {
+                if (!a_f) return {};
+                if (auto* r = a_f->As<RE::TESObjectREFR>()) {
+                    const char* n = r->GetDisplayFullName();
+                    return n ? n : "";
+                }
+                const char* n = a_f->GetName();
+                return n ? n : "";
+            };
+            auto npcOf = [](RE::TESForm* a_f) -> RE::TESNPC* {
+                if (!a_f) return nullptr;
+                if (auto* n = a_f->As<RE::TESNPC>()) return n;
+                if (auto* a = a_f->As<RE::Actor>()) return a->GetActorBase();
+                return nullptr;
+            };
+            static std::unordered_set<std::string> s_saidUnknown;
+
+            std::string out;
+            out.reserve(a_text.size());
+            size_t i = 0;
+            while (i < a_text.size()) {
+                const char c = a_text[i];
+                if (c != '<') { out.push_back(c); ++i; continue; }
+                const size_t close = a_text.find('>', i + 1);
+                if (close == std::string::npos) { out.append(a_text, i, std::string::npos); break; }
+                const std::string_view tag(a_text.data() + i + 1, close - i - 1);
+                // Only the replacement grammar is ours. <p>, <font>, <br>, <img>
+                // are the book's own markup and pass through untouched.
+                const bool isAlias  = tag.size() > 5 && ieq(tag.substr(0, 5), "Alias");
+                const bool isGlobal = tag.size() > 7 && ieq(tag.substr(0, 7), "Global=");
+                const bool isToken  = tag.size() > 5 && ieq(tag.substr(0, 5), "Token");
+                if (!isAlias && !isGlobal && !isToken) {
+                    out.append(a_text, i, close - i + 1);
+                    i = close + 1;
+                    continue;
+                }
+                std::string repl;
+                const size_t eq = tag.find('=');
+                const std::string_view kind = eq == std::string_view::npos ? tag : tag.substr(0, eq);
+                const std::string_view arg  = eq == std::string_view::npos ? std::string_view{} : tag.substr(eq + 1);
+                if (isGlobal) {
+                    float v = 0.0f; bool have = false;
+                    if (inst) {
+                        for (const auto& gd : inst->valueData) {
+                            const char* eid = gd.global ? gd.global->GetFormEditorID() : nullptr;
+                            if (eid && ieq(eid, arg)) { v = gd.value; have = true; break; }
+                        }
+                    }
+                    if (!have) {
+                        if (auto* g = RE::TESForm::LookupByEditorID<RE::TESGlobal>(std::string(arg))) {
+                            v = g->value; have = true;
+                        }
+                    }
+                    if (have) {
+                        repl = (std::fabs(v - std::round(v)) < 0.0005f)
+                                   ? std::to_string(static_cast<long long>(std::llround(v)))
+                                   : std::format("{:.2f}", v);
+                    }
+                } else if (isAlias) {
+                    // kind is "Alias" or "Alias.<Form>"
+                    const std::string_view form = kind.size() > 6 ? kind.substr(6) : std::string_view{};
+                    RE::TESForm* f = formOf(arg);
+                    RE::TESNPC*  npc = npcOf(f);
+                    const RE::SEX sex = npc ? npc->GetSex() : RE::SEX::kNone;
+                    if (form.empty())                       repl = nameOf(f);
+                    else if (ieq(form, "ShortName"))        repl = (npc && npc->shortName.c_str() && *npc->shortName.c_str()) ? npc->shortName.c_str() : nameOf(f);
+                    else if (ieq(form, "Pronoun"))          repl = SexWord(sex, "he", "she", "it");
+                    else if (ieq(form, "PronounObj"))       repl = SexWord(sex, "him", "her", "it");
+                    else if (ieq(form, "PronounPos"))       repl = SexWord(sex, "his", "her", "its");
+                    else if (ieq(form, "PronounPosObj"))    repl = SexWord(sex, "his", "hers", "its");
+                    else if (ieq(form, "PronounRefl"))      repl = SexWord(sex, "himself", "herself", "itself");
+                    else if (ieq(form, "CapPronoun"))       repl = SexWord(sex, "He", "She", "It");
+                    else if (ieq(form, "CapPronounObj"))    repl = SexWord(sex, "Him", "Her", "It");
+                    else if (ieq(form, "CapPronounPos"))    repl = SexWord(sex, "His", "Her", "Its");
+                    else if (ieq(form, "CapPronounPosObj")) repl = SexWord(sex, "His", "Hers", "Its");
+                    else if (ieq(form, "CapPronounRefl"))   repl = SexWord(sex, "Himself", "Herself", "Itself");
+                    else if (ieq(form, "Sex"))              repl = SexWord(sex, "male", "female", "");
+                    else if (ieq(form, "Race")) {
+                        auto* race = npc ? npc->GetRace() : nullptr;
+                        repl = race && race->GetFullName() ? race->GetFullName() : "";
+                    } else if (s_saidUnknown.insert(std::string(form)).second) {
+                        SKSE::log::info("[BOOK] unknown alias form '<{}>' -- dropped from the page", tag);
+                    }
+                } else if (s_saidUnknown.insert(std::string(kind)).second) {
+                    SKSE::log::info("[BOOK] unknown text token '<{}>' -- dropped from the page", tag);
+                }
+                out += repl;
+                i = close + 1;
+            }
+            a_text.swap(out);
+        }
     }
 
     // Raise the engine's page for a book we are only DISPLAYING. Handing it
@@ -12348,13 +13022,48 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // What is true is that it is not the WHOLE reading: the engine's own menu
     // path spends a tome, and that spending is still done explicitly above.
     void ShowBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                      std::uint16_t a_sig)
+                      std::uint16_t a_sig, RE::FormID a_owner)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !a_book) return;
-        auto* xl = ExtraForPool(LiveEntryOf(player, a_book), a_uid, a_sig);
-        RE::BSString desc;
-        a_book->GetDescription(desc, a_book);
+        // ★GI79: the unit's list comes from whoever HOLDS it. A shelf read used
+        // to look in the player's pack, find nothing, and raise a page with no
+        // quest behind it.
+        RE::TESObjectREFR* owner =
+            a_owner ? RE::TESForm::LookupByID<RE::TESObjectREFR>(a_owner) : nullptr;
+        if (!owner) owner = player;
+        auto* entry = LiveEntryOf(owner, a_book);
+        auto* xl = ExtraForPool(entry, a_uid, a_sig);
+        RE::BSString raw;
+        a_book->GetDescription(raw, a_book);
+        std::string text = raw.c_str() ? raw.c_str() : "";
+        // ★★★GI87: THE QUEST CONTEXT IS NOT NECESSARILY ON THE LIST THE POOL
+        // PICKED.
+        //
+        // GI79 handed `xl` straight to the resolver, and `xl` is whatever
+        // ExtraForPool named for the tile that was clicked. When that list is
+        // not the one carrying ExtraTextDisplayData -- a null pool answer, a
+        // note whose unit the signature hashes into a different pool
+        // (ExtraTextDisplayData is deliberately NOT part of InstanceSig, see
+        // the note there), a uniqueID the tile never recorded -- the resolver
+        // finds no quest, every alias resolves to nothing, and the tag is
+        // replaced by EMPTY. That is the second half of the report: "no longer
+        // truncating, however the alias itself is a blank space" (Kalian2015,
+        // 1.6.1).
+        //
+        // The quest context belongs to the UNIT that has it, so ask the whole
+        // entry rather than one list. The pool's answer is still preferred --
+        // it is the unit the player pointed at -- and the scan is the fallback.
+        // ★Only the RESOLVER gets this list. openBook below keeps `xl`, which
+        // is the display list and answers a different question (the name on
+        // the page).
+        const RE::ExtraDataList* ctx = TextContextList(entry, xl);
+        if (ctx != xl) {
+            SKSE::log::info("[BOOK] '{}': the quest context is on another unit's list, "
+                            "not the one the tile named", a_book->GetName());
+        }
+        ResolveTextTokens(text, ctx, a_book->GetName());   // GI79 + GI87
+        RE::BSString desc(text.c_str());
         // ★★The NG line declares BookMenu::OpenBookMenu and never defines it,
         // so the call is made here through the same address-library id
         // CommonLib itself used. Same function, same arguments -- only the
@@ -12400,6 +13109,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (held <= 0) {
                 SKSE::log::info("[BOOK] read consumed it -- no page to raise");
                 return;
+            }
+            // ★★★GI84: THE TOME'S SPENDING, DECIDED HERE AND NOWHERE ELSE.
+            //
+            // Read() teaches without taking the book, so somebody has to take
+            // it -- but only if nobody else already did. By this line the
+            // queued Use has run, which means the engine has had its chance to
+            // spend the tome AND any script riding OnEquipped has had its
+            // chance to hand a copy back. Both show up in the same number, so
+            // the test is the one it always was, asked at the only moment it
+            // is true: the read was accepted, the spell arrived across it, and
+            // the count has still not moved.
+            //
+            // ★The `held <= 0` return above is the other half: when the engine
+            // did take it, we are already gone and cannot take it twice. That
+            // pairing is the whole fix -- spending against a count read before
+            // the Use landed is how the Destruction ritual book was lost.
+            if (req.took && held == req.heldBefore) {
+                auto* sp = book->GetSpell();
+                if (sp && !req.hadSpell && player->HasSpell(sp)) {
+                    player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,
+                                       nullptr, nullptr);
+                    SKSE::log::info("[BOOK] tome spent (the engine left it at {})", held);
+                    NotePendingRemove(book, {}, 1, -1);
+                    RequestRebuild();
+                    return;   // nothing left to raise a page for
+                }
             }
             // ★★★AND NOT IN FRONT OF ONE THE ENGINE TOOK OVER. The Elder Scroll
             // is EQUIPPED by the Use -- that is the unfurl, and the scroll's
@@ -12463,7 +13198,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 return;
             }
             SKSE::log::info("[BOOK] the engine raised no page -- showing it ourselves");
-            ShowBookPage(book, req.uid, req.sig);
+            ShowBookPage(book, req.uid, req.sig, req.owner);
             return;
         }
 
@@ -12476,7 +13211,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* sui = RE::UI::GetSingleton();
             if (sbook && sui && !sui->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
                 SKSE::log::info("[BOOK] shelf read -- raising the page in place");
-                ShowBookPage(sbook, sreq.uid, sreq.sig);
+                ShowBookPage(sbook, sreq.uid, sreq.sig, sreq.owner);
             }
             return;
         }
@@ -12516,36 +13251,58 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         const int heldBefore = HeldCountOf(player, book);
 
         const bool took = book->Read(player);
-        // Read settles a TOME (it teaches; the spending is below). Anything it
-        // refuses is handed to the engine's Use instead, which is the door the
-        // rest of the world's books go through.
-        bool used = false;
-        if (!took) used = Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
+        // ★★★GI84: AND THE ENGINE'S DOOR AS WELL, ALWAYS — NOT ONLY WHEN READ
+        // REFUSES.
+        //
+        // Read() teaches. It is not what Skyrim calls reading a book, and the
+        // difference is a quest that cannot be finished. Vanilla reads a book
+        // by USING it, which is ActorEquipManager::EquipObject, and that is
+        // what raises OnEquipped -- the event quest fragments hang off. The
+        // Destruction Ritual Spell is exactly that shape (vanilla
+        // MGRDestructionBook04Script):
+        //
+        //     Event OnEquipped(Actor AkActor)
+        //         Game.GetPlayer().Additem(MGRDestructionFinal, 1)
+        //         Self.GetReference().Disable()
+        //         MGRitual01.SetStage(200)
+        //     EndEvent
+        //
+        // Read() accepts a tome, so `if (!took)` skipped the Use outright and
+        // that event never fired. Our own log had been saying so all along:
+        //     'Spell Tome: Ash Rune'  Read=true  Use=false
+        //     'Line and Lure'         Read=false Use=true
+        // The player learned Fire Storm, we spent the book below, and the
+        // script that would have handed it back never ran at all -- "the game
+        // refuses to add the book back" (reported, 1.6.1). It is not this one
+        // quest either: every book whose script hangs off being equipped was
+        // reachable only by the books Read() happened to turn away.
+        //
+        // ★Both doors, because they answer different halves. Read() is what
+        // applies `teaches` here and now (the skill gate and the page below
+        // depend on having asked it); the Use is what tells the world the book
+        // was read. Re-teaching a spell already known is a no-op, so the
+        // overlap costs nothing.
+        const bool used = Equip::UseItem(book, req.uid, -1, req.sig, {}, 1);
 
         const bool hasSpell = spell ? player->HasSpell(spell) : false;
         const int heldAfter = HeldCountOf(player, book);
 
-        // ★★★AND THE TOME IS SPENT. Read() is the engine's door and it does
-        // teach -- measured: `Read -> 1; spell 0 -> 1` on a spell the player
-        // did not have. What it does NOT do is take the book: `held 2 -> 2`.
-        // In the vanilla menu something downstream of the page spends it, and
-        // that something is not reachable from here.
+        // ★★★THE TOME IS SPENT — BUT NOT HERE ANY MORE (GI84).
         //
-        // So the spending is done explicitly, and only on the exact evidence
-        // that it is owed: the read was accepted, the spell arrived across it,
-        // and the count did not move. If a gate refuses the read -- vanilla's
-        // or a mod's -- `took` is false, nothing was learned, and the book
-        // stays, which is the whole point of asking the engine first.
-        if (took && spell && hasSpell && !hadSpell && heldAfter == heldBefore &&
-            heldAfter > 0) {
-            player->RemoveItem(book, 1, RE::ITEM_REMOVE_REASON::kRemove,
-                               nullptr, nullptr);
-            SKSE::log::info("[BOOK] tome spent");
-            NotePendingRemove(book, {}, 1, -1);
-            RequestRebuild();
-        }
-        // the page is owed only if the engine raises none of its own
+        // Read() teaches and does NOT take the book (measured: `spell 0 -> 1`,
+        // `held 2 -> 2`), so the spending has to be done by hand. What changed
+        // is WHEN. The Use issued above is QUEUED, so at this line it has not
+        // run: the engine may yet take the book itself, and a quest script may
+        // yet hand one back. Spending against a count read before any of that
+        // is how one book becomes none.
+        //
+        // So the decision moves to the deferred stage below, which already
+        // waits for exactly this and already re-reads the count. The evidence
+        // it needs travels with the request.
         g_pageOwed = req;
+        g_pageOwed->heldBefore = heldBefore;
+        g_pageOwed->hadSpell   = hadSpell;
+        g_pageOwed->took       = took;
         g_pageOwedWait = 8;
         // ⓔⓖ PROBE. Two reports say our reading is not the game's reading: the
         // Dawnguard Elder Scroll does nothing at all, and a spell tome skips
@@ -12910,6 +13667,72 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return g && g->value != 0.0f;
         }
 
+        // ★★GI72: ASK THE ENGINE FOR THE NUMBER RATHER THAN RECOMPUTE IT.
+        //
+        // Survival Mode gives armour a warmth rating and vanilla's item card
+        // prints it. Ours never did -- reported as "the tooltip for warmth on
+        // armour in survival mode does not show up", and it was a plain gap:
+        // nothing in this file had ever heard of warmth.
+        //
+        // ★★THE VALUE IS NOT IN ANY PLUGIN. TESObjectARMO carries armorRating
+        // and nothing else. The engine derives warmth from default-object
+        // KEYWORDS -- BGSDefaultObjectManager holds kSurvivalKeywordWarm/Cold
+        // and an Armor/Clothing pair per body area -- weighed by values that are
+        // not a record anywhere: Skyrim.esm, the four masters and the Survival
+        // ESL were all searched for a warmth setting and none of them has one.
+        // Reimplementing that from guesses would print a number that quietly
+        // disagrees with the game's own, which is worse than printing none.
+        //
+        // ★So the engine fills ITS card for us and the field is read off it.
+        // Whatever the game would show, this shows. ItemCard::SetItem has real
+        // Address Library ids in CommonLibSSE, and the constructor is inline --
+        // no unresolved symbol, unlike the ExtraDataList wall in LootBarter.
+        //
+        // Returns -1 for "no warmth to show", which is also the honest answer
+        // when Survival is off: vanilla prints nothing then either.
+        [[nodiscard]] int ArmourWarmth(RE::TESBoundObject* a_obj)
+        {
+            if (!a_obj || !a_obj->As<RE::TESObjectARMO>()) return -1;
+            if (!SurvivalModeOn()) return -1;
+            // ★Cached per FORM, because SetItem builds the WHOLE card -- name,
+            // effects, every string vanilla would draw -- and a tooltip asks
+            // once a frame for as long as it is up. Warmth is a property of the
+            // record and the mode; neither moves while a menu is open. The
+            // Survival gate above gates entry, so a cached value can only have
+            // been taken with the mode on.
+            static std::unordered_map<RE::FormID, int> s_warmth;
+            const auto id = a_obj->GetFormID();
+            if (const auto it = s_warmth.find(id); it != s_warmth.end()) return it->second;
+
+            int warmth = -1;
+            auto* ui = RE::UI::GetSingleton();
+            const auto hud = ui ? ui->GetMenu(RE::HUDMenu::MENU_NAME) : nullptr;
+            if (hud && hud->uiMovie) {
+                // A card needs a movie to build its object in; the HUD's is the
+                // one view that is loaded whenever a menu of ours is up.
+                RE::ItemCard          card(hud->uiMovie.get());
+                RE::InventoryEntryData e(a_obj, 1);
+                card.SetItem(&e, true);   // ignoreStolen: the mark is ours to draw
+                RE::GFxValue v;
+                if (card.obj.GetMember("warmth", &v) && v.IsNumber()) {
+                    warmth = static_cast<int>(std::lround(v.GetNumber()));
+                }
+                // ★SAY IT ONCE IF THE FIELD IS NOT THERE. The name comes from
+                // the item card's own field list in SkyrimSE.exe, so a miss
+                // means the card changed or the mode is not what we think --
+                // either way the tooltip would just be silently short, which is
+                // the failure mode that cost a release the last time.
+                static bool s_saidMissing = false;
+                if (warmth < 0 && !s_saidMissing) {
+                    s_saidMissing = true;
+                    SKSE::log::info("[TIP] survival is on but the item card has no "
+                                    "'warmth' field -- no warmth line will be drawn");
+                }
+            }
+            s_warmth[id] = warmth;
+            return warmth;
+        }
+
         // ★Both ends, in place. Leading/trailing space is what a dropped SURV
         // block leaves behind, and " " is not empty.
         void TrimInPlace(std::string& a_s)
@@ -12917,6 +13740,62 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             const auto b = a_s.find_first_not_of(" \t\r\n");
             if (b == std::string::npos) { a_s.clear(); return; }
             a_s = a_s.substr(b, a_s.find_last_not_of(" \t\r\n") - b + 1);
+        }
+
+        // The learned marker in front of an ENCHANTMENT line (user request,
+        // 2026-09-13): a solid bullet (U+2022) when the player already knows
+        // this enchantment, a hollow one (U+25E6) when they do not -- the
+        // small pair, on purpose: a full-size circle (U+25CB) read as loud as
+        // the text it was labelling.
+        //
+        // ★WHAT "KNOWN" IS. Disenchanting teaches the BASE enchantment, not
+        // its effects: the engine stamps kKnown (form flag bit 6) on the ENCH
+        // record the arcane enchanter lists, which is data.baseEnchantment
+        // when the item's own ENCH is a variant ("Ring of Health" -> "Fortify
+        // Health") and the item's ENCH itself when it has no base. That is why
+        // Fiery Soul Trap must be learned on its own even when Fire Damage and
+        // Soul Trap are both known -- the flag was never per MGEF. The first
+        // cut of this read the MGEF's flag and every item in the pack came
+        // back unlearned (reported). The MGEF bit is kept as a last resort
+        // only, for a runtime-built enchantment that has neither.
+        //
+        // Both glyphs sit inside the Segoe UI Symbol range the atlas already
+        // merges for the gear and the pencil (UIRoot::BuildFonts).
+        // Enchantments only: a tome's spell and a potion's effects are not
+        // things you learn at an enchanter, so their lines stay bare.
+        [[nodiscard]] bool EnchantKnown(const RE::EnchantmentItem* a_ench, const RE::Effect* a_e)
+        {
+            constexpr std::uint32_t kKnown = RE::TESForm::RecordFlags::kKnown;
+            if (a_ench) {
+                if (a_ench->GetFormFlags() & kKnown) return true;
+                if (const auto* base = a_ench->data.baseEnchantment;
+                    base && (base->GetFormFlags() & kKnown)) {
+                    return true;
+                }
+            }
+            const auto* mgef = a_e ? a_e->baseEffect : nullptr;
+            return mgef && (mgef->GetFormFlags() & kKnown) != 0;
+        }
+
+        [[nodiscard]] const char* EnchantMark(const RE::EnchantmentItem* a_ench, const RE::Effect* a_e)
+        {
+            // ★Once per enchantment record, so a wrong reading can be argued
+            // with from the log rather than guessed at again: which of the
+            // three flags is set, and on which form.
+            if (a_ench) {
+                static std::set<RE::FormID> s_said;
+                if (s_said.size() < 64 && s_said.insert(a_ench->GetFormID()).second) {
+                    const auto* base = a_ench->data.baseEnchantment;
+                    const auto* mgef = a_e ? a_e->baseEffect : nullptr;
+                    SKSE::log::info("[ENCH] '{}' {:08X} flags={:08X} base={:08X} baseFlags={:08X} "
+                                    "mgef={:08X} mgefFlags={:08X} -> {}",
+                                    a_ench->GetName(), a_ench->GetFormID(), a_ench->GetFormFlags(),
+                                    base ? base->GetFormID() : 0u, base ? base->GetFormFlags() : 0u,
+                                    mgef ? mgef->GetFormID() : 0u, mgef ? mgef->GetFormFlags() : 0u,
+                                    EnchantKnown(a_ench, a_e) ? "known" : "unknown");
+                }
+            }
+            return EnchantKnown(a_ench, a_e) ? "• " : "◦ ";
         }
 
         // ★ONE effect line, produced as TEXT rather than drawn. The tooltip
@@ -13348,7 +14227,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     for (auto* e : ench->effects) {
                         std::string line;
                         if (EffectText(e, a_survivalOn, line)) {
-                            add(std::move(line), Theme::TipGood(), true);
+                            add(EnchantMark(ench, e) + line, Theme::TipGood(), true);
                         }
                     }
                     // charge (weapons drain per hit; armour enchants don't)
@@ -13359,6 +14238,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                         static_cast<int>(cur), static_cast<int>(maxCharge)),
                             Theme::TipVal());
                     }
+                }
+            }
+
+            // What the sockets do, where the enchantment's lines would be --
+            // see the tooltip for why they stand in for them. The card has no
+            // separators and no indent; the indent is spent on leading
+            // spaces, as the annotator lines above spend theirs.
+            if (HostApi::HasSocketer() && a_xl) {
+                GridInvAPI::TooltipLine sock[GridInvAPI::kMaxTooltipLines]{};
+                const std::uint32_t     sockN = HostApi::SocketLines(
+                    a_obj->GetFormID(), a_xl, sock, GridInvAPI::kMaxTooltipLines);
+                for (std::uint32_t i = 0; i < sockN; ++i) {
+                    const auto& ln = sock[i];
+                    int len = 0;
+                    while (len < static_cast<int>(GridInvAPI::kTooltipTextLen) &&
+                           ln.text[len] != '\0') {
+                        ++len;
+                    }
+                    if (len == 0) continue;
+                    std::string t(static_cast<std::size_t>(ln.indent > 3 ? 3 : ln.indent) * 2,
+                                  ' ');
+                    t.append(ln.text, static_cast<std::size_t>(len));
+                    add(std::move(t), ln.rgba ? ImGui::ColorConvertU32ToFloat4(ln.rgba)
+                                              : Theme::TipGood(), true);
                 }
             }
 
@@ -13443,7 +14346,21 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // (measured 2026-09-01).
             if (a_uid != 0 || a_sig != 0) {
                 scoped = ExtraForPool(entry, a_uid, a_sig);
-                if (!scoped) scoped = ExtraForTile(entry, a_uid, a_xlIdx);
+                // ★★★THE POSITION IS VERIFIED, NOT TRUSTED. This fell back to
+                // ExtraForTile, which walks to the n-th list and hands it over
+                // unexamined -- and a partner cell's position is recorded once,
+                // at birth. A WORN unit reaches this fallback every time,
+                // because ExtraForPool rightly refuses worn lists; and once
+                // anything of the same form is stored into that container,
+                // AddExtraList has prepended it and the worn cell's old
+                // position names the ARRIVAL. A follower wearing enchanted
+                // boots was handed a second pair with a different enchantment,
+                // and the pair on their feet read as the new one (2026-09-10):
+                // the tile's glow was right (it asks ExtraForUnit) and only the
+                // tooltip lied. Same resolver now: by uid, else by position
+                // only while the signature agrees, else by signature -- worn
+                // last, which is the list a worn cell actually wants.
+                if (!scoped) scoped = ExtraForUnitImpl(entry, a_uid, a_xlIdx, a_sig, false);
             }
             // ★★★THE POOL ANSWER IS THE PRIMARY ONE, and it earned that place
             // before this: a unit sitting in a container on our side of a
@@ -13710,9 +14627,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // Once per tooltip, not once per effect line — the answer cannot change
         // between two lines of the same card.
         const bool survivalOn = SurvivalModeOn();
-        auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col) {
+        auto effectLine = [&](RE::Effect* a_e, const ImVec4& a_col, const char* a_prefix = "") {
             std::string line;
             if (!EffectText(a_e, survivalOn, line)) return;
+            if (a_prefix && a_prefix[0]) line.insert(0, a_prefix);
             // Descriptions are sentences — wrap them at the same width as the
             // flavour text below rather than stretching the tooltip.
             ImGui::PushTextWrapPos(300.0f * Theme::Scale());
@@ -13885,6 +14803,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the piece IS rather than as part of its measurement)
             ImGui::TextColored(Theme::TipVal(), "%s %d", Lang::T(Lang::Str::Armor), arm);
             diffText(arm);
+            // ★GI72: beside the rating, because that is where vanilla's card
+            // puts it and it is the same kind of measurement. Absent unless
+            // Survival Mode is on -- see ArmourWarmth.
+            if (const int warm = ArmourWarmth(a_obj); warm >= 0) {
+                ImGui::TextColored(Theme::TipVal(), "%s %d",
+                    Lang::T(Lang::Str::Warmth), warm);
+            }
         } else {
             RE::MagicItem* magic = a_obj->As<RE::AlchemyItem>();
             // ★An INGREDIENT only tells you what you have LEARNED (user report
@@ -13996,7 +14921,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
             if (ench) {
-                for (auto* e : ench->effects) effectLine(e, Theme::TipGood());
+                for (auto* e : ench->effects) effectLine(e, Theme::TipGood(), EnchantMark(ench, e));
                 // charge (weapons drain per hit; armour enchants don't)
                 if (a_obj->Is(RE::FormType::Weapon) && maxCharge > 0) {
                     float cur = static_cast<float>(maxCharge);
@@ -14007,6 +14932,43 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         Lang::T(Lang::Str::ChargeLabel),
                         static_cast<int>(cur), static_cast<int>(maxCharge));
                 }
+            }
+        }
+
+        // ★WHAT THE SOCKETS DO, where the enchantment's lines would be. A
+        // socket mod rides a created enchantment whose effects are all hidden
+        // from item cards -- EffectText skips them, as vanilla does -- so the
+        // block above printed nothing for a socketed unit, and these lines are
+        // its effects. `scoped`, never the entry, for the GI61 reason the
+        // annotator block gives: the entry would lend one socketed unit's
+        // lines to every plain copy of the form.
+        if (HostApi::HasSocketer() && scoped) {
+            GridInvAPI::TooltipLine sock[GridInvAPI::kMaxTooltipLines]{};
+            const std::uint32_t     sockN = HostApi::SocketLines(
+                a_obj->GetFormID(), scoped, sock, GridInvAPI::kMaxTooltipLines);
+            for (std::uint32_t i = 0; i < sockN; ++i) {
+                const auto& ln = sock[i];
+                // Bounded, not trusted -- see the annotator block.
+                int len = 0;
+                while (len < static_cast<int>(GridInvAPI::kTooltipTextLen) &&
+                       ln.text[len] != '\0') {
+                    ++len;
+                }
+                if (len == 0) continue;
+
+                if (ln.separatorBefore) ImGui::Separator();
+                const float indent = static_cast<float>(ln.indent > 3 ? 3 : ln.indent) *
+                                     ImGui::GetStyle().IndentSpacing;
+                if (indent > 0.0f) ImGui::Indent(indent);
+                // ★rgba 0 is the EFFECT colour here, not the body one: these
+                // lines stand in for effect lines and must read as them.
+                const ImVec4 col = ln.rgba ? ImGui::ColorConvertU32ToFloat4(ln.rgba)
+                                           : Theme::TipGood();
+                // Sentences, so the effect lines' wrap rather than a wide card.
+                ImGui::PushTextWrapPos(300.0f * Theme::Scale());
+                ImGui::TextColored(col, "%.*s", len, ln.text);
+                ImGui::PopTextWrapPos();
+                if (indent > 0.0f) ImGui::Unindent(indent);
             }
         }
 
@@ -14207,13 +15169,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // ★(1.5.0) the shelf USE MODE hint: a container's book reads
             // (a tome learns) in place on Shift+right-click -- the one verb
             // of this board that no click could discover.
-            const bool shelfUse =
+            // ★(1.6.x) ...and everything the player board's right-click
+            // would use or wear, taken and used in one gesture (the same gate
+            // as the click, LootBarter's use branch): a potion or food is
+            // "use", gear is "equip" -- the words the player's own board
+            // shows for the same kinds.
+            const auto* shelfBook = a_obj->As<RE::TESObjectBOOK>();
+            const bool  shelfUse =
                 a_tile.partner && LootBarter::IsLootMode(mode) &&
-                a_obj->As<RE::TESObjectBOOK>() != nullptr;
+                (shelfBook != nullptr || Equip::IsWearOrConsume(a_obj));
             const Lang::Str useVerb =
-                shelfUse && a_obj->As<RE::TESObjectBOOK>()->TeachesSpell()
-                    ? Lang::Str::ActLearn
-                    : Lang::Str::ActRead;
+                !shelfUse                ? Lang::Str::ActUse
+                : shelfBook              ? (shelfBook->TeachesSpell() ? Lang::Str::ActLearn
+                                                                      : Lang::Str::ActRead)
+                : (a_obj->Is(RE::FormType::AlchemyItem) ||
+                   a_obj->Is(RE::FormType::Ingredient)) ? Lang::Str::ActUse
+                                                        : Lang::Str::ActEquip;
             g_hoverPrompt = { ImGui::GetFrameCount(), canSplit, canCompare,
                               !sideBoard && !quest,                    // canDrop
                               // ★the doll and the drawer star things now too;
@@ -14351,7 +15322,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // back (it just did). The pixel cannot leak if it does not exist, and
         // the frame is free to sit wherever it looks right — it draws on its
         // own clip now (GI79) and no longer needs room inside the child.
-        const float boardH = BaseRows() * CellPx();
+        // ★ShownRows, not BaseRows: the owned bonus rows are drawn in full up
+        // to "!viewrows", and only the rows past that cap scroll. The window
+        // above is sized from the same number, so the two always agree.
+        const float boardH = ShownRows() * CellPx();
         // ★A child ID PER BOARD, so each tab keeps its own scroll position.
         // One shared id would have carried the main board's scroll onto a
         // KEYS board with four rows on it -- ImGui remembers scroll by id, and
@@ -14548,8 +15522,32 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             std::uint16_t sig = 0;
             bool          worn = false;
             int           hand = 0;   // 1 = right (ExtraWorn), 2 = left
+            // ★Where the pointer was when T opened this -- the weapon's tile
+            // (or doll slot). On a pad the open homes the pointer onto the
+            // first gem, so the close sends it BACK here: a pointer left
+            // floating where a closed window used to be is on nothing at
+            // all, and the next press does nothing (user report).
+            bool          hasReturn = false;
+            ImVec2        returnPos{ 0.0f, 0.0f };
+            // ★The gem rows' centres as drawn last frame, top to bottom,
+            // so a d-pad press walks ONE ROW instead of one board cell
+            // (RechargeRowStep). The window is fixed-size and centred, so a
+            // frame-old reading is still where the rows are.
+            std::vector<ImVec2> rowCenters;
         };
         RechargeUI g_rechargeUI;
+
+        // every road out of the window: the pick, B/ESC, a click past its
+        // edge, the unit vanishing. One place so none forgets the pointer.
+        void CloseRechargeUI()
+        {
+            g_rechargeUI.open = false;
+            g_rechargeUI.rowCenters.clear();
+            if (g_rechargeUI.hasReturn) {
+                g_rechargeUI.hasReturn = false;
+                UIRoot::PadPointTo(g_rechargeUI.returnPos);   // pad only inside
+            }
+        }
 
         // a clicked row, applied on the Tick (engine mutations off the render
         // pass, same rule as every other transfer)
@@ -14694,6 +15692,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return;
         }
         g_rechargeUI.open = true;
+        // T is read off a hover, so the pointer is on the weapon right now;
+        // remember the spot before the open homes it onto the gem list.
+        if (ImGui::IsMousePosValid()) {
+            g_rechargeUI.hasReturn = true;
+            g_rechargeUI.returnPos = ImGui::GetIO().MousePos;
+        }
         g_rechargePick = {};
         Sfx::SelectOn();
     }
@@ -14703,7 +15707,27 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     bool CloseRecharge()
     {
         if (!g_rechargeUI.open) return false;
-        g_rechargeUI.open = false;
+        CloseRechargeUI();
+        return true;
+    }
+
+    bool RechargeRowStep(const ImVec2& a_cur, int a_dir, ImVec2& a_out)
+    {
+        if (!g_rechargeUI.open || a_dir == 0) return false;
+        const auto& rows = g_rechargeUI.rowCenters;
+        const int n = static_cast<int>(rows.size());
+        if (n == 0) return false;
+        // Which row the pointer sits on, as a fraction of the row pitch from
+        // the top row. A pointer parked between rows (stick drift) steps to
+        // the next whole row in the pressed direction rather than a pitch
+        // further into nowhere; one past either end stays put, so a held
+        // d-pad cannot walk the pointer off the list.
+        const float pitch = n > 1 ? rows[1].y - rows[0].y : 1.0f;
+        const float pos   = (a_cur.y - rows[0].y) / (std::max)(pitch, 1.0f);
+        int target = a_dir > 0 ? static_cast<int>(std::floor(pos + 1e-3f)) + 1
+                               : static_cast<int>(std::ceil(pos - 1e-3f)) - 1;
+        target = std::clamp(target, 0, n - 1);
+        a_out = rows[static_cast<std::size_t>(target)];
         return true;
     }
 
@@ -14712,11 +15736,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!g_rechargeUI.open) return;
         auto* p = RE::PlayerCharacter::GetSingleton();
         auto* obj = RE::TESForm::LookupByID<RE::TESBoundObject>(g_rechargeUI.obj);
-        if (!p || !obj) { g_rechargeUI.open = false; return; }
+        if (!p || !obj) { CloseRechargeUI(); return; }
         auto* xl = RechargeUnitList(p, obj);
         float cur = 0.0f, max = 0.0f;
         if (!UnitCharge(obj, xl, g_rechargeUI.worn, g_rechargeUI.hand, cur, max)) {
-            g_rechargeUI.open = false;   // the unit left (sold, dropped)
+            CloseRechargeUI();   // the unit left (sold, dropped)
             return;
         }
         const auto rows = CollectFilledGems();
@@ -14757,7 +15781,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         if (!ImGui::IsWindowAppearing() &&
             ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsWindowHovered()) {
-            g_rechargeUI.open = false;
+            CloseRechargeUI();
             Sfx::SelectOff();
         }
 
@@ -14774,6 +15798,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             center(ImGui::CalcTextSize(none).x);
             ImGui::TextColored(sk.inkDim, "%s", none);
         }
+        g_rechargeUI.rowCenters.clear();
         for (std::size_t i = 0; i < rows.size(); ++i) {
             const auto& r = rows[i];
             const int pts = SoulChargePoints(r.soul);
@@ -14782,10 +15807,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 r.obj->GetName() ? r.obj->GetName() : "?", r.count,
                 Commas(pts).c_str(), i);
             center(rowW);
-            if (Sfx::Button(label, ImVec2(rowW, 0))) {
+            const bool picked = Sfx::Button(label, ImVec2(rowW, 0));
+            const ImVec2 lo = ImGui::GetItemRectMin();
+            const ImVec2 hi = ImGui::GetItemRectMax();
+            const ImVec2 mid((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f);
+            // the row's centre, for the d-pad's row walk (RechargeRowStep)
+            g_rechargeUI.rowCenters.push_back(mid);
+            if (picked) {
                 g_rechargePick = { true, r.obj->GetFormID(), r.soul, r.fromBase };
-                g_rechargeUI.open = false;   // identity fields stay for the apply
+                // identity fields stay for the apply; the pointer goes back
+                // to the weapon it was on (pad), see CloseRechargeUI
+                CloseRechargeUI();
             }
+            // ★On a pad the pointer starts on the first gem rather than on
+            // the weapon it was over when LT opened this (pad only, see
+            // UIRoot::PadPointTo). An empty list has nothing to point at.
+            if (i == 0 && ImGui::IsWindowAppearing()) UIRoot::PadPointTo(mid);
         }
         ImGui::End();
     }
@@ -15431,7 +16468,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // leave that cell unclaimed, and position order then
                         // handed it to a sibling.
                         BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
-                                          UnitRef{ occ.occUid, 0, occ.occXlIdx },
+                                          UnitRef{ occ.occUid, occ.occSig, occ.occXlIdx },
                                           occ.occOrd, occ.occRot);
                         LootBarter::NoteCarriedSpot(occ.occSpotKey);
                     }
@@ -15508,7 +16545,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             if (onOwnBoard && a_held.obj->IsGold() &&
                 LootBarter::IsLootMode(LootBarter::CurrentMode())) {
                 const int take = a_held.count;
-                if (LootBarter::RequestTake(a_held.obj, take, UnitRef{ a_held.uid, a_held.sig })) {
+                if (LootBarter::RequestTake(a_held.obj, take, UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn })) {
                     GoldCoins::ExpectIncoming(take);
                     g_held.reset();
                     CarryWithdrawnGold(take);   // nets to zero against the above
@@ -15584,23 +16621,23 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // remainder stays in the container exactly as it did
                         // when the slider was clamped to the same number
                         tookNow = LootBarter::RequestTakeAll(a_held.obj, cnt,
-                                                             UnitRef{ a_held.uid, a_held.sig });
+                                                             UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn });
                     } else if (LootBarter::CurrentMode() ==
                                LootBarter::Mode::kPickpocket) {
                         // F6b: dragging out of a mark's pockets rolls too
                         if (cnt > 1) LootBarter::OpenSlider(a_held.obj, cnt,
                             LootBarter::XferDir::kPickTake,
-                            UnitRef{ a_held.uid, a_held.sig });
-                        else LootBarter::RequestPickTake(a_held.obj, cnt, UnitRef{ a_held.uid, a_held.sig });
+                            UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn });
+                        else LootBarter::RequestPickTake(a_held.obj, cnt, UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn });
                     } else {   // kBarter
                         if (cnt > 1) LootBarter::OpenSlider(a_held.obj, cnt,
                             LootBarter::XferDir::kBuy,
-                            UnitRef{ a_held.uid, a_held.sig }, {},
+                            UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn }, {},
                             a_held.partnerValue);
                         else {
                             const int total = LootBarter::BuyPrice(a_held.obj, a_held.partnerValue);
                             LootBarter::RequestBuy(a_held.obj, 1, total,
-                                                   UnitRef{ a_held.uid, a_held.sig },
+                                                   UnitRef{ a_held.uid, a_held.sig, -1, a_held.partnerWorn },
                                                    a_held.partnerValue);
                         }
                     }
@@ -15698,6 +16735,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                                        g_target.col, g_target.row, v.bagKey,
                                        a_held.rot, hintCount };
                     }
+                    // ★Both halves of the name travel with the hint. The pool
+                    // string above spells a uid'd unit as `base@UID`, and that
+                    // uid is the CONTAINER's -- the player's inventory stamps
+                    // its own on arrival. WantsUnit() falls back to the
+                    // signature for exactly that case (see DropHint::uid).
+                    g_dropHint.uid = a_held.uid;
+                    g_dropHint.sig = a_held.sig;
                     if (swapDisp) {
                         // free the displaced tile's spot for the incoming item
                         // and put it on the cursor (same as the C4 swap)
@@ -16064,10 +17108,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             };
             const int           wornHand = engineHand(worn);
             const std::uint16_t wsig = InstanceSig(wxl);
-            std::uint16_t       wuid = 0;
-            if (wxl) {
-                if (const auto* xu = wxl->GetByType<RE::ExtraUniqueID>()) wuid = xu->uniqueID;
-            }
+            const std::uint16_t wuid = PoolUid(worn, wxl);
             // The carried unit came off the board (hand 0) or off the OTHER hand;
             // either way it is not the unit standing in this slot. Comparing only
             // form+signature called two identical daggers "the same unit", so the
@@ -16711,7 +17752,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             // GI24: same as the rearrange swap — the occupant
                             // keeps its identity and its own cell
                             BeginPartnerCarry(occ.occ, occ.occCount, occ.occValue,
-                                              UnitRef{ occ.occUid, 0, occ.occXlIdx },
+                                              UnitRef{ occ.occUid, occ.occSig, occ.occXlIdx },
                                               occ.occOrd, occ.occRot);
                             LootBarter::NoteCarriedSpot(occ.occSpotKey);
                             RequestRebuild();

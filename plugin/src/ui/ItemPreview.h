@@ -55,7 +55,25 @@ namespace FUI
         // cast, and min(R,B)-G is exactly how much of it to remove -- being
         // symmetric in R/B, that arithmetic never has to care whether the
         // surface is BGRA or RGBA.
-        static constexpr float kCaptureBg[4] = { 1.0f, 0.0f, 1.0f, 0.0f };
+        // ★★★GI77: TWO BACKDROPS, AND ALPHA IS NEVER READ AGAIN.
+        //
+        // One backdrop cannot tell a half-transparent pixel from an opaque
+        // pixel of the backdrop's colour, and every heuristic that followed --
+        // the magenta spill, the hides rule, the colour-key fallback, the
+        // one-pixel reach -- was an attempt to guess which it was. Two
+        // backdrops make it arithmetic. The same model is drawn once over
+        // black and once over white; where the two agree the pixel is opaque,
+        // where they differ by the whole backdrop it is transparent, and the
+        // difference in between IS the transparency. The colour comes straight
+        // out of the black pass. No surface alpha is consulted, so a 10-bit
+        // surface with two alpha bits and a surface that hands back none at
+        // all get exactly the same result as a perfect one.
+        //
+        // A SPELL takes the black pass only: an additive glow over white
+        // saturates instead of blending, so its alpha is its brightness (see
+        // IconCache's sprite pass), which the black pass alone provides.
+        static constexpr float kMatteBlack[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        static constexpr float kMatteWhite[4] = { 1.0f, 1.0f, 1.0f, 0.0f };
 
         static ItemPreview* GetSingleton();
 
@@ -63,9 +81,15 @@ namespace FUI
         void End();
         void Render();
 
+        // ★GI74b: a_spell is TOLD, not derived. The object handed in is the
+        // spell's DISPLAY model (CaptureSourceOf), which is a plain static and
+        // will never answer As<SpellItem>() -- so deriving it here said "not a
+        // spell", kept the magenta backdrop, and the brightness-alpha pass on
+        // the other side then made that magenta solid: a ring of pink squares
+        // (zhenguoce, second screenshot). The caller knows; it says so.
         void Request(RE::TESBoundObject* a_item, ImVec2 a_screenPos, ImVec2 a_screenSize,
                      float a_modelScale = -1.0f, float a_offsetX = 0.0f, float a_offsetY = 0.0f,
-                     const IconDef* a_def = nullptr);
+                     const IconDef* a_def = nullptr, bool a_spell = false);
 
         // Called from the game-update hook (BEFORE the frame renders): applies
         // the def orientation and parks the model as soon as it lands, so the
@@ -84,7 +108,8 @@ namespace FUI
 
         // IconCache support: raw capture texture and a monotonically
         // increasing stamp (bumped on every completed capture).
-        ID3D11Texture2D*    GetTexture() const { return m_dstTex; }
+        ID3D11Texture2D*    GetTexture() const { return m_dstTex; }    // black pass
+        ID3D11Texture2D*    GetTextureB() const { return m_dstTexB; }  // white pass (GI77)
         std::uint32_t       GetCaptureStamp() const { return m_captureStamp; }
 
         // The loadedModels entry matching m_current (async loads land late, so
@@ -187,7 +212,20 @@ namespace FUI
         bool                m_running     = false;
         bool                m_requested   = false;
         RE::TESBoundObject* m_current     = nullptr;
+        // ★GI74: decided ONCE, where m_current is assigned and the object is
+        // known live -- never re-derived from the pointer at Render time. The
+        // engine's list can hold a dead form (see FindCurrentModel's note), and
+        // the backdrop choice must not be the thing that dereferences it.
+        bool                m_currentIsSpell = false;
         std::uint32_t       m_session     = 0;   // bumped by Begin(); guards deferred teardown
+        // ★★GI73: is a Begin3D OUTSTANDING? A different question from m_running,
+        // and the distance between the two is the bug: m_running is our own
+        // preview state and is cleared the instant the menu hides, while the
+        // engine scene lives until a teardown actually runs -- and a teardown
+        // can be deferred or refused outright. Begin() reads THIS, so a scene
+        // still standing is adopted instead of having a second one stacked on
+        // it. See Begin() for the report that found it.
+        bool                m_scene3D     = false;
 
         ImVec2 m_capturePos       = ImVec2(0.0f, 0.0f);
         ImVec2 m_captureSize      = ImVec2(0.0f, 0.0f);  // full rect including safety margin
@@ -234,6 +272,7 @@ namespace FUI
         ID3D11Texture2D*          m_dstTex     = nullptr;
         ID3D11ShaderResourceView* m_dstSRV     = nullptr;
         ID3D11Texture2D*          m_scratchTex = nullptr;
+        ID3D11Texture2D*          m_dstTexB    = nullptr;   // GI77: the white pass
         // ★★What the capture textures were built for. renderWindows[0] is NOT
         // reliably the surface the engine draws into: with a D3D12 swap chain
         // (CS Upscaling) it is a different resource in a different format —

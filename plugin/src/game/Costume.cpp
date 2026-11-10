@@ -21,6 +21,9 @@ namespace FUI::Costume
         int  g_tab = -1;          // checked tab, -1 = none
         int  g_appliedTab = -2;   // what the body is currently wearing (-2 = unknown)
         int  g_toldApi = -2;      // what the outside world was last told (-2 = nothing yet)
+        // The player is a beast (werewolf, vampire lord): the costume stays
+        // CHECKED but is not on the body, and the outside world is told so.
+        bool g_beast = false;
 
         // ★★★HOW A REBUILD IS SEEN. Not the biped pointer -- the engine reuses
         // that (measured: the same pointer over 11s), so a rebuild is invisible
@@ -28,9 +31,27 @@ namespace FUI::Costume
         // in that slot right now. We dress a slot, note what ended up in it,
         // and if the engine later puts something else there it has rebuilt the
         // body from the restored lists -- which is the bald head.
-        // ★A pointer kept for COMPARISON only, never dereferenced.
-        int         g_watchSlot = -1;
-        const void* g_watchAddon = nullptr;
+        // ★Pointers kept for COMPARISON only, never dereferenced.
+        //
+        // ★★EVERY SLOT, not one. The watch used to sample a single DRESSED
+        // slot, on the theory that a rebuild remakes the whole body so any one
+        // slot tells the story. It does not when the costume piece in that
+        // slot is the SAME form the player is wearing: the engine's rebuild
+        // hangs the same ARMA there, the pointer compares equal, and the watch
+        // is blind -- while the slots that DO differ go unwatched. That is
+        // exactly a transmog that reuses the worn armour and only HIDES the
+        // helmet: the body slot never changes, the helmet slot goes from
+        // empty (claim withdrawn) back to the helmet's addon, and nothing
+        // redressed it. "My helmet keeps reappearing" (2026-09-04; the watch
+        // had fired zero times in the whole session's log).
+        //
+        // The snapshot is the body as it stands after OUR rebuild. Any slot
+        // deviating from it means the engine rebuilt from the restored lists,
+        // and the visible result is no longer the costume. A rebuild that
+        // reproduces the snapshot exactly needs no redress, so this cannot
+        // loop on its own work.
+        bool                                 g_watching = false;
+        std::array<const void*, BO::kEditorTotal> g_watch{};
 
         // Post-load re-dress schedule -- the belt to the watch's braces. The
         // watch catches a rebuild in one frame; this covers the case where a
@@ -378,53 +399,58 @@ namespace FUI::Costume
         //
         // The request is kept, not dropped: the same watch fires again when the
         // form ends and the real body comes back, and by then this gate opens.
-        static bool s_beastNoted = false;
         if (!race->GetPlayable()) {
-            if (!s_beastNoted) {
-                s_beastNoted = true;
-                // ★★A TRANSFORMATION TAKES THE COSTUME OFF. Holding it back
-                // and putting it on again afterwards was the first answer, and
-                // it bought a race we do not need to run: the form ends, the
-                // engine is still rebuilding the body out of the addon lists it
-                // took apart for the beast, and an anchor dressed into that
-                // half-built body ends up worn, holding its slot, with no model
-                // in it -- the bald head (user report: costume still ticked,
-                // appearance plain and bald, cured by unticking it). Timing it
-                // right means guessing when the actor has settled, which is the
-                // guess §NoteGameLoaded already has to make once per load.
+            if (!g_beast) {
+                g_beast = true;
+                // ★★THE COSTUME STAYS CHECKED. Clearing it here was the answer
+                // for a while (18b1563): the form ends, the engine is still
+                // rebuilding the body out of the addon lists it took apart for
+                // the beast, and an anchor dressed into that half-built body
+                // ends up worn with no model in it -- the bald head -- so the
+                // tick was dropped and the player asked to put it back on.
+                // But the player HAD put it on, and a transformation is not a
+                // reason to take it off: "after exiting werewolf form the
+                // transmog is forgotten and the box must be rechecked"
+                // (2026-09-10).
                 //
-                // Clearing is the simpler contract and the safer one: a costume
-                // is a thing you put ON, and turning into a beast is exactly
-                // the kind of event that should end it. The tick goes away, the
-                // player sees why, and putting it back on is one click on a
-                // body that is finished being built.
-                if (g_tab >= 0) {
-                    SKSE::log::info("[COSTUME] transformed into '{}' -- costume "
-                                    "cleared (put it back on after the form ends)",
-                        race->GetName() ? race->GetName() : "?");
-                    g_tab = -1;
-                }
+                // The timing hazard that motivated clearing is covered twice
+                // over now, and the second cover did not exist in this shape
+                // then: the form ending borrows §NoteGameLoaded's re-dress
+                // schedule (below), and the EVERY-SLOT watch (g_watch,
+                // 2026-09-04) redresses the moment an engine rebuild puts
+                // anything else in a slot. So hold the tab, dress nothing while
+                // the body is a beast's, and let the same belt and braces that
+                // carry a costume through a load put it back.
+                //
+                // ★Held, not hidden: g_tab keeps its value so a save made in
+                // beast form still carries the costume, and the UI cannot be
+                // reached to disagree while transformed anyway. Only the API is
+                // told otherwise -- see AnnounceIfMoved.
+                SKSE::log::info("[COSTUME] transformed into '{}' -- costume tab {} "
+                                "held until the form ends",
+                    race->GetName() ? race->GetName() : "?", g_tab);
             }
             // ★The BODY still has to be put right, and not while it is a
             // beast's: keep the request standing so the pass below runs the
             // moment there is a real body again. The anchors come back worn
             // when the engine restores what the player had on, and an anchor
-            // worn with no costume behind it is the same bald head from the
-            // other direction -- undressing is what takes it off.
+            // worn with nothing dressed behind it is the bald head -- the pass
+            // below (dressing, or undressing when no tab is held) is what
+            // puts it right.
             g_dirty = true;
             return;
         }
-        if (s_beastNoted) {
-            s_beastNoted = false;
+        if (g_beast) {
+            g_beast = false;
             // The form ended. Same belt as a load: the body is still being
-            // assembled, so make the plain state stick over several passes
-            // rather than betting on one, and forget what we think it is
-            // wearing so each pass actually runs.
+            // assembled, so make the costume (or the plain state) stick over
+            // several passes rather than betting on one, and forget what we
+            // think it is wearing so each pass actually runs.
             g_reapplyLeft = kReapplyTimes;
             g_reapplyAt = g_frame + kReapplyFirst;
             g_appliedTab = -2;
-            SKSE::log::info("[COSTUME] form ended -- {} passes scheduled to put "
-                            "the body back to plain", kReapplyTimes);
+            SKSE::log::info("[COSTUME] form ended -- {} re-dress passes scheduled "
+                            "(costume tab {})", kReapplyTimes, g_tab);
         }
         auto& rt = player->GetActorRuntimeData();
         auto* biped = rt.biped.get();
@@ -902,28 +928,27 @@ namespace FUI::Costume
         g_lastRebuild = g_frame;
         g_appliedTab = wanted ? g_tab : -1;
 
-        // ★Sample AFTER the rebuild -- what is in the slot now is the thing a
+        // ★Sample AFTER the rebuild -- what is in the slots now is the thing a
         // later rebuild would replace. Sampling before would record the body we
         // just discarded and the watch would fire on our own work, forever.
-        // ★A slot the costume actually DRESSED. An untouched slot holds the
-        // same addon before and after, so watching one would never notice
-        // anything, and watching an empty one would compare null to null.
-        g_watchSlot = -1;
-        g_watchAddon = nullptr;
+        // ★ALL the slots, empty ones included: a slot whose claim was
+        // withdrawn is empty NOW and holds the real helmet after an engine
+        // rebuild, and that transition is the one this watch exists to see.
+        // (Update3DModel is synchronous -- were it not, RestoreAll would put
+        // the lists back before the engine read them and no costume would
+        // ever appear -- so the biped already shows our work here.)
+        g_watching = false;
+        g_watch.fill(nullptr);
         if (wanted) {
             auto* bp = player->GetActorRuntimeData().biped.get();
             if (bp) {
-                for (std::uint32_t i = 0; i < kSlots; ++i) {
-                    if (!donor[i] || !bp->objects[i].addon) continue;
-                    g_watchSlot = static_cast<int>(i);
-                    g_watchAddon = bp->objects[i].addon;
-                    break;
-                }
+                for (std::uint32_t i = 0; i < kSlots; ++i) g_watch[i] = bp->objects[i].addon;
+                g_watching = true;
             }
         }
         SKSE::log::info("[COSTUME] applied tab {}: {} redressed, {} mask edit(s) "
-                        "(watching slot {})",
-            g_appliedTab, backups.size(), edits.size(), g_watchSlot);
+                        "(watching {} slots)",
+            g_appliedTab, backups.size(), edits.size(), g_watching ? kSlots : 0u);
 
         // ★★When a costume piece does not appear and every step above still
         // reports success, the question has stopped being "did we ask
@@ -947,9 +972,13 @@ namespace FUI::Costume
     // built on the frames where the answer actually changed.
     void AnnounceIfMoved()
     {
-        if (g_tab == g_toldApi) return;
-        g_toldApi = g_tab;
-        if (g_tab < 0) {
+        // ★What the player LOOKS like, not what is checked. The API promises
+        // the costume currently on the body, and a beast wears none -- the tab
+        // is only held for the form's end, when this announces it again.
+        const int shown = g_beast ? -1 : g_tab;
+        if (shown == g_toldApi) return;
+        g_toldApi = shown;
+        if (shown < 0) {
             HostApi::BroadcastCostume(-1, nullptr, 0);
             return;
         }
@@ -999,16 +1028,20 @@ namespace FUI::Costume
             g_dirty = true;
         }
 
-        // ★The watch. One slot is enough -- a rebuild remakes the whole body,
-        // so whichever slot we sampled tells the same story as all of them.
-        if (g_watchSlot >= 0 && !g_dirty) {
+        // ★The watch. Every slot, compared against what our own rebuild left
+        // there -- see g_watch for why one slot was not enough.
+        if (g_watching && !g_dirty) {
             auto* p = RE::PlayerCharacter::GetSingleton();
             auto* bp = (p && p->Is3DLoaded()) ? p->GetActorRuntimeData().biped.get() : nullptr;
-            if (bp && bp->objects[g_watchSlot].addon != g_watchAddon) {
-                SKSE::log::info("[COSTUME] slot {} was rebuilt from under us -- redressing",
-                    g_watchSlot);
-                g_appliedTab = -2;
-                g_dirty = true;
+            if (bp) {
+                for (std::uint32_t i = 0; i < kSlots; ++i) {
+                    if (bp->objects[i].addon == g_watch[i]) continue;
+                    SKSE::log::info("[COSTUME] slot {} was rebuilt from under us -- redressing",
+                        i);
+                    g_appliedTab = -2;
+                    g_dirty = true;
+                    break;
+                }
             }
         }
         // ★Every tick, not a window around the rebuild. The bug does not appear
@@ -1047,13 +1080,14 @@ namespace FUI::Costume
         g_anchorGaveUp = false;
         g_lastRebuild = 0;   // a load is not something to space against
         g_tab = -1;
+        g_beast = false;     // the incoming save's first Apply reads the race afresh
         g_appliedTab = -2;   // unknown: the next Apply must run even if -1
         g_dirty = false;
         // ★The schedule belongs to the save being left. NoteGameLoaded opens a
-        // fresh one for the save coming in. The watch goes with it: its slot
-        // and addon describe a body that is being torn down.
+        // fresh one for the save coming in. The watch goes with it: its
+        // snapshot describes a body that is being torn down.
         g_reapplyLeft = 0;
-        g_watchSlot = -1;
-        g_watchAddon = nullptr;
+        g_watching = false;
+        g_watch.fill(nullptr);
     }
 }

@@ -856,6 +856,11 @@ namespace FUI::UIRoot
         // Render reads it on the render thread.
         std::atomic<bool> g_suppressed{ false };
         int               g_suppressTicks = 0;   // safety-net age, in Ticks
+        // ★GI83: age of "the preview is running but the menu is gone" (see the
+        // second net in Tick). Separate from the suppression age above: that
+        // one waits for somebody else's window to go, this one waits only for
+        // the menu map to settle.
+        int               g_orphanTicks   = 0;
         // ★A named client holds this one (UIRoot.h SuppressBy). ATOMIC because
         // a client dispatches its message on whatever thread it likes, and
         // SKSE hands the dispatch straight to us on that thread -- a plain
@@ -911,6 +916,8 @@ namespace FUI::UIRoot
             Grid::SetActiveTab(static_cast<Grid::Tab>(next));
             Sfx::SelectOn();
         }
+
+        void SendCursorTo(const ImVec2& a_pos);   // defined with the pointer code below
 
         // actions -> the input this UI is already built on
         void TranslatePadButtons()
@@ -1004,8 +1011,21 @@ namespace FUI::UIRoot
                 if (s_nudgeRKey) io.AddKeyEvent(ImGuiKey_RightArrow, down(kActNudgeR));
                 else if (down(kActNudgeR)) g_padNudgeX += step;
             }
-            if (edge(kActNudgeU) && down(kActNudgeU)) g_padNudgeY -= step;
-            if (edge(kActNudgeD) && down(kActNudgeD)) g_padNudgeY += step;
+            // ★Up/down over the recharge gem list walk ONE ROW, not one cell:
+            // the rows are text-height, so a cell-sized hop landed on every
+            // second gem or off the list (user report). Grid owns the row
+            // geometry and answers with the neighbouring row's centre;
+            // anywhere else the vertical nudge is the same cell it always was.
+            const auto stepY = [&](int a_dir) {
+                ImVec2 to{};
+                if (Grid::RechargeRowStep(g_padCursor, a_dir, to)) {
+                    SendCursorTo(to);
+                    return;
+                }
+                g_padNudgeY += static_cast<float>(a_dir) * step;
+            };
+            if (edge(kActNudgeU) && down(kActNudgeU)) stepY(-1);
+            if (edge(kActNudgeD) && down(kActNudgeD)) stepY(1);
 
             // ★★★HOLD A DIRECTION AND IT KEEPS WALKING.
             //
@@ -1022,12 +1042,14 @@ namespace FUI::UIRoot
             // the arrow keys, and ImGui already runs its own repeat on a held
             // key -- repeating here as well would count one hold twice.
             {
-                const struct { std::uint32_t bit; float* accum; float step; bool asKey; }
+                // vertical steps go through stepY so a held d-pad over the
+                // recharge list keeps walking rows, exactly as a press does
+                const struct { std::uint32_t bit; bool vertical; int dir; bool asKey; }
                 dirs[] = {
-                    { kActNudgeL, &g_padNudgeX, -step, s_nudgeLKey },
-                    { kActNudgeR, &g_padNudgeX,  step, s_nudgeRKey },
-                    { kActNudgeU, &g_padNudgeY, -step, false },
-                    { kActNudgeD, &g_padNudgeY,  step, false },
+                    { kActNudgeL, false, -1, s_nudgeLKey },
+                    { kActNudgeR, false,  1, s_nudgeRKey },
+                    { kActNudgeU, true,  -1, false },
+                    { kActNudgeD, true,   1, false },
                 };
                 static float s_repeatT[std::size(dirs)]{};
                 const float dt = std::clamp(io.DeltaTime, 1.0f / 240.0f, 1.0f / 20.0f);
@@ -1042,7 +1064,8 @@ namespace FUI::UIRoot
                     // the guard is for a frame long enough to owe several
                     // steps (a stall, an alt-tab): walk, do not teleport
                     for (int n = 0; s_repeatT[i] <= 0.0f && n < 4; ++n) {
-                        *d.accum += d.step;
+                        if (d.vertical) stepY(d.dir);
+                        else            g_padNudgeX += static_cast<float>(d.dir) * step;
                         s_repeatT[i] += kPadRepeatRate;
                     }
                 }
@@ -2288,7 +2311,73 @@ namespace FUI::UIRoot
             ImGui::PopStyleVar();
         }
 
+        // ★★RARITY MARK — Corner / Background: where an item's rarity colour
+        // goes. The wedge is the accent that shipped; the ground is the same
+        // colour under the whole item, for a board that is read at arm's
+        // length or sorted by rarity. Nothing else moves — the colours, the
+        // relic rule and the extension tint are one function either way
+        // (Grid::RarityColour).
+        //
+        // ★It sits in DISPLAY under ICON STYLE and above the shadow rows: those
+        // three all answer "what does a tile look like", and this one changes
+        // the tile more than any of them.
+        // ★No rebuild on the flip. The board asks Theme at draw time, so the
+        // next frame already has it — unlike the icon style above, which
+        // changes which sprite a tile resolves to.
+        void RowRarityMark(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::RarityMarkLabel);
+            ImGui::PushID("raritymark");
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f * a_c.S, 3.0f * a_c.S));
+            RightAlign(BtnRowW({ Lang::T(Lang::Str::RarityMarkWedge),
+                                 Lang::T(Lang::Str::RarityMarkGround) }));
+            for (int ground : { 0, 1 }) {
+                const bool on = Theme::RarityGround() == (ground == 1);
+                if (on) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, Theme::BtnOn());
+                    ImGui::PushStyleColor(ImGuiCol_Text, Theme::BtnOnInkVec());
+                }
+                if (Sfx::Button(Lang::T(ground ? Lang::Str::RarityMarkGround
+                                               : Lang::Str::RarityMarkWedge))) {
+                    Theme::SetRarityGround(ground == 1);
+                    WinManager::GetSingleton()->Save();
+                }
+                if (on) ImGui::PopStyleColor(2);
+                if (ground == 0) ImGui::SameLine(0.0f, 6.0f * a_c.S);
+            }
+            ImGui::PopStyleVar();
+            ImGui::PopID();
+        }
+
+        // ★★RARITY STRENGTH — how hard the ground is painted, 0 to 100%.
+        //
+        // ★IT APPEARS ONLY WHILE BACKGROUND IS PICKED, the way DEFERRED ICONS
+        // appears only when something is owed. A strength slider under a board
+        // drawing corner wedges controls nothing, and a control that does
+        // nothing is worse than a missing one: the player drags it, sees no
+        // change, and concludes the setting above is broken too. Showing up
+        // directly beneath the chip that turned it on explains itself.
+        //
+        // ★Stored 0..1 and shown as a percentage, exactly as SHADOW OPACITY is
+        // — the conversion lives here so no /100 can ever reach the draw path.
+        void RowRarityStrength(const SettingsCtx& a_c)
+        {
+            if (!Theme::RarityGround()) return;
+            SettingLabel(a_c, Lang::Str::RarityStrengthLabel);
+            RightAlign(a_c.trackW);
+            float v = Theme::RarityGroundA() * 100.0f;
+            if (SettingSlider("##raritystrength", &v, 0.0f, 100.0f, a_c.trackW,
+                              Theme::kDefRarityGroundA * 100.0f, "%.0f%%")) {
+                Theme::SetRarityGroundA(v / 100.0f);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                WinManager::GetSingleton()->Save();
+            }
+        }
+
         // ★★★1.0.5 ITEM SHADOW — three rows, and they are the three controls a
+
+
         // drop shadow has in every tool that has ever had one: DISTANCE, BLUR,
         // OPACITY. What stood here before was a strength slider plus a
         // Soft/Sharp pair, and that pair was an implementation detail dressed
@@ -2655,8 +2744,12 @@ namespace FUI::UIRoot
         // ★1.0.5: the GLOW STYLE row (silhouette / radial) is gone with the
         // halo it selected between. What is left is the drop shadow, which
         // has one shape and only a strength.
-        constexpr SettingsRowFn kRowsDisplay[] = { RowSkin, RowIconStyle, RowShadowDist,
-                                                   RowShadowBlur, RowShadowOpac, RowIconGain };
+        constexpr SettingsRowFn kRowsDisplay[] = { RowSkin, RowIconStyle,
+                                                   RowRarityMark, RowRarityStrength,
+                                                   RowShadowDist, RowShadowBlur,
+                                                   RowShadowOpac, RowIconGain };
+
+
         constexpr SettingsRowFn kRowsTrade[]   = { RowMerchantGold, RowMerchantStock };
         // ★CAPTURE LIGHT leads the section: it decides what the captures look
         // like, and the rows under it (reset, precache) are how you re-take
@@ -3997,8 +4090,18 @@ namespace FUI::UIRoot
                     Grid::MarkCapacityDirty();
                     Grid::RequestRebuild();   // the board changed shape: reflow
                 }
+                // The view cap gets the same guard. A change here moves only
+                // how tall the board is drawn, never where anything is placed
+                // -- except on the tab boards, which are drawn that tall and
+                // place into it, so they reflow.
+                if (Grid::ClampViewRowsToDisplay(io.DisplaySize.y, chromeH)) {
+                    Grid::RequestRebuild();
+                }
             }
-            const float gridBodyH = itemsLabelH + Grid::BaseRows() * Grid::CellPx() + 30.0f * S;
+            // ★ShownRows: the base board plus whatever bonus rows fit under
+            // "!viewrows". The window grows with the bonus instead of hiding
+            // every bonus row behind a scroll.
+            const float gridBodyH = itemsLabelH + Grid::ShownRows() * Grid::CellPx() + 30.0f * S;
             // left column must fit doll + stats panel + GOLD bar (S1); compact
             // reserves the GOLD-bar strip under the grid instead
             // ★The doll-to-stats gap is what's LEFT OVER, not a fixed 44.
@@ -4831,6 +4934,22 @@ namespace FUI::UIRoot
 
     void OnShow()
     {
+        // ★★★GI90: WHERE THE FIRST OPEN GOES. A player with a very large
+        // inventory reports the game hanging on the first open after installing,
+        // and the first open is genuinely the expensive one: nothing has a
+        // remembered cell yet, so every tile goes through the placement search,
+        // and no mesh has been probed yet, so every item pays that once. Which
+        // of those dominates is not something to GUESS at -- the local save is
+        // 98 tiles and opens in 23ms, which cannot be extrapolated to three
+        // thousand because neither cost is linear.
+        // ★One line, only when it is slow enough to be worth reading. The
+        // draw's own share is NOT here -- QueueCapture runs from the tile loop,
+        // so it lands in the frames after this one (see the frame probe in
+        // IconCache).
+        const auto t0 = std::chrono::steady_clock::now();
+        auto ms = [](auto a, auto b2) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(b2 - a).count();
+        };
         // PHASE 0 PROBE: the state the menu is opening onto. After a save/load
         // this is the reading that matters -- kPostLoadGame fires before the 3D
         // is back, so the report there cannot see what the body actually built.
@@ -4897,13 +5016,16 @@ namespace FUI::UIRoot
 
         // Callback FIRST: it hot-reloads the item defs which the grid and the
         // capture queue key off (building before the reload uses stale defs).
+        const auto tPre = std::chrono::steady_clock::now();
         if (g_onShow) g_onShow();
+        const auto tBuilt = std::chrono::steady_clock::now();
 
         // ★B4-1: conditional since the demolition began. A closed-menu count
         // delta raised the flag through its event; the census gate in
         // GridMenu::OnShow covers event-less value drifts (the grindstone).
         // A quiet open keeps the board untouched and every ladder idle.
         Grid::RebuildIfNeeded();
+        const auto tRebuilt = std::chrono::steady_clock::now();
 
         // B: prefetch EVERYTHING the player carries the moment the menu
         // opens — one up-front caching burst instead of per-scroll/per-bag
@@ -4932,6 +5054,20 @@ namespace FUI::UIRoot
 
         SKSE::log::info("[UI] menu shown ({} icons cached)",
             IconCache::GetSingleton()->CachedCount());
+        // ★GI90: 50ms is a frame and a half -- below that nobody felt
+        // anything and the line would only be noise in every log we read.
+        if (const auto total = ms(t0, std::chrono::steady_clock::now()); total >= 50) {
+            // ★★The first labels were WRONG and the first measurement said so:
+            // "board 8 / epilogue 59" read as if the board were cheap, when the
+            // board is not built by g_onShow at all -- that reloads the defs and
+            // the filters. The rebuild happens in RebuildIfNeeded, which sat
+            // inside "epilogue" with everything else. A stage name that points
+            // at the wrong code is worse than no timer.
+            SKSE::log::warn("[UI] menu open took {}ms: prelude {} / defs {} / "
+                            "board {} / rest {} -- {} tile(s)",
+                total, ms(t0, tPre), ms(tPre, tBuilt), ms(tBuilt, tRebuilt),
+                ms(tRebuilt, std::chrono::steady_clock::now()), Grid::TileCount());
+        }
 
         // ★AUTHOR TOOLING, on the same watch-file idiom as the vanilla
         // passthrough: drop the file, open the bag once, and the shipping pak
@@ -5092,6 +5228,12 @@ namespace FUI::UIRoot
         // or unbound action still names the key, so a hint never goes blank.
         if (!g_padActive.load() || !g_padLabelReady) return kKeyboard[i];
         return g_padLabel[i] ? g_padLabel[i] : kKeyboard[i];
+    }
+
+    void PadPointTo(const ImVec2& a_pos)
+    {
+        if (!g_padActive.load()) return;
+        SendCursorTo(a_pos);
     }
 
     bool WantsGameCursor()
@@ -5639,6 +5781,49 @@ namespace FUI::UIRoot
                          SuppressBy::kOverride);
             }
         }
+        // ★★★GI83: THE SECOND NET — A SESSION THAT ENDED WITHOUT SAYING SO.
+        //
+        // kHide SUPPRESSES rather than closes, which is right: it is the
+        // courtesy every overlay sends. But the engine can then take the menu
+        // OFF THE STACK without ever sending kForceHide, and kForceHide is the
+        // only thing that reaches OnHide -- so the whole close never ran.
+        //
+        // Two reporter CTDs (1.5.1 and 1.6.1) have the identical shape:
+        //     [SUPPRESS] on (kHide, engine)
+        //     [INV] session over            <- MenuCloseEchoTick's own test, so
+        //                                      the menu was CLOSED and the game
+        //                                      UNPAUSED, while m_running stayed
+        //                                      true and m_session never moved
+        //     ...the next open logs NEITHER "Begin3D" NOR "Begin3D SKIPPED",
+        //        i.e. Begin() returned at `if (m_running)`. Our Begin3D was
+        //        left outstanding ACROSS a vanilla InventoryMenu open/close --
+        //        and that menu drives the very same Inventory3DManager.
+        //     ...every capture after it: "model ready, capture empty".
+        //     ...and the eventual real close called End3D on a scene the engine
+        //        had already taken apart.
+        //
+        // ★The loadedModels guards cannot see this and never could: their
+        // entries still look perfect (radius 31.2 in both logs). The fault is
+        // one level up, at the SCENE, and the only cure is not to leave a
+        // session open behind a menu that is gone.
+        //
+        // ★The same question is already asked one screen up, for the client
+        // suppression hold: "a hold cannot outlive the session it was taken
+        // over". It was simply never asked about the session itself.
+        //
+        // ★Structural, not a timer. Self-limiting: the close clears m_running,
+        // so one leak costs one firing. The three ticks are for a frame where
+        // the menu map is mid-update, not a grace for anybody's manners.
+        if (ItemPreview::GetSingleton()->IsRunning() && !IsSessionOpen()) {
+            if (++g_orphanTicks >= 3) {
+                g_orphanTicks = 0;
+                SKSE::log::warn("[UI] the menu left the stack without a close -- "
+                                "ending the session from the tick (GI83)");
+                GridInventoryMenu::CloseSession("gone from the stack, no kForceHide");
+            }
+        } else {
+            g_orphanTicks = 0;
+        }
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
         Grid::ProcessFavorites();  // GI32: favourites, same reason
         Grid::ProcessRecharge();   // (1.3.1) soul-gem recharge, same reason
@@ -5652,6 +5837,7 @@ namespace FUI::UIRoot
         // back (sold, dropped, taken by a script) and stands the carrier down.
         DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
+        LootBarter::KeepConversationAlive();   // a live-world shop: the NPC waits
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)
         Grid::CapacityTick();       // W1+W2: weight bypass / space overload
         GoldCoins::Tick();          // G1: mirror the gold ledger into coins

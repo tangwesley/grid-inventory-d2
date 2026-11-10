@@ -14,6 +14,7 @@
 #include "ui/Theme.h"
 #include "ui/UIRoot.h"
 #include "ui/WinManager.h"
+#include "api/HostApi.h"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,10 @@ namespace FUI::LootBarter
     // a merchant's stock is the vendor faction's container. Declared up here
     // because the ledgers below need to ask it what is already on the shelf.
     RE::TESObjectREFR* SourceRef();
+    // ★GI86: a shop is the chest AND the shopkeeper. Declared here because the
+    // buy runs (ProcessTransfers) long before these are defined.
+    RE::Actor*         MerchantActor();
+    RE::TESObjectREFR* HolderOf(RE::TESBoundObject* a_obj);
     // (defined with the other board writes) split a shelf cell in two and
     // give the smaller half to the cursor -- the slider's confirm needs it
     // before the definitions further down.
@@ -1663,8 +1668,7 @@ namespace FUI::LootBarter
                 const bool wr = xl->HasType<RE::ExtraWorn>();
                 const bool wl = xl->HasType<RE::ExtraWornLeft>();
                 if (!wr && !wl) continue;
-                int u = 0;
-                if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) u = xu->uniqueID;
+                const int u = Grid::PoolUidOf(a_obj, xl);
                 out.push_back({ u, static_cast<int>(Grid::InstanceSigOf(xl)),
                                 (std::max)(1, xl->GetCount()), wl ? 2 : 1 });
             }
@@ -1686,6 +1690,82 @@ namespace FUI::LootBarter
             if (WornPrint(a_holder, a_obj) != before) {
                 SKSE::log::error("[XFER] TRIPWIRE {}: engine fallback moved a WORN "
                                  "unit of '{}'", a_tag, a_obj->GetName());
+            }
+        }
+
+        // ★TEMPORARY DIAGNOSTIC (2026-09-20) -- remove once the report closes.
+        //
+        // Written for one bug: the Companions heirloom quest (CR06) puts a
+        // Steel Battleaxe REFERENCE in a boss chest and advances when that
+        // reference reaches the player. Taken through this window it did not.
+        // The log already says what happened -- "GI2: count 1 < listed 2"
+        // from the frame of the take, so the chest's count fell and none of
+        // its lists left -- but not WHY: whether the pick came back nameless
+        // and the engine chose for itself, or a list was named and the engine
+        // declined to move it. That is a question about one call, so this
+        // prints both holders' entries on either side of it.
+        //
+        // Every extra type on each list is printed as a raw hex id, not a
+        // chosen few: the whole point is that the list carries something this
+        // file has not thought about.
+        void TraceTakeEntry(const char* a_when, const char* a_side,
+                            RE::TESObjectREFR* a_holder, RE::TESBoundObject* a_obj,
+                            const RE::ExtraDataList* a_named)
+        {
+            if (!a_holder || !a_obj) return;
+            auto* e = Grid::LiveEntryOf(a_holder, a_obj);
+            int authored = 0;
+            if (auto* cont = a_holder->GetContainer()) {
+                authored = cont->GetObjectCount(a_obj);
+            }
+            std::size_t lists = 0;
+            if (e && e->extraLists) {
+                for (auto* xl : *e->extraLists) { (void)xl; ++lists; }
+            }
+            SKSE::log::info("[XFER] trace {} {} {:08X} '{}': entry {} delta {} authored {} "
+                            "lists {} questEntry {}",
+                a_when, a_side, a_holder->GetFormID(), a_obj->GetName(),
+                e ? "present" : "ABSENT", e ? e->countDelta : 0, authored, lists,
+                e && e->IsQuestObject() ? "Y" : "n");
+            if (!e || !e->extraLists) return;
+            int idx = 0;
+            for (auto* xl : *e->extraLists) {
+                const int i = idx++;
+                if (!xl) {
+                    SKSE::log::info("[XFER] trace   [{}] (null list)", i);
+                    continue;
+                }
+                std::string types;
+                for (std::uint32_t t = 1; t < 0xC0; ++t) {
+                    if (xl->HasType(static_cast<RE::ExtraDataType>(t))) {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "%s%02X", types.empty() ? "" : " ", t);
+                        types += buf;
+                    }
+                }
+                const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+                SKSE::log::info("[XFER] trace   [{}] {:p}{} count {} rawUid {:04X} poolUid {:04X} "
+                                "sig {:04X} questAlias {} types [{}]",
+                    i, static_cast<const void*>(xl), xl == a_named ? " <-NAMED" : "",
+                    xl->GetCount(), xu ? xu->uniqueID : 0,
+                    Grid::PoolUidOf(a_obj, xl), Grid::InstanceSigOf(xl),
+                    xl->HasQuestObjectAlias() ? "Y" : "n", types);
+                if (auto* xa = xl->GetByType<RE::ExtraAliasInstanceArray>()) {
+                    RE::BSReadLockGuard lock{ xa->lock };
+                    for (const auto* inst : xa->aliases) {
+                        if (!inst) continue;
+                        SKSE::log::info("[XFER] trace       alias: quest {:08X} '{}' alias {} '{}'",
+                            inst->quest ? inst->quest->GetFormID() : 0u,
+                            inst->quest ? inst->quest->GetFormEditorID() : "?",
+                            inst->alias ? inst->alias->aliasID : 0u,
+                            inst->alias ? inst->alias->aliasName.c_str() : "?");
+                    }
+                }
+                if (auto* xr = xl->GetByType<RE::ExtraReferenceHandle>()) {
+                    const auto ref = xr->GetOriginalReference();
+                    SKSE::log::info("[XFER] trace       reference handle -> {:08X}",
+                        ref ? ref->GetFormID() : 0u);
+                }
             }
         }
 
@@ -1791,11 +1871,10 @@ namespace FUI::LootBarter
                     // ★The identity comes off the body with the unit. Taken
                     // here and not at the restore, because by then the list
                     // has merged into the pack (see WornSave).
-                    const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
                     worn.push_back({ xl,
                         { (std::max)(1, static_cast<int>(xl->GetCount())),
                           left ? 2 : 1,
-                          xu ? xu->uniqueID : static_cast<std::uint16_t>(0),
+                          Grid::PoolUidOf(a_obj, xl),
                           Grid::InstanceSigOf(xl) } });
                 }
             }
@@ -1889,6 +1968,57 @@ namespace FUI::LootBarter
                     static_cast<std::uint32_t>(RE::RESET_3D_FLAGS::kSkin)));
                 proc->Update3DModel(a_actor);
             }
+        }
+    }
+
+    // ★★★THE CONVERSATION BEHIND A SHOP MUST NOT TIME OUT WHILE THE BOARD IS UP.
+    //
+    // Reported: browse a merchant's shelf for too long and the NPC ends the
+    // dialogue as if the player had never answered. A shop is reached THROUGH
+    // a conversation: the engine closes the DialogueMenu a frame before
+    // BarterMenu opens and puts it back the moment BarterMenu closes -- which
+    // is the moment our grid opens in its place -- so the conversation is
+    // live under the board for the whole session. Vanilla's BarterMenu pauses
+    // the game, so nothing ever ran there. Under "!nopause" everything runs.
+    //
+    // What runs is the speaker's own patience. HighProcessData carries
+    // awarePlayerTimer, a countdown the engine decrements every frame the NPC
+    // is in dialogue with the player; at zero the NPC says goodbye and the
+    // menu shuts. Skyrim Souls RE (Vermunds) meets exactly this with
+    // its unpaused menus, and its answer is the one used here: hold the
+    // timer at 120 s for as long as a menu stands between the player and the
+    // conversation (DialogueMenuEx::UpdateAutoCloseTimer_Hook). It hooks the
+    // decrement; we do not need to. Our tick runs every unpaused frame from
+    // the PlayerCharacter::Update hook, and a value written every frame
+    // cannot be counted down to zero in between, whichever side of the
+    // engine's own write it lands on.
+    //
+    // ★Only a session a conversation is holding open: a merchant (kBarter),
+    // or a follower's pack -- loot mode with a LIVING actor for a partner. A
+    // chest or a corpse has no speaker, and a pickpocket mark is not
+    // talking to us. And only while the world is live: a paused game
+    // decrements nothing, so there is nothing to hold.
+    void KeepConversationAlive()
+    {
+        auto* partner = Partner();
+        auto* actor = partner ? partner->As<RE::Actor>() : nullptr;
+        if (!actor || actor->IsDead()) return;
+        if (g_mode != Mode::kBarter && !IsLootMode(g_mode)) return;
+        if (auto* ui = RE::UI::GetSingleton(); !ui || ui->GameIsPaused()) return;
+        auto* proc = actor->GetActorRuntimeData().currentProcess;
+        auto* high = proc ? proc->high : nullptr;
+        if (!high) return;
+        constexpr float kHold = 120.0f;   // Skyrim Souls' figure
+        if (high->awarePlayerTimer < kHold) {
+            static bool s_said = false;
+            if (!s_said) {
+                s_said = true;
+                SKSE::log::info("[BARTER] holding '{}'s dialogue timer at {:.0f}s while "
+                                "the board is up (was {:.1f}s)",
+                                actor->GetName() ? actor->GetName() : "?",
+                                kHold, high->awarePlayerTimer);
+            }
+            high->awarePlayerTimer = kHold;
         }
     }
 
@@ -2041,12 +2171,17 @@ namespace FUI::LootBarter
                 // The name goes back (GI39 wants it), and the ownership is ours
                 // to state.
                 std::set<RE::ExtraDataList*> hadBefore;
-                if (anyStolen) {
+                // ★The same photograph serves USE MODE (below): the unit that
+                // arrives has to be named to the equip by the list it arrives
+                // IN, and "which list is new" is the only way to find it.
+                if (anyStolen || r.useAfter) {
                     if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
                         for (auto* l : *e->extraLists) {
                             if (l) hadBefore.insert(l);
                         }
                     }
+                }
+                if (anyStolen) {
                     // ★★SAY WHOSE IT IS WHILE IT IS STILL ON THE SHELF.
                     //
                     // Ownership lives on an ExtraDataList, and the engine hands
@@ -2120,6 +2255,14 @@ namespace FUI::LootBarter
                 // ★The deposit half goes FIRST -- vanilla serves your own
                 // goods before the room's, and a player who takes two of three
                 // should get the two that were theirs.
+                // ★TEMPORARY (2026-09-20): see TraceTakeEntry.
+                SKSE::log::info("[XFER] trace take '{}' x{} asked uid {:04X} sig {:04X} worn {} "
+                                "-> pick kind {} xl {:p} (deposit {} stolen {})",
+                    r.obj->GetName(), r.count, r.uid, r.sig, r.fromWorn,
+                    static_cast<int>(pick.kind), static_cast<const void*>(pick.xl),
+                    fromDeposit, stolenCount);
+                TraceTakeEntry("BEFORE", "source", source, r.obj, pick.xl);
+                TraceTakeEntry("BEFORE", "player", player, r.obj, nullptr);
                 GuardedRemove(source, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "take", [&]() {
                     if (fromDeposit > 0) {
@@ -2146,6 +2289,11 @@ namespace FUI::LootBarter
                             xl2, player);
                     }
                 });
+                // ★TEMPORARY (2026-09-20): nothing is NAMED on this side of the
+                // call -- a list the engine moved is the player's now, and one
+                // it freed is not a pointer to compare against.
+                TraceTakeEntry("AFTER", "source", source, r.obj, nullptr);
+                TraceTakeEntry("AFTER", "player", player, r.obj, nullptr);
                 if (anyStolen) {
                     // ★★A UNIT WITH NO LIST CANNOT BE STOLEN, because ownership
                     // lives on the list. That is the whole of this bug.
@@ -2213,7 +2361,49 @@ namespace FUI::LootBarter
                     // ★It is passing through, not moving in: a typed bag must not
                     // adopt a unit that is about to be drunk.
                     Grid::NoteTransientArrival(r.obj->GetFormID());
-                    Equip::UseItem(r.obj, r.uid, -1, r.sig, {}, r.count);
+                    // ★★★NAMED BY THE LIST IT ARRIVED IN, NOT BY THE SHELF'S UID.
+                    //
+                    // Reported: armour used straight out of a chest took the
+                    // worn piece OFF and put nothing on. The log has the whole
+                    // of it in two lines --
+                    //
+                    //   [EQUIP] slot conflict: unequip Fur Armor
+                    //   [EQUIP] named unit gone -- equip skipped
+                    //
+                    // -- because the equip was asked for r.uid, the unit's
+                    // ExtraUniqueID as the CHEST had stamped it. A uid is the
+                    // container's own numbering: the moment the unit lands in
+                    // the pack the engine numbers it again, and ExtraForPool
+                    // matches a uid exactly with no fallback (a named unit that
+                    // resolves to nothing is refused on purpose, GI53). So the
+                    // conflict pass had already undressed the player by the
+                    // time the resolver said "gone". Consumables never hit it:
+                    // a potion has no list and rides the bare count.
+                    //
+                    // The lists in the pack were photographed before the engine
+                    // call (hadBefore, above). Whatever list is there now and
+                    // was not then is the unit that just arrived, and ITS uid
+                    // and signature -- read the way the pool system reads them
+                    // (PoolUidOf, InstanceSigOf) -- are the name the equip can
+                    // resolve. No new list means the unit merged into the bare
+                    // count (a plain stackable), and uid 0 / sig 0 is the honest
+                    // name for that: the engine takes one from the count.
+                    std::uint16_t useUid = 0, useSig = 0;
+                    if (auto* e = Grid::LiveEntryOf(player, r.obj); e && e->extraLists) {
+                        for (auto* l : *e->extraLists) {
+                            if (!l || hadBefore.contains(l)) continue;
+                            if (l->HasType<RE::ExtraWorn>() ||
+                                l->HasType<RE::ExtraWornLeft>()) continue;
+                            useUid = Grid::PoolUidOf(r.obj, l);
+                            useSig = Grid::InstanceSigOf(l);
+                            break;
+                        }
+                    }
+                    SKSE::log::info("[XFER] use-after-take '{}': shelf named "
+                                    "u{:04X}/s{:04X}, arrived as u{:04X}/s{:04X}",
+                                    r.obj->GetName() ? r.obj->GetName() : "?",
+                                    r.uid, r.sig, useUid, useSig);
+                    Equip::UseItem(r.obj, useUid, -1, useSig, {}, r.count);
                 }
                 break;
             }
@@ -2281,7 +2471,13 @@ namespace FUI::LootBarter
             }
             case XferReq::kBuy: {
                 // merchant -> player; player pays, merchant receives.
-                const auto pick = SourceUnit(source, r);
+                // ★GI86: the ware may live on the SHOPKEEPER rather than in the
+                // chest (see HolderOf). The gold still moves through the chest
+                // below -- that is where a shop's till is -- but the item has to
+                // leave the hand that is actually holding it.
+                auto* holder = HolderOf(r.obj);
+                if (!holder) holder = source;
+                const auto pick = SourceUnit(holder, r);
                 if (!pick.ok()) {   // GI42: e.g. the merchant WEARS the twin
                     ClearOut(r.obj, r.uid, r.sig, r.count);
                     Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
@@ -2289,11 +2485,15 @@ namespace FUI::LootBarter
                         "{:04X} sig {:04X}", r.obj->GetName(), r.uid, r.sig);
                     break;
                 }
-                GuardedRemove(source, r.obj,
+                GuardedRemove(holder, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "buy", [&]() {
-                    source->RemoveItem(r.obj, r.count, RE::ITEM_REMOVE_REASON::kRemove,
+                    holder->RemoveItem(r.obj, r.count, RE::ITEM_REMOVE_REASON::kRemove,
                         pick.xl, player);
                 });
+                if (holder != source) {
+                    SKSE::log::info("[XFER] buy '{}' from the shopkeeper, not the chest",
+                        r.obj->GetName());
+                }
                 if (gold && r.price > 0) {
                     player->RemoveItem(gold, r.price, RE::ITEM_REMOVE_REASON::kRemove,
                         nullptr, nullptr);
@@ -2718,7 +2918,7 @@ namespace FUI::LootBarter
                     g_actingSpot = nk;   // the carry names its own cell
                     Grid::BeginPartnerCarry(g_slider.obj, g_slider.value,
                                             g_slider.unitValue,
-                                            Grid::UnitRef{ g_slider.uid, 0,
+                                            Grid::UnitRef{ g_slider.uid, g_slider.sig,
                                                            g_slider.xlIdx });
                 }
                 break;
@@ -2922,6 +3122,16 @@ namespace FUI::LootBarter
         const bool keyOk = !fresh && Sfx::ConfirmKey();
         const bool okClick = Sfx::Button(Lang::T(Lang::Str::Confirm), ImVec2(btnW, 0)) &&
                              !fresh;
+        // ★A pad opens onto the question with the pointer wherever the sale
+        // was clicked -- on the goods, a long drive from either answer. Start
+        // it on the first option (pad only, see UIRoot::PadPointTo); the
+        // fresh-frame guard above means the press that opened the window
+        // cannot also answer it.
+        if (ImGui::IsWindowAppearing()) {
+            const ImVec2 lo = ImGui::GetItemRectMin();
+            const ImVec2 hi = ImGui::GetItemRectMax();
+            UIRoot::PadPointTo(ImVec2((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f));
+        }
         ImGui::SameLine(0.0f, 8.0f * S);
         const bool cancel = (Sfx::CancelButton(Lang::T(Lang::Str::Cancel),
                                                ImVec2(btnW, 0), keyOk) ||
@@ -3617,6 +3827,16 @@ namespace
                     const bool ok = fits(gc, gr, hw, hh);
                     const ImU32 ghost = ok ? IM_COL32(90, 170, 90, 90)
                                            : IM_COL32(190, 60, 60, 110);
+                    // ★★GI71b: A BOX HERE, ON PURPOSE, and it is not an
+                    // oversight left over from the partner board's ghost.
+                    //
+                    // A BAG still PACKS by bounding box -- its fits/mark walk
+                    // w x h, so a T dropped in one reserves the whole 3x2 it
+                    // sits in. Drawing the notched outline would promise a shape
+                    // the bag will not honour, and a ghost that disagrees with
+                    // what happens next is worse than a coarse one. When bag
+                    // packing learns masks, this becomes the same loop the
+                    // partner board uses and not before.
                     const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
                     dl->AddRectFilled(g0,
                         ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
@@ -4446,6 +4666,81 @@ namespace
         return partner;
     }
 
+    // ★★★GI86: A SHOP IS THE CHEST *AND* THE SHOPKEEPER.
+    //
+    // SourceRef above returns the chest and stops, on the reasoning written
+    // beside it: the actor's own inventory is "the merchant's personal
+    // belongings". That is half true and the missing half is a whole class of
+    // wares. Skyrim offers BOTH: the faction chest, and whatever the merchant
+    // is carrying that passes their sell/buy list. That is how a unique
+    // shopkeeper sells a unique thing without a chest of their own for it --
+    // and it is why Revus Sarvani's Kagrumez Resonance Gem was on the SkyUI
+    // screen and missing from ours (reported, 1.6.1, confirmed by the reporter
+    // switching mods back and forth on the same save).
+    //
+    // So the actor is a SECOND source. It is not a second board: the wares are
+    // merged into one list, and the only thing that has to remember where a
+    // unit lives is the buy, which asks HolderOf.
+    [[nodiscard]] RE::Actor* MerchantActor()
+    {
+        if (g_mode != Mode::kBarter) return nullptr;
+        auto* partner = Partner();
+        auto* actor = partner ? partner->As<RE::Actor>() : nullptr;
+        if (!actor) return nullptr;
+        // No chest means SourceRef already IS the actor -- there is no second
+        // source to add, and merging the actor with itself would double it.
+        auto* fac = actor->GetVendorFaction();
+        if (!fac || !fac->vendorData.merchantContainer) return nullptr;
+        return actor;
+    }
+
+    // Does this merchant's list let them trade in this item? The same test
+    // vanilla applies, and the same one GoldCoins::SeedVendorStock already
+    // makes for the bag wares: the list is a whitelist of KEYWORDS unless
+    // notBuySell flips it into a blacklist. A vendor with no list at all is
+    // unrestricted.
+    [[nodiscard]] bool VendorSells(RE::Actor* a_merchant, RE::TESBoundObject* a_obj)
+    {
+        if (!a_merchant || !a_obj) return false;
+        auto* fac = a_merchant->GetVendorFaction();
+        if (!fac) return false;
+        auto* list = fac->vendorData.vendorSellBuyList;
+        if (!list) return true;
+        bool inList = list->HasForm(a_obj);
+        if (!inList) {
+            if (const auto* kwf = a_obj->As<RE::BGSKeywordForm>()) {
+                for (std::uint32_t i = 0; i < kwf->numKeywords; ++i) {
+                    if (const auto* kw = kwf->keywords[i]; kw && list->HasForm(kw)) {
+                        inList = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return fac->vendorData.vendorValues.notBuySell ? !inList : inList;
+    }
+
+    // Which of the two actually holds this form right now. The chest answers
+    // first because that is where the ordinary stock and the merchant's gold
+    // live; the shopkeeper answers for what only they carry.
+    // ★Asked at the moment of the buy, never remembered on the cell: the board
+    // is rebuilt around pools, and a remembered ref is the kind of fact that
+    // goes stale between the click and the engine (the rule this file already
+    // keeps for extra lists).
+    [[nodiscard]] RE::TESObjectREFR* HolderOf(RE::TESBoundObject* a_obj)
+    {
+        auto* chest = SourceRef();
+        if (!a_obj || !chest) return chest;
+        auto* m = MerchantActor();
+        if (!m) return chest;
+        if (chest->GetInventoryCounts([&](RE::TESBoundObject& o) {
+                return &o == a_obj;
+            }).empty()) {
+            return m;
+        }
+        return chest;
+    }
+
     namespace
     {
         // UESP barter formula: factor = fBarterMax - (fBarterMax-fBarterMin) *
@@ -4502,6 +4797,25 @@ namespace
         // mod/factor live-read -- the old +-1 was a polluted base, not this)
         return (std::max)(1,
             static_cast<int>(std::lround(a_baseValue * mod / BasePriceFactor())));
+    }
+
+    int PricedValue(RE::TESBoundObject* a_item, const RE::ExtraDataList* a_xl,
+                    int a_value, bool a_buy)
+    {
+        // ★THE CHEAP EXIT FIRST. Most players have no pricer, and this sits on
+        // the shelf-collect loop; a cross-DLL call per cell is not free.
+        if (a_value <= 0 || !a_item || !HostApi::HasPricer()) return a_value;
+        const float mult = HostApi::PriceMult(a_item->GetFormID(), a_xl,
+            a_buy ? GridInvAPI::kPriceBuy : GridInvAPI::kPriceSell);
+        if (mult == 1.0f) return a_value;
+        // Rounded ONCE here, on the unit; the totals then round once more on
+        // the whole amount as they always have (B7). Floor 1: a value the
+        // engine said was worth something stays worth something -- the sell
+        // side already refuses to pay zero for a valuable item, and a buy side
+        // that charged nothing would be the same bug in the other direction.
+        const long scaled = std::lround(static_cast<double>(a_value) * mult);
+        return static_cast<int>(std::clamp<long>(scaled, 1L,
+            static_cast<long>((std::numeric_limits<int>::max)())));
     }
 
     // B7: stack totals round ONCE on the total (vanilla behaviour) — the old
@@ -4654,10 +4968,38 @@ namespace
             // angle can never disagree -- every placement test on this side reads
             // w/h directly, and a stale pair would place the cell wrong.
             int           rot = 0;
+            // ★★GI71: THE FOOTPRINT, so a container can hold a T the same shape
+            // the player's board does. Derived from the def every frame rather
+            // than stored on ContCell: the shape follows the def, so persisting
+            // it would only give a saved layout a way to disagree with items.ini
+            // after an edit. w/h stay the mask's bounding box.
+            FUI::Shape mask;
+            // ★The SOCKETER's row for this unit, copied at collect where its
+            // list is in hand (HostApi::Sockets). This is the window the socket
+            // wells matter most on -- what a chest holds is the decision -- and
+            // the draw has no list to ask with, so the cell carries the answer.
+            GridInvAPI::Overlay sockets{};
             void SetRot(int a_rot)
             {
+                // ★Turn the MASK by the same delta, in the same call that swaps
+                // w/h. The note above about w/h and the angle never disagreeing
+                // now covers three things instead of two, and the only way to
+                // keep that true is to move them together.
+                // ★★AND NOT AN ABSENT ONE. An empty mask MEANS "solid
+                // rectangle" (see Solid), and rotating it would build a real
+                // 1x1 of all-false instead -- turning every ordinary tile into
+                // one that owns no square at all. Absent stays absent.
+                const int d = (a_rot - rot) & 3;
+                if (d != 0 && !mask.rows.empty()) mask = FUI::RotateShape(mask, d);
                 if (((rot ^ a_rot) & 1) != 0) std::swap(w, h);
                 rot = a_rot & 3;
+            }
+            // Bounds-safe: a cell built before its mask was filled reads as a
+            // solid rectangle, which is what every such cell used to be.
+            [[nodiscard]] bool Solid(int a_x, int a_y) const
+            {
+                if (mask.rows.empty()) return true;
+                return mask.At(a_x, a_y);
             }
 
             // ★THE WHOLE IDENTITY, so a caller cannot take half of it by
@@ -4818,6 +5160,40 @@ namespace
             [[nodiscard]] UnitRef unit() const { return { uid, sig, xlIdx, worn }; }
         };
 
+        // ★GI86: fold the shopkeeper's own sellable wares into the shop list.
+        // One board, two holders -- see MerchantActor / HolderOf. Worn gear is
+        // left out whole: what a merchant is wearing is not for sale, and
+        // over-excluding one of two identical items is the safe side of that.
+        void MergeMerchantStock(InvMap& a_inv)
+        {
+            auto* m = MerchantActor();
+            if (!m) return;
+            int added = 0, worn = 0;
+            auto own = m->GetInventory([&](RE::TESBoundObject& o) {
+                return VendorSells(m, &o);
+            });
+            for (auto& [obj, d] : own) {
+                if (!obj || d.first <= 0) continue;
+                if (d.second && d.second->IsWorn()) { ++worn; continue; }
+                if (const auto it = a_inv.find(obj); it != a_inv.end()) {
+                    it->second.first += d.first;   // the chest stocks it too
+                } else {
+                    a_inv.emplace(obj, std::move(d));
+                }
+                ++added;
+            }
+            // ★One line per shop open, always. The whole reason this bug
+            // survived a release is that nothing anywhere said which of the
+            // two lists a missing ware should have been in.
+            static RE::FormID s_said = 0;
+            if (s_said != m->GetFormID()) {
+                s_said = m->GetFormID();
+                SKSE::log::info("[VENDOR] {}: {} ware(s) carried by the shopkeeper "
+                                "merged into the shop list ({} worn, not for sale)",
+                    m->GetDisplayFullName(), added, worn);
+            }
+        }
+
         void ReconcileContainer(ContLayout& a_cl, RE::TESObjectREFR* a_source,
                                 const InvMap& a_inv)
         {
@@ -4976,7 +5352,51 @@ namespace
                         c.count = (std::max)(0, c.count) + add;
                         diff -= add;
                     }
-                    // ...then lay out new cells for the rest
+                    // ★★★...then ADOPT before minting. An aimed store writes
+                    // its cell up front (PlaceStoredCell) under the uid the
+                    // PLAYER's inventory gave the unit -- and a uid is the
+                    // container's numbering: InventoryChanges::SetUniqueID
+                    // re-stamps a listed unit as it arrives here. So the unit
+                    // the engine now reports belongs to a pool this board has
+                    // never seen, the pool it was promised to has no engine
+                    // presence, and this pass used to mint the arrival a fresh
+                    // cell at first-fit while step 3 swept the aimed one away.
+                    // Every tempered, enchanted or renamed piece of gear stored
+                    // onto a chosen square landed where a right-click would
+                    // have put it (user report); plain stacks, having no uid,
+                    // never showed it.
+                    //
+                    // The signature is what survives the trip, so an orphan
+                    // cell of the same form, signature and worn-ness whose own
+                    // pool the engine cannot account for is THIS unit's cell,
+                    // and it is relabelled to the uid the engine settled on
+                    // rather than replaced -- the same choice the player board
+                    // makes when a whole stack changes pool (Grid.cpp, the
+                    // relabel block): the units never moved, only their name.
+                    // ★Only orphans. A cell whose pool IS present speaks for
+                    // its own units; taking it would hide one of them.
+                    // ★Adopting the cell's count as the arrival's -- an aimed
+                    // store says how many it placed. A legacy count of 0 means
+                    // "unspecified" (see the header note) and takes the fill.
+                    for (auto& [ok, oc] : a_cl.cells) {
+                        if (diff <= 0) break;
+                        if (oc.form != sp.obj->GetFormID() || oc.sig != sp.sig ||
+                            oc.worn != sp.worn || oc.uid == sp.uid) {
+                            continue;
+                        }
+                        if (seen.contains(PoolOf(oc))) continue;
+                        const int take = oc.count > 0 ? (std::min)(oc.count, diff)
+                                                      : (std::min)(cap, diff);
+                        SKSE::log::info("[LOOT] shelf cell '{}' adopts {} x{} -- uid "
+                                        "{:04X} -> {:04X} (renumbered on arrival)",
+                            ok, sp.obj->GetName(), take, oc.uid, sp.uid);
+                        oc.uid = sp.uid;
+                        oc.xlIdx = sp.xlIdx;
+                        oc.count = take;
+                        mine.push_back(ok);
+                        diff -= take;
+                    }
+                    // ...and lay out new cells for whatever is left
                     while (diff > 0) {
                         const int take = (std::min)(cap, diff);
                         ContCell  nc;
@@ -4999,7 +5419,23 @@ namespace
                         int rotWanted = 0;
                         if (sp.obj) {
                             const auto rk = OutKey(sp.obj->GetFormID(), sp.uid, sp.sig);
-                            if (const auto ri = g_inRot.find(rk); ri != g_inRot.end()) {
+                            auto ri = g_inRot.find(rk);
+                            // ★The angle was recorded under the PLAYER-side
+                            // uid, and a listed unit arrives renumbered (see
+                            // the adoption pass above). Same form, same
+                            // signature, any uid: OutKey is "FFFFFFFF@UUUU~SSSS".
+                            if (ri == g_inRot.end() && sp.uid != 0) {
+                                char sigPart[8];
+                                std::snprintf(sigPart, sizeof(sigPart), "~%04X", sp.sig);
+                                for (auto it2 = g_inRot.begin(); it2 != g_inRot.end(); ++it2) {
+                                    if (it2->first.compare(0, 8, rk, 0, 8) == 0 &&
+                                        it2->first.compare(13, 5, sigPart) == 0) {
+                                        ri = it2;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (ri != g_inRot.end()) {
                                 rotWanted = ri->second & 3;
                                 g_inRot.erase(ri);
                             }
@@ -5138,7 +5574,8 @@ namespace
             auto* cl = BoardFor();
             if (!cl) return cells;
 
-            const auto inv = source->GetInventory();
+            auto inv = source->GetInventory();
+            MergeMerchantStock(inv);   // GI86: the shopkeeper's own wares too
             ReconcileContainer(*cl, source, inv);
 
             // ---- the VIEW ----
@@ -5223,6 +5660,13 @@ namespace
                 // GI43: a per-unit cell is priced from ITS list -- a tempered
                 // unit buys/sells at the vanilla tempered value.
                 int value = perUnit ? Grid::UnitValueWith(obj, xl) : unitValue;
+                // ★AND THEN THE PRICER'S SAY, on the merchant's shelf only. A
+                // loot chest has no counter, so its cells keep the engine value
+                // for whatever else reads it. The list goes along in BOTH
+                // branches: an extension prices by the unit's own list, and a
+                // stacking form's shared list is still the one it would look
+                // in (it will find nothing there and say 1.0, which is right).
+                if (g_mode == Mode::kBarter) value = PricedValue(obj, xl, value, true);
                 // ★Gold is the exception, and only because `value` is a
                 // PER-UNIT price everywhere else: a purse is worth its coins.
                 if (obj->IsGold()) value = c.count;
@@ -5233,6 +5677,9 @@ namespace
                 pc.uid = c.uid;
                 pc.sig = c.sig;
                 pc.xlIdx = c.xlIdx;
+                if (HostApi::HasSocketer()) {
+                    HostApi::Sockets(obj->GetFormID(), xl, pc.sockets);
+                }
                 pc.perUnit = perUnit;
                 pc.worn = c.worn;
                 pc.gold = c.gold;
@@ -5240,6 +5687,21 @@ namespace
                 pc.ord = ordOf[PoolOf(c)]++;
                 pc.col = c.col;
                 pc.row = c.row;
+                // ★GI71: BEFORE SetRot, and unrotated. SetRot turns the mask by
+                // the delta, so handing it an already-turned shape would turn it
+                // twice. Clamped to the partner board's own width.
+                //
+                // ★★ONLY WHEN THERE IS A SHAPE TO BUILD. This function runs on
+                // the RENDER path -- once per cell per frame -- and a Shape is a
+                // vector of vectors, so building one for every ordinary tile
+                // meant a few hundred heap allocations a frame on a merchant's
+                // hundred wares. An absent mask already MEANS "solid rectangle"
+                // to every consumer here (Solid, washCell, fits/mark, the
+                // ghost), so the 99% case now allocates nothing and behaves
+                // exactly as it did. Same rule the EDIT-mode gate a few hundred
+                // lines below was written for: no per-frame work to answer a
+                // question that is "no" almost always.
+                if (!def.shape.empty()) pc.mask = FUI::ShapeOf(def, Grid::BaseCols());
                 pc.SetRot(c.rot);
                 // GI42: the lock's resolution must MATCH the naming resolution.
                 // Locking only the worn cell while a spare cell could still pull
@@ -5373,19 +5835,35 @@ namespace
             auto ensureRow = [&](int r) {
                 while (static_cast<int>(occ.size()) <= r) occ.emplace_back(cols, false);
             };
-            auto fits = [&](int c, int r, int w, int h) {
-                if (c < 0 || r < 0 || c + w > cols) return false;
-                for (int y = 0; y < h; ++y) {
+            // ★★GI71: THE FOOTPRINT DECIDES, NOT THE BOUNDING BOX.
+            //
+            // These two walked the w x h rectangle, which is why a container
+            // could not hold a polyomino: a T claimed the whole 3x2 box it sits
+            // in, so its two empty corners stayed reserved and no neighbour
+            // could use them. The player board has always walked the mask; this
+            // is the same walk.
+            //
+            // ★A solid rectangle has every cell set, so both reduce exactly to
+            // what they replaced -- the 99% case is untouched by construction
+            // rather than by luck. `Solid` also answers true for a cell whose
+            // mask was never filled, so nothing regresses on a path that has not
+            // been taught about shapes yet.
+            auto fits = [&](const PartnerCell& it, int c, int r) {
+                if (c < 0 || r < 0 || c + it.w > cols) return false;
+                for (int y = 0; y < it.h; ++y) {
                     ensureRow(r + y);
-                    for (int x = 0; x < w; ++x)
-                        if (occ[r + y][c + x]) return false;
+                    for (int x = 0; x < it.w; ++x) {
+                        if (it.Solid(x, y) && occ[r + y][c + x]) return false;
+                    }
                 }
                 return true;
             };
-            auto mark = [&](int c, int r, int w, int h) {
-                for (int y = 0; y < h; ++y) {
+            auto mark = [&](const PartnerCell& it, int c, int r) {
+                for (int y = 0; y < it.h; ++y) {
                     ensureRow(r + y);
-                    for (int x = 0; x < w; ++x) occ[r + y][c + x] = true;
+                    for (int x = 0; x < it.w; ++x) {
+                        if (it.Solid(x, y)) occ[r + y][c + x] = true;
+                    }
                 }
             };
 
@@ -5400,8 +5878,8 @@ namespace
             for (auto& it : cells) {
                 if (it.col < 0 || it.row < 0) continue;
                 const bool inCap = !companionBoard || it.row + it.h <= kCompanionRows;
-                if (inCap && fits(it.col, it.row, it.w, it.h)) {
-                    mark(it.col, it.row, it.w, it.h);
+                if (inCap && fits(it, it.col, it.row)) {
+                    mark(it, it.col, it.row);
                 } else {
                     it.col = -1;
                     it.row = -1;
@@ -5445,10 +5923,10 @@ namespace
                         }
                         for (int r = 0; r + it.h <= kCompanionRows && it.col < 0; ++r) {
                             for (int c = 0; c < cols; ++c) {
-                                if (!fits(c, r, it.w, it.h)) continue;
+                                if (!fits(it, c, r)) continue;
                                 it.col = c;
                                 it.row = r;
-                                mark(c, r, it.w, it.h);
+                                mark(it, c, r);
                                 break;
                             }
                         }
@@ -5491,10 +5969,10 @@ namespace
                 }
                 for (int r = companionBoard ? kCompanionRows : 0; it.col < 0; ++r) {
                     for (int c = 0; c < cols; ++c) {
-                        if (fits(c, r, it.w, it.h)) {
+                        if (fits(it, c, r)) {
                             it.col = c;
                             it.row = r;
-                            mark(c, r, it.w, it.h);
+                            mark(it, c, r);
                             break;
                         }
                     }
@@ -5578,6 +6056,12 @@ namespace
                 if (HeldCell(it.spotKey)) continue;
                 for (int y = 0; y < it.h; ++y) {
                     for (int x = 0; x < it.w; ++x) {
+                        // ★GI71: a notch is not occupied ground. Shading the
+                        // bounding box would paint a T's two empty corners as
+                        // full and then a neighbour placed there -- which the
+                        // mask-aware placement now allows -- would sit on top of
+                        // ground belonging to nothing.
+                        if (!it.Solid(x, y)) continue;
                         const int cc = it.col + x, rr = it.row + y;
                         const ImVec2 c0(base.x + cc * cell, base.y + rr * cell);
                         const ImVec2 q0(c0.x + (cc > 0 ? in1 : in0),
@@ -5607,19 +6091,66 @@ namespace
                 const ImVec2 p0(base.x + it.col * cell, base.y + it.row * cell);
                 const float bw = it.w * cell, bh = it.h * cell;   // footprint box
 
+                // ★★GI71c: A WASH FOLLOWS THE FOOTPRINT, and there are three of
+                // them -- hover, search miss, and the pickpocket lock. Each
+                // painted the bounding box, so a shaped tile lit its own empty
+                // corners; and once a neighbour can sit in one of those corners,
+                // it lit THAT item's square as well, which reads as the wrong
+                // tile answering the cursor.
+                //
+                // ★One helper rather than three loops: the next wash somebody
+                // adds gets the footprint without having to know it should.
+                // Decorations are NOT washes and keep the box -- the sprite, the
+                // marker tray, the lock glyph and the edit ring are all placed
+                // against the tile's rectangle on purpose.
+                const auto washCell = [&](ImU32 a_col) {
+                    if (it.mask.rows.empty()) {
+                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh), a_col);
+                        return;
+                    }
+                    for (int y = 0; y < it.h; ++y) {
+                        for (int x = 0; x < it.w; ++x) {
+                            if (!it.Solid(x, y)) continue;
+                            const ImVec2 w0(p0.x + x * cell, p0.y + y * cell);
+                            dl->AddRectFilled(w0, ImVec2(w0.x + cell, w0.y + cell), a_col);
+                        }
+                    }
+                };
+
                 // click target: right-click = TAKE (loot mode). Barter buy is
                 // Phase 5. Gold ignores space; other items need a free cell.
                 // While carrying, SKIP the cell buttons — they'd swallow the drop
                 // click over an occupied cell (drag-to-store must reach the window
                 // hover test regardless of what's under the cursor).
-                if (!Grid::IsHolding()) {
+                // ★★GI71: A CLICK TARGET IS THE FOOTPRINT, NOT ITS BOX.
+                //
+                // The button below covers the whole w x h rect. That was exact
+                // while every partner tile WAS a rectangle, and stops being so
+                // the moment placement lets a neighbour sit in a T's notch: the
+                // T's box covers that neighbour, and ImGui hands the hover to
+                // whichever overlapping item was submitted last, so one of the
+                // two becomes unclickable depending on draw order.
+                //
+                // ★So the item simply does not offer a target on a square it
+                // does not own. Both cells still submit their own button when
+                // the cursor is over a square that IS theirs, and no two items
+                // can own the same square -- placement guarantees it -- so the
+                // right one answers whatever the order. A solid rectangle owns
+                // every square in its box and is unaffected.
+                bool ownsCursor = true;
+                if (!it.mask.rows.empty()) {
+                    const ImVec2 mp = ImGui::GetIO().MousePos;
+                    const int    mx = static_cast<int>(std::floor((mp.x - p0.x) / cell));
+                    const int    my = static_cast<int>(std::floor((mp.y - p0.y) / cell));
+                    ownsCursor = it.Solid(mx, my);
+                }
+                if (!Grid::IsHolding() && ownsCursor) {
                     char idbuf[16];
                     std::snprintf(idbuf, sizeof(idbuf), "##pc%zu", i);
                     ImGui::SetCursorScreenPos(p0);
                     ImGui::InvisibleButton(idbuf, ImVec2(bw, bh));
                     if (ImGui::IsItemHovered() && !UIRoot::MouseInOverlay()) {
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            Theme::Acc(0.10f));
+                        washCell(Theme::Acc(0.10f));
                         Sfx::HoverNote(ImGui::GetItemID());   // partner cell hover
                         // Phase 4: rich tooltip; barter side shows the BUY price
                         int price = -1;
@@ -5716,7 +6247,9 @@ namespace
                             g_carryGlow = it.glow;       // (1.3.2) markers ride along
                             g_carryStolen = it.stolen;   // ★including this one
                             Grid::BeginPartnerCarry(it.obj, it.count, it.value,
-                                Grid::UnitRef{ it.uid, 0, it.xlIdx }, it.ord, it.rot);
+                                // ★The signature rides along: the carry holds
+                                // its position against it (BeginPartnerCarry).
+                                it.unit(), it.ord, it.rot);
                         }
                     }
                     // TAKE trigger: right-click (whole move) OR shift+left-click
@@ -5802,11 +6335,38 @@ namespace
                         // so that is what the mode does. Anything else falls
                         // through to an ordinary take, which is what shift+right
                         // did before this existed.
-                        } else if (useRc && it.obj->As<RE::TESObjectBOOK>()) {
+                        //
+                        // ★★★(1.6.x) ...AND EVERYTHING ELSE THE PLAYER BOARD'S
+                        // RIGHT-CLICK KNOWS, again (user ask: "use items from
+                        // the container being looted", Shift+RMB / RT+X).
+                        //
+                        // The CTD above was written against the key-by-numbers
+                        // board. The pointer it died on -- "valid at the
+                        // previous rebuild, gone by the time it was drawn" -- is
+                        // the shape of a tile whose key was RENAMED under it,
+                        // and that whole class of failure left with the cell
+                        // rework (a cell belongs to its item: keys are minted
+                        // once and never carry the item's mutable state). The
+                        // spell tome has run the exact take-then-use road the
+                        // potion used to crash on ever since, and the transit
+                        // bookkeeping (NoteTransientArrival) was built for that
+                        // road. So the gate is Equip::IsWearOrConsume -- the
+                        // same kinds a right-click on the player's own board
+                        // hands to the engine: potion, food, ingredient, scroll,
+                        // and gear, which is taken and put on in one gesture.
+                        // ★A unit the engine then REFUSES (a quest item it will
+                        // not eat) is not lost: the transit entry expires and
+                        // the rebuild surfaces it on the player's board, where
+                        // an ordinary take would have put it anyway.
+                        // ★Ammo goes by the CELL, as it does on the player's
+                        // board (EquipCountFor): a single arrow in the quiver
+                        // would be a gesture nobody meant.
+                        } else if (useRc && (it.obj->As<RE::TESObjectBOOK>() ||
+                                             Equip::IsWearOrConsume(it.obj))) {
+                            auto* bk = it.obj->As<RE::TESObjectBOOK>();
                             if (it.locked) {   // GI42: the twin is worn
                                 Sfx::FailNote(Lang::T(Lang::Str::AmbiguousUnit));
-                            } else if (auto* bk = it.obj->As<RE::TESObjectBOOK>();
-                                       bk && !bk->TeachesSpell()) {
+                            } else if (bk && !bk->TeachesSpell()) {
                                 // ★READ IN PLACE. A book needs no owner to be
                                 // read, so taking one first would leave a note
                                 // you only meant to glance at sitting in the
@@ -5816,13 +6376,15 @@ namespace
                                 // read: the engine's Use needs the player's
                                 // own copy and raised no page for a book still
                                 // in the chest (the 8/24 rework's regression).
-                                Grid::RequestShelfBookPage(bk, it.uid, it.sig);
+                                // GI79: name the chest, so the page can find the
+                                // unit's own list -- and the quest behind a note.
+                                Grid::RequestShelfBookPage(bk, it.uid, it.sig,
+                                    SourceRef() ? SourceRef()->GetFormID() : 0);
                                 // ...and the page offers E-take, the world
                                 // book's own grammar
                                 NoteShelfBookRead(it.obj, it.uid, it.sig,
                                                   it.spotKey);
-                            } else if (auto* sp = it.obj->As<RE::TESObjectBOOK>()
-                                                      ->GetSpell();
+                            } else if (auto* sp = bk ? bk->GetSpell() : nullptr;
                                        sp &&
                                        RE::PlayerCharacter::GetSingleton() &&
                                        RE::PlayerCharacter::GetSingleton()
@@ -5837,9 +6399,11 @@ namespace
                                 // One unit, taken and then used: the engine can
                                 // only consume from the player's own inventory,
                                 // so passing through it is the only road there
-                                // is, not a shortcut.
+                                // is, not a shortcut. (Ammo: the cell, above.)
                                 g_actingSpot = it.spotKey;   // GI20
-                                RequestTake(it.obj, 1,
+                                RequestTake(it.obj,
+                                            it.obj->Is(RE::FormType::Ammo)
+                                                ? (std::max)(1, it.count) : 1,
                                             it.unit(),
                                             /*useAfter=*/true);
                             }
@@ -5993,8 +6557,7 @@ namespace
                     // ★Same wash and the same alpha the player's board uses for
                     // a search miss — one search, one look, both windows.
                     if (FindMisses(it.obj)) {
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            IM_COL32(6, 6, 10, 168));
+                        washCell(IM_COL32(6, 6, 10, 168));
                     }
                     // ★1.0.5: the shared marker tray, so poison keeps showing
                     // here now that DrawGlow no longer draws it. Favourite
@@ -6052,12 +6615,24 @@ namespace
                 // matters most for the socket mod -- the point is to SEE what a
                 // chest holds and decide whether to take it, so the badges have
                 // to be on the partner cell, not only on our own grid.
-                // The partner window draws plain rectangles (no polyomino mask),
-                // so the default full-rect shape is correct here.
+                // ★GI71: and it carries the FOOTPRINT now, so a socket well lands
+                // on a cell the item actually owns. The default stays a full
+                // rectangle, which is still exactly right for every tile that
+                // has no shape of its own.
                 {
                     Badges::TileShape shape;
                     shape.w = it.w;
                     shape.h = it.h;
+                    if (!it.mask.rows.empty()) {
+                        shape.cells = 0;
+                        for (int my = 0; my < it.h && my < 8; ++my) {
+                            for (int mx = 0; mx < it.w && mx < 8; ++mx) {
+                                if (it.Solid(mx, my)) {
+                                    shape.cells |= 1ull << (my * 8 + mx);
+                                }
+                            }
+                        }
+                    }
                     auto       pr = g_partner.get();
                     // ★IsMouseHoveringRect is geometry only -- it clips, but it
                     // never asks who is on top, so a badge under another window
@@ -6071,7 +6646,7 @@ namespace
                             p0, ImVec2(p0.x + bw, p0.y + bh), false);
                     Badges::Draw(dl, p0, bw, bh, shape,
                                  pr ? pr->GetFormID() : 0u,
-                                 it.obj->GetFormID(), it.uid, hov);
+                                 it.obj->GetFormID(), it.uid, hov, &it.sockets);
                 }
 
                 if (it.count > 1) {
@@ -6091,8 +6666,7 @@ namespace
                 if (g_mode == Mode::kPickpocket) {
                     if (it.locked) {
                         // greyed out: "and you can't have it"
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            IM_COL32(0, 0, 0, 90));
+                        washCell(IM_COL32(0, 0, 0, 90));
                         const float ps = 10.0f * Theme::Scale();
                         const ImVec2 lp(p0.x + bw - ps - 4.0f, p0.y + bh - ps - 4.0f);
                         const ImU32 lc = IM_COL32(220, 200, 150, 230);
@@ -6138,22 +6712,59 @@ namespace
                     int gr = static_cast<int>(std::lround((m.y - base.y - oy) / cell));
                     gc = (std::max)(0, (std::min)(Grid::BaseCols() - hw, gc));
                     gr = (std::max)(0, (std::min)(rows - hh, gr));
+                    // ★★GI71b: THE GHOST IS THE FOOTPRINT. Both halves of it.
+                    //
+                    // The tiles on this board learned to be L-shaped and the
+                    // preview did not, so a shaped item was still announced as
+                    // the rectangle it sits in -- reported straight after the
+                    // shapes landed. The player's own grid has drawn its ghost
+                    // cell by cell from the mask since it was written; this is
+                    // the same loop.
+                    //
+                    // ★And the blocker test with it, or the two would disagree:
+                    // a box-vs-box hit turns the ghost red over a notch neither
+                    // shape uses, and the drop that follows would go through
+                    // green. HeldShape is null only when nothing is carried,
+                    // which the caller already ruled out; a shapeless carry
+                    // falls back to the full box exactly as before.
+                    const auto* hs = Grid::HeldShape();
+                    const auto heldSolid = [&](int a_x, int a_y) {
+                        return (!hs || hs->rows.empty()) ? true : hs->At(a_x, a_y);
+                    };
                     int blockers = 0;
                     for (const auto& pc : cells) {
                         if (pc.col < 0 ||
                             HeldCell(pc.spotKey)) {
                             continue;
                         }
-                        if (gc < pc.col + pc.w && gc + hw > pc.col &&
-                            gr < pc.row + pc.h && gr + hh > pc.row) {
-                            ++blockers;
+                        bool hit = false;
+                        for (int y = 0; y < hh && !hit; ++y) {
+                            for (int x = 0; x < hw; ++x) {
+                                if (!heldSolid(x, y)) continue;
+                                const int cc = gc + x, rr = gr + y;
+                                if (cc < pc.col || cc >= pc.col + pc.w ||
+                                    rr < pc.row || rr >= pc.row + pc.h) {
+                                    continue;
+                                }
+                                if (pc.Solid(cc - pc.col, rr - pc.row)) {
+                                    hit = true;
+                                    break;
+                                }
+                            }
                         }
+                        if (hit) ++blockers;
                     }
                     const ImU32 ghost = blockers == 0 ? IM_COL32(90, 170, 90, 90)
                                                       : IM_COL32(190, 60, 60, 110);
-                    const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
-                    dl->AddRectFilled(g0,
-                        ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
+                    for (int y = 0; y < hh; ++y) {
+                        for (int x = 0; x < hw; ++x) {
+                            if (!heldSolid(x, y)) continue;
+                            const ImVec2 g0(base.x + (gc + x) * cell,
+                                            base.y + (gr + y) * cell);
+                            dl->AddRectFilled(g0,
+                                ImVec2(g0.x + cell, g0.y + cell), ghost);
+                        }
+                    }
                 }
             }
 
@@ -6664,18 +7275,29 @@ namespace
                 const int rr = c.row + y;
                 if (rr < 0 || rr >= kCompanionRows) continue;
                 for (int x = 0; x < c.w; ++x) {
+                    // ★GI71: an occupant reserves its FOOTPRINT, matching what
+                    // PlacePartnerCells actually marks. Marking the bounding box
+                    // here would hide a T's two free corners from this gate and
+                    // answer "the pack is full" with a hole in plain sight --
+                    // the same wrong answer the note below was written about.
+                    if (!c.Solid(x, y)) continue;
                     const int cc = c.col + x;
                     if (cc < 0 || cc >= cols) continue;
                     occ[static_cast<std::size_t>(rr) * cols + cc] = 1;
                 }
             }
         }
-        const auto fits = [&](int a_w, int a_h) {
-            for (int r = 0; r + a_h <= kCompanionRows; ++r) {
-                for (int c = 0; c + a_w <= cols; ++c) {
+        // ★GI71: and the INCOMING item is tested by its footprint too, so a
+        // notched shape is not refused for squares it would never use. Built
+        // once, turned to the angle asked for, exactly as placement will.
+        const auto probe = FUI::ShapeOf(d, cols, a_rot);
+        const auto fits = [&](const FUI::Shape& a_sh) {
+            for (int r = 0; r + a_sh.h <= kCompanionRows; ++r) {
+                for (int c = 0; c + a_sh.w <= cols; ++c) {
                     bool free = true;
-                    for (int y = 0; y < a_h && free; ++y) {
-                        for (int x = 0; x < a_w; ++x) {
+                    for (int y = 0; y < a_sh.h && free; ++y) {
+                        for (int x = 0; x < a_sh.w; ++x) {
+                            if (!a_sh.At(x, y)) continue;
                             if (occ[static_cast<std::size_t>(r + y) * cols + c + x]) {
                                 free = false;
                                 break;
@@ -6687,7 +7309,7 @@ namespace
             }
             return false;
         };
-        if (fits(w, h)) return true;
+        if (fits(probe)) return true;
         // ★★★AND THE OTHER WAY ROUND, which is the promise the player board
         // already makes. Its capacity gate green-lights a pickup by trying BOTH
         // orientations, and its landing turns the tile to honour that (see
@@ -6698,7 +7320,10 @@ namespace
         //
         // ★A square footprint has no other way round; asking twice would just
         // cost the same walk again.
-        if (w != h) return fits(h, w);
+        // ★GI71: a quarter TURN, not a transpose. Swapping w and h is the same
+        // thing only for a rectangle -- transposing an L mirrors it, and the
+        // gate would then green-light a shape placement cannot produce.
+        if (w != h) return fits(FUI::RotateShape(probe, 1));
         return false;
     }
 
@@ -6740,8 +7365,37 @@ namespace
         int blockers = 0;
         for (const auto& pc : g_lastCells) {
             if (pc.col < 0 || HeldCell(pc.spotKey)) continue;
-            if (c < pc.col + pc.w && c + hw > pc.col &&
-                r < pc.row + pc.h && r + hh > pc.row) {
+            // ★GI71: the OCCUPANT is asked by its footprint, the carried item
+            // still by its box. Box-vs-box was exact while every shelf tile was
+            // a rectangle; now that a T can sit here, its two empty corners
+            // would report a blocker that is not there and the drop would read
+            // as a swap (or, with a second neighbour, as invalid).
+            // ★GI71b: and the CARRIED side by its footprint too, now that
+            // HeldShape can say what it is. This has to match the ghost drawn
+            // in DrawPartnerCells cell for cell -- the comment above that ghost
+            // says preview and result cannot disagree, and they only cannot if
+            // both ask the same question. A carry with no shape falls back to
+            // its full box, which is what every carry used to be.
+            const auto* hs = Grid::HeldShape();
+            const auto overlaps = [&] {
+                if (!(c < pc.col + pc.w && c + hw > pc.col &&
+                      r < pc.row + pc.h && r + hh > pc.row)) {
+                    return false;
+                }
+                for (int y = 0; y < hh; ++y) {
+                    for (int x = 0; x < hw; ++x) {
+                        if (hs && !hs->rows.empty() && !hs->At(x, y)) continue;
+                        const int cc = c + x, rr = r + y;
+                        if (cc < pc.col || cc >= pc.col + pc.w ||
+                            rr < pc.row || rr >= pc.row + pc.h) {
+                            continue;
+                        }
+                        if (pc.Solid(cc - pc.col, rr - pc.row)) return true;
+                    }
+                }
+                return false;
+            };
+            if (overlaps()) {
                 if (++blockers == 1) {
                     d.occ = pc.obj;
                     d.occCount = pc.count;
@@ -6749,6 +7403,7 @@ namespace
                     d.occCol = pc.col;
                     d.occRow = pc.row;
                     d.occUid = pc.uid;        // GI24
+                    d.occSig = pc.sig;
                     d.occXlIdx = pc.xlIdx;
                     d.occOrd = pc.ord;
                     d.occSpotKey = pc.spotKey;

@@ -77,9 +77,7 @@ namespace FUI::WornLedger
                     if (!wornL && !xl->HasType<RE::ExtraWorn>()) continue;
                     Entry e;
                     e.form = obj->GetFormID();
-                    if (const auto* xu = xl->GetByType<RE::ExtraUniqueID>()) {
-                        e.uid = xu->uniqueID;
-                    }
+                    e.uid  = Grid::PoolUidOf(obj, xl);
                     e.sig   = Grid::InstanceSigOf(xl);
                     e.hand  = wornL ? 2 : 1;
                     e.units = (std::max)(1, static_cast<int>(xl->GetCount()));

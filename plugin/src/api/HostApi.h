@@ -109,4 +109,64 @@ namespace FUI::HostApi
                                                 const RE::ExtraDataList* a_xl,
                                                 GridInvAPI::TooltipLine* a_out,
                                                 std::uint32_t a_capacity);
+
+    // ---- barter price ------------------------------------------------------
+    //
+    // A FOURTH extension slot, independent of the other three. See the Pricer
+    // note in GridInventoryAPI.h: our shop window prices a unit by calling the
+    // engine's value routine itself, which no call-site patch inside the game
+    // executable can see, so an extension that wants a say in what a unit is
+    // worth at the counter has to be asked.
+
+    // True once a pricer has passed the handshake. Checked before the call
+    // below so pricing costs nothing for the players who have no such
+    // extension, which is most of them.
+    [[nodiscard]] bool HasPricer();
+
+    // The multiplier on ONE unit's engine value for one side of the counter:
+    // 1.0 when nothing claims it, else whatever the pricer said, sanitised --
+    // a non-positive, NaN or infinite answer reads as 1.0, so a misbehaving
+    // extension yields plain prices rather than free or infinite ones.
+    //
+    // a_xl is the sub-stack's own list, or nullptr when the unit has none --
+    // the same value TintTier is given, and for the same reason.
+    //
+    // Called once per shelf cell at collect time, once per tooltip and once
+    // per sale, NOT per frame.
+    [[nodiscard]] float PriceMult(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                                  GridInvAPI::PriceSide a_side);
+
+    // ---- sockets -------------------------------------------------------------
+    //
+    // A FIFTH extension slot, independent of the other four. See the Socketer
+    // note in GridInventoryAPI.h: the provider's badges are keyed by ItemKey,
+    // and a socketed unit is exactly the kind whose uid is 0.
+
+    // True once a socketer has passed the handshake.
+    [[nodiscard]] bool HasSocketer();
+
+    // ONE unit's socket row into a_out, which is zeroed first. False (and a_out
+    // left zeroed) when nothing claims the unit, which is nearly always.
+    //
+    // a_xl is the sub-stack's own list -- the same value TintTier is given, and
+    // for the same reason. nullptr answers false without asking: a plain unit
+    // has nowhere to keep a socket. Ask where the list is in hand and keep the
+    // COPY: the list itself must never be kept.
+    //
+    // HOT PATH on the boards that are collected every frame.
+    bool Sockets(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                 GridInvAPI::Overlay& a_out);
+
+    // The socketer's picture for a well's form: a path relative to Data into
+    // a_out. False when it has none. Not cached here -- Badges keeps the
+    // texture, and asks once per form.
+    bool SocketArt(std::uint32_t a_iconId, char* a_out, std::uint32_t a_capacity);
+
+    // What ONE unit's sockets do, as tooltip lines drawn with the item's
+    // effects (rgba 0 = the effect colour). Returns how many were written into
+    // a_out, never more than a_capacity; 0 without a socketer, without its
+    // optional GetLines, or for a unit with no list of its own.
+    [[nodiscard]] std::uint32_t SocketLines(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                                            GridInvAPI::TooltipLine* a_out,
+                                            std::uint32_t a_capacity);
 }

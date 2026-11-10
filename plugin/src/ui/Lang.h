@@ -71,6 +71,7 @@ namespace FUI::Lang
         X(ArmorLight, "Light Armor")   /* tooltip armour class (feedback ⑪) */                              \
         X(ArmorHeavy, "Heavy Armor")                                                                        \
         X(ArmorClothing, "Clothing")                                                                        \
+        X(Warmth, "Warmth")   /* Survival Mode armour rating (feedback, 1.6.1) */                           \
         X(Weight, "Weight")                                                                                 \
         X(Value, "Value")                                                                                   \
         X(SlotHead, "Head")                                                                                 \
@@ -133,6 +134,10 @@ namespace FUI::Lang
         X(GlowSilhouette, "Silhouette")                                                                     \
         X(GlowRadial, "Radial")                                                                             \
         X(GlowBrightLabel, "GLOW LEVEL")   /* retired with the rarity halo */                               \
+        X(RarityMarkLabel, "RARITY MARK")   /* corner wedge vs. the tile ground */                          \
+        X(RarityMarkWedge, "Corner")                                                                        \
+        X(RarityMarkGround, "Background")                                                                   \
+        X(RarityStrengthLabel, "RARITY STRENGTH")   /* only while Background is picked */                   \
         X(ShadowDistLabel, "SHADOW DIST")   /* px toward lower-right; 0 = ambient */                        \
         X(ShadowBlurLabel, "SHADOW BLUR")   /* px of spread; 0 = hard outline */                            \
         X(ShadowOpacLabel, "SHADOW OPACITY")                                                                \

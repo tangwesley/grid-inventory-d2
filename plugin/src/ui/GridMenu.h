@@ -45,6 +45,11 @@ namespace FUI
         // still runs by hand on a live one.
         [[nodiscard]] static bool NoPause();
         static void                SetNoPause(bool a_on);
+        // ★GI83: everything a close does EXCEPT the sound, callable without an
+        // instance. OnHide is the ordinary way in; the tick's orphan net is the
+        // other, for a menu the engine took off the stack without ever sending
+        // kForceHide (two reporter CTDs, see UIRoot::Tick).
+        static void CloseSession(const char* a_why);
 
         void PostDisplay() override;
         void AdvanceMovie(float a_interval, std::uint32_t a_currentTime) override;
