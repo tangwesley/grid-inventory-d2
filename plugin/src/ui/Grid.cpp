@@ -98,6 +98,11 @@ namespace FUI::Grid
             // the one unit allowed to be in two places at once (see the worn
             // exception in EnumerateUnitRefs), so the tray can say so.
             bool                worn = false;
+            // ★The SOCKETER's row for this unit (HostApi::Sockets), taken in
+            // MakeDisplayTile where the unit's own list is in hand -- the same
+            // place, and the same reason, as the tint bits in `glow`. A COPY:
+            // the list itself is never kept (see uid/xlIdx above).
+            GridInvAPI::Overlay sockets{};
         };
 
         struct LayoutEntry
@@ -547,6 +552,38 @@ namespace FUI::Grid
         {
             const auto bar = a_key.find('|');
             return a_key.find_first_of("@~#", bar == std::string::npos ? 0 : bar + 1);
+        }
+
+        // ★★★A LIST THE ENGINE HAS ALREADY EMPTIED IS NOT A UNIT.
+        //
+        // Hand RemoveItem a list whose only contents do not travel -- measured
+        // on one carrying nothing but ExtraLeveledItem (0x2E), which is every
+        // piece of gear a chest rolled from a leveled list -- and the engine
+        // does not move it. It mints the arrival a fresh list, lowers the
+        // entry's count, and leaves the old list where it was with an
+        // ExtraCount of -1 written on it:
+        //
+        //   BEFORE [0] count  1 types [2E]      <- named
+        //   AFTER  [0] count -1 types [24 2E]      still in the chest
+        //
+        // Alone in its entry that husk is harmless: the count reaches zero and
+        // the entry goes with it. Beside a second unit of the same form it is
+        // not. GetCount() floors at 1 everywhere below, so the husk counted as
+        // a unit, "listed" overran the entry's count, and the GI2 clamp dropped
+        // units from the BACK of the list -- the real one. Reported as the
+        // Companions heirloom (CR06, 2026-09-20): a leveled Steel Battleaxe
+        // and the quest's own in one boss chest. Taking the plain one hid the
+        // quest unit and left the husk drawn in its place; the second click
+        // named the husk again, the count hit zero, and the quest reference
+        // was orphaned in a chest that claimed to hold nothing.
+        //
+        // Only an EXPLICIT count at or below zero. No ExtraCount means one
+        // unit, which is what nearly every list is.
+        bool IsSpentList(const RE::ExtraDataList* a_xl)
+        {
+            if (!a_xl) return false;
+            const auto* xc = const_cast<RE::ExtraDataList*>(a_xl)->GetByType<RE::ExtraCount>();
+            return xc && xc->count <= 0;
         }
 
         // GI14: a CONTENT signature for a sub-stack the engine never gave a
@@ -1027,7 +1064,10 @@ namespace FUI::Grid
             // instead: the item in the player's hand gets sold, or destroyed.
             // Everything that genuinely wants the worn list goes through
             // WornExtraOf() instead, so excluding it here costs nothing.
+            // ★A spent list is excluded on the same terms and by the same
+            // lambda: it is never the answer to "which unit", whoever asks.
             const auto worn = [a_allowWorn](const RE::ExtraDataList* a_xl) {
+                if (IsSpentList(a_xl)) return true;
                 if (a_allowWorn) return false;
                 auto* xl = const_cast<RE::ExtraDataList*>(a_xl);
                 return xl->HasType<RE::ExtraWorn>() || xl->HasType<RE::ExtraWornLeft>();
@@ -3107,12 +3147,6 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 const auto& it = *itP;
                 if (it.overflow || it.col < 0) continue;
                 const bool bagOpen = it.def.bag != 0 && g_openBags.contains(it.key);
-                // ★RARITY AS THE GROUND, when the player asked for it. ONE
-                // museum lookup per item rather than one per cell -- a 2x4
-                // shield would otherwise pay for the same answer eight times,
-                // every frame, and this is the hot pass.
-                const Lotd::Status relic = (rarityGround && it.obj)
-                    ? Lotd::Of(it.obj->GetFormID()) : Lotd::Status::kNotRelic;
 
                 for (int y = 0; y < it.mask.h; ++y) {
                     for (int x = 0; x < it.mask.w; ++x) {
@@ -3153,8 +3187,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         // own divider still shows between two cells of the same
                         // item. The rule is "where does a groove exist", not
                         // "where does this item end" -- see the note above.
+                        // ★It takes the glow byte and NOTHING ELSE. The museum
+                        // mark never comes down here -- it stays the wedge
+                        // pass 4 draws, in both modes -- so this pass asks
+                        // Lotd nothing and costs the board no lookup.
                         if (rarityGround) {
-                            DrawRarityGround(dl, q0, q1, it.glow, relic);
+                            DrawRarityGround(dl, q0, q1, it.glow);
                         }
 
                         if (bagOpen) dl->AddRectFilled(q0, q1, kOpenBagCol);
@@ -3662,7 +3700,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     const bool bh = (idx == ownerIdx);
                     Badges::Draw(dl, p0, w, h, shape,
                                  0x14u,   // the player's own grid
-                                 it.obj->GetFormID(), it.uid, bh);
+                                 it.obj->GetFormID(), it.uid, bh, &it.sockets);
                 }
 
                 // (★GI69: the NEW mark moved to pass 2 -- it is a wash on the
@@ -3710,23 +3748,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // ★1.0.5 rarity: one wedge at the footprint's top-right, over
                 // the sprite. Drawn here rather than in the occupancy pass so a
                 // multi-cell item gets ONE mark instead of one per cell.
-                // ★★THE BOARD IS THE ONE CALLER THAT ASKS ABOUT THE SETTING
-                // ITSELF, and it has to. DrawRarityWedge answers the RARITY
-                // MARK switch by drawing a ground over the box it was given --
-                // right for the doll and the partner window, wrong here twice
-                // over: the box is one anchor cell of a footprint that may be
-                // eight, and pass 4 is on top of the sprite. The board's ground
-                // is painted per mask cell in pass 2 instead, so all this call
-                // site has left to do in ground mode is stay out of the way.
+                // ★★AND IT IS CALLED IN BOTH MODES, because the wedge is where
+                // the museum mark lives whatever RARITY MARK says. In ground
+                // mode DrawRarityWedge draws only that -- the board's rarity
+                // ground was painted per mask cell in pass 2, where it belongs
+                // (under the sprite, following the real footprint) rather than
+                // over this one anchor cell.
                 const ImVec2 wedgeCell = AnchorCell(it.mask, p0, /*bottom*/ false);
-                if (!Theme::RarityGround()) {
-                    DrawRarityWedge(dl, wedgeCell,
-                                    ImVec2(wedgeCell.x + CellPx(), wedgeCell.y + CellPx()),
-                                    it.glow,
-                                    it.obj ? Lotd::Of(it.obj->GetFormID())
-                                           : Lotd::Status::kNotRelic);
-                }
-
+                DrawRarityWedge(dl, wedgeCell,
+                                ImVec2(wedgeCell.x + CellPx(), wedgeCell.y + CellPx()),
+                                it.glow,
+                                it.obj ? Lotd::Of(it.obj->GetFormID())
+                                       : Lotd::Status::kNotRelic);
 
                 // ★★★THE NEW MARK, and it goes AFTER the wedge on purpose.
                 //
@@ -5247,6 +5280,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 for (auto* xl : *a_entry->extraLists) {
                     const int idx = xi++;
                     if (!xl) continue;
+                    // A husk holds no unit (see IsSpentList). The index above
+                    // still advances: xlIdx is a position in the ENGINE's list.
+                    if (IsSpentList(xl)) continue;
                     const int n = (std::max)(1, xl->GetCount());
                     listed += n;
                     if (a_skipWorn && !wornBagStays &&
@@ -6248,6 +6284,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 if (HostApi::HasTinter()) {
                     SetTintTier(it.glow,
                         HostApi::TintTier(a_obj ? a_obj->GetFormID() : 0, xl));
+                }
+                // ★The socket row, from the same list for the same reason.
+                if (HostApi::HasSocketer()) {
+                    HostApi::Sockets(a_obj ? a_obj->GetFormID() : 0, xl, it.sockets);
                 }
             }
             // GI40: the star belongs to the POOL, not to one list.
@@ -12018,7 +12058,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (!a_entry || !a_entry->extraLists) return { PickKind::kAnyIsSafe, nullptr };
         bool ambiguous = false;
         for (auto* xl : *a_entry->extraLists) {
-            if (!xl) continue;
+            if (!xl || IsSpentList(xl)) continue;   // a husk is nobody's unit
             const bool wornHere = xl->HasType<RE::ExtraWorn>() ||
                                   xl->HasType<RE::ExtraWornLeft>();
             const bool plain = InstanceSig(xl) == 0 && PoolUid(a_entry->object, xl) == 0;
@@ -12265,30 +12305,39 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         if (sil) UIRoot::EndSilhouette(a_dl);
     }
 
-    // ★★See Grid.h. The ONE answer to "what colour is this item", asked by the
-    // wedge and by the ground. It was inlined in the wedge until the ground
-    // needed the same answer, and two copies of this switch is exactly how a
-    // board ends up disagreeing with the doll about a sword.
-    ImU32 RarityColour(std::uint8_t a_haloBits, Lotd::Status a_relic)
+    // ★★★THE MUSEUM'S COLOUR IS NOT A RARITY, and keeping it out of the switch
+    // below is what lets it stay a wedge when rarity moves to the ground.
+    //
+    // "The museum still wants this" is an ERRAND, not a quality: it is true of
+    // a common book, it stops being true the moment the thing is donated, and
+    // what the player does about it is walk to Solitude. Rarity is a permanent
+    // fact about the item and reads as the board's wallpaper once it is a
+    // ground. Painting an errand across the whole tile would have been the
+    // loudest thing on the board saying the least lasting thing on it.
+    constexpr ImU32 kRelicOwe = IM_COL32(169, 123, 232, 255);   // #A97BE8
+
+    // ★★See Grid.h. The ONE answer to "what RARITY colour is this item", asked
+    // by the wedge and by the ground. It was inlined in the wedge until the
+    // ground needed the same answer, and two copies of this switch is exactly
+    // how a board ends up disagreeing with the doll about a sword.
+    ImU32 RarityColour(std::uint8_t a_haloBits)
     {
         const std::uint8_t bits = a_haloBits & 0x3;
-        // ★An EXTENSION TINT earns the mark on the same terms as an owed relic
-        // -- outright, with no rarity of its own. An extension that colours by
-        // its own rules is not obliged to agree with ours about which items are
-        // interesting, and an item it has ranked while the host sees nothing
-        // special is precisely the case it was added for.
+        // ★An EXTENSION TINT earns the mark outright, with no rarity of its
+        // own. An extension that colours by its own rules is not obliged to
+        // agree with ours about which items are interesting, and an item it has
+        // ranked while the host sees nothing special is precisely the case it
+        // was added for.
         const std::uint8_t tint = TintTierOf(a_haloBits);
-        if (!bits && !tint && a_relic != Lotd::Status::kUndonated) return 0;
+        if (!bits && !tint) return 0;
         // ★GI67: unique wins outright over enchanted — see DrawMarkerTray.
-        // ★★1.4.4, AND THE ORDER IS THE WHOLE DESIGN. A relic still owed to the
-        // museum takes the mark from whatever rarity the item has, because
-        // "carry this home" is the only urgent thing about it. Once it is
-        // donated the mark goes BACK to its rarity -- there is nothing urgent
-        // left, and hiding "unique" on 1273 weapons and armours forever would
-        // cost more than it buys.
+        // ★★1.4.4: A RELIC STILL OWED used to be decided here, ahead of
+        // everything, and the rule has not changed -- it moved to the wedge,
+        // which is the only surface it is ever drawn on now. See kRelicOwe.
         //
         // ★★★AND A DONATED RELIC WITH NO RARITY GETS NOTHING, which is a mark
         // this feature shipped with and then lost on purpose.
+
         //
         // It was grey, and read as "already handed in, safe to sell". Two
         // things were wrong with that. A plain item that is NOT a relic is
@@ -12306,9 +12355,8 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //
         // The fact itself is never lost: the tooltip says it in every case.
         // Now the mark says one thing only -- the museum still wants this.
-        constexpr ImU32 kUnique   = IM_COL32(232, 182, 74, 255);
-        constexpr ImU32 kEnchant  = IM_COL32(79, 143, 240, 255);
-        constexpr ImU32 kRelicOwe = IM_COL32(169, 123, 232, 255);   // #A97BE8
+        constexpr ImU32 kUnique  = IM_COL32(232, 182, 74, 255);
+        constexpr ImU32 kEnchant = IM_COL32(79, 143, 240, 255);
 
         // ★★★AND THE TINT SITS DIRECTLY ABOVE "ENCHANTED", WHICH IS THE WHOLE
         // PLACEMENT ARGUMENT.
@@ -12320,35 +12368,42 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         //
         // Unique keeps its gold, for the reason GI67 gave it: unique is a
         // property of the FORM and there is exactly one, so it can never be
-        // out-ranked by a roll. And an owed relic still takes everything,
-        // because "carry this home" outlives any opinion about quality.
+        // out-ranked by a roll.
         const std::uint32_t tintCol = tint ? HostApi::TintColour(tint) : 0u;
-        return (a_relic == Lotd::Status::kUndonated) ? kRelicOwe
-             : (bits & 0x2)                          ? kUnique
-             : tintCol                               ? static_cast<ImU32>(tintCol)
-                                                     : kEnchant;
+        return (bits & 0x2) ? kUnique
+             : tintCol      ? static_cast<ImU32>(tintCol)
+                            : kEnchant;
     }
 
-    // ★★See Grid.h. The same colour, painted as the cell's ground instead of
+    // ★★See Grid.h. The RARITY colour, painted as the cell's ground instead of
     // cut into its corner -- the RARITY MARK setting, and the only thing that
     // setting moves.
+    //
+    // ★NO MUSEUM STATUS HERE, which is why it takes no Lotd::Status at all.
+    // An owed relic keeps its wedge in both modes (see DrawRarityWedge), so
+    // this function cannot be handed a status it would have to remember not to
+    // paint -- the one argument it never receives is the one that would be a
+    // bug. The two marks can now sit on one tile: the ground says what the
+    // item IS, the wedge says the museum still wants it.
     //
     // ★NO BLACK UNDER IT, unlike the wedge. The wedge is a 14px shape that has
     // to hold an edge against whatever it lands on; a ground IS the thing
     // underneath, and outlining it would draw a box around every item on the
     // board. What keeps it legible is the alpha instead -- Theme::RarityGroundA.
     void DrawRarityGround(ImDrawList* a_dl, const ImVec2& a_min, const ImVec2& a_max,
-                          std::uint8_t a_haloBits, Lotd::Status a_relic)
+                          std::uint8_t a_haloBits)
     {
         if (!a_dl) return;
+
         // ★The slider's floor is a real setting, not a degenerate one: dragged
         // to 0 the player has asked for no rarity mark at all, and leaving
         // early is how they get it -- a rect at alpha 0 is a draw command the
         // board pays for on every cell of every item to change nothing.
         const float strength = Theme::RarityGroundA();
         if (strength <= 0.0f) return;
-        const ImU32 col = RarityColour(a_haloBits, a_relic);
+        const ImU32 col = RarityColour(a_haloBits);
         if (!col) return;
+
         // ★SCALED, not overwritten. Every colour above is opaque, but an
         // extension's tint arrives over the ABI with an alpha of its own, and
         // stamping the slider on top of it would make a deliberately faint
@@ -12363,23 +12418,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // Black underneath so the colour reads on a pale sheet as well as on a
     // dark panel — the same trick every marker on this tile already uses.
     //
-    // ★SILENT IN GROUND MODE, and the guard lives HERE rather than at the call
-    // sites. The doll and the partner window mark rarity by calling DrawGlow
-    // and nothing else; making each of them ask about the setting first is how
-    // one of them ends up with both marks, or neither, the next time this file
-    // is touched. The board is the one caller that needs its own branch,
-    // because its ground is painted per CELL and under the sprite.
+    // ★★★THE MUSEUM KEEPS ITS WEDGE IN BOTH MODES, and that is a rule about
+    // what the two marks MEAN, not a special case.
+    //
+    // RARITY MARK moves rarity, and rarity only. An owed relic is an errand
+    // with a deadline the player sets ("stop carrying this, walk to Solitude"),
+    // and an errand wants a mark that is always in the same corner, always the
+    // same size and always the same purple, whatever the board is doing behind
+    // it. A ground cannot be that: at 10% it is a whisper, at 100% it is the
+    // tile, and either way it competes with the rarity it is sharing a surface
+    // with. So in ground mode the wedge goes quiet about rarity -- the ground
+    // is saying it -- and says the one thing the ground never does.
+    //
+    // A relic with rarity therefore shows BOTH in ground mode, which is more
+    // than corner mode could ever say: there is one wedge there, and the
+    // museum takes it. Nothing is lost either way; the tooltip says both.
     void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
                          const ImVec2& a_boxMax, std::uint8_t a_haloBits,
                          Lotd::Status a_relic)
     {
         if (!a_dl) return;
-        if (Theme::RarityGround()) {
-            DrawRarityGround(a_dl, a_boxMin, a_boxMax, a_haloBits, a_relic);
-            return;
-        }
-        const ImU32 col = RarityColour(a_haloBits, a_relic);
+        // ★GI67 / 1.4.4: an owed relic outranks any rarity the item has, in
+        // corner mode as it always did -- "carry this home" outlives any
+        // opinion about quality, and there is only one wedge to say it with.
+        const ImU32 col = (a_relic == Lotd::Status::kUndonated) ? kRelicOwe
+                        : Theme::RarityGround()                 ? 0u
+                                                                : RarityColour(a_haloBits);
         if (!col) return;
+
         const float cell = CellPx();
 
         const float d    = cell * kWedgeFrac;
@@ -12506,9 +12572,18 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // base form, and routing it through here is what gives the doll and the
         // partner window the same mark the board has, for free.
         (void)a_iconMin; (void)a_iconMax; (void)a_rot;
+        // ★The ground FIRST and the wedge after, because the wedge may now be
+        // a museum mark sitting on a tinted tile -- the two are separate facts
+        // as of the RARITY MARK setting, and both belong to this one call site.
+        // These windows draw a single box per item, so the whole box is the
+        // item's ground; the board paints its own, per mask cell, in pass 2.
+        if (Theme::RarityGround()) {
+            DrawRarityGround(a_dl, a_boxMin, a_boxMax, a_bits);
+        }
         DrawRarityWedge(a_dl, a_boxMin, a_boxMax, a_bits,
                         a_obj ? Lotd::Of(a_obj->GetFormID()) : Lotd::Status::kNotRelic);
     }
+
 
     namespace
     {
@@ -14166,6 +14241,30 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 }
             }
 
+            // What the sockets do, where the enchantment's lines would be --
+            // see the tooltip for why they stand in for them. The card has no
+            // separators and no indent; the indent is spent on leading
+            // spaces, as the annotator lines above spend theirs.
+            if (HostApi::HasSocketer() && a_xl) {
+                GridInvAPI::TooltipLine sock[GridInvAPI::kMaxTooltipLines]{};
+                const std::uint32_t     sockN = HostApi::SocketLines(
+                    a_obj->GetFormID(), a_xl, sock, GridInvAPI::kMaxTooltipLines);
+                for (std::uint32_t i = 0; i < sockN; ++i) {
+                    const auto& ln = sock[i];
+                    int len = 0;
+                    while (len < static_cast<int>(GridInvAPI::kTooltipTextLen) &&
+                           ln.text[len] != '\0') {
+                        ++len;
+                    }
+                    if (len == 0) continue;
+                    std::string t(static_cast<std::size_t>(ln.indent > 3 ? 3 : ln.indent) * 2,
+                                  ' ');
+                    t.append(ln.text, static_cast<std::size_t>(len));
+                    add(std::move(t), ln.rgba ? ImGui::ColorConvertU32ToFloat4(ln.rgba)
+                                              : Theme::TipGood(), true);
+                }
+            }
+
             // applied poison (weapons)
             if (auto* xp = extraOf.operator()<RE::ExtraPoison>(); xp && xp->poison) {
                 add(std::format("{}: {} (x{})", Lang::T(Lang::Str::PoisonLabel),
@@ -14833,6 +14932,43 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         Lang::T(Lang::Str::ChargeLabel),
                         static_cast<int>(cur), static_cast<int>(maxCharge));
                 }
+            }
+        }
+
+        // ★WHAT THE SOCKETS DO, where the enchantment's lines would be. A
+        // socket mod rides a created enchantment whose effects are all hidden
+        // from item cards -- EffectText skips them, as vanilla does -- so the
+        // block above printed nothing for a socketed unit, and these lines are
+        // its effects. `scoped`, never the entry, for the GI61 reason the
+        // annotator block gives: the entry would lend one socketed unit's
+        // lines to every plain copy of the form.
+        if (HostApi::HasSocketer() && scoped) {
+            GridInvAPI::TooltipLine sock[GridInvAPI::kMaxTooltipLines]{};
+            const std::uint32_t     sockN = HostApi::SocketLines(
+                a_obj->GetFormID(), scoped, sock, GridInvAPI::kMaxTooltipLines);
+            for (std::uint32_t i = 0; i < sockN; ++i) {
+                const auto& ln = sock[i];
+                // Bounded, not trusted -- see the annotator block.
+                int len = 0;
+                while (len < static_cast<int>(GridInvAPI::kTooltipTextLen) &&
+                       ln.text[len] != '\0') {
+                    ++len;
+                }
+                if (len == 0) continue;
+
+                if (ln.separatorBefore) ImGui::Separator();
+                const float indent = static_cast<float>(ln.indent > 3 ? 3 : ln.indent) *
+                                     ImGui::GetStyle().IndentSpacing;
+                if (indent > 0.0f) ImGui::Indent(indent);
+                // ★rgba 0 is the EFFECT colour here, not the body one: these
+                // lines stand in for effect lines and must read as them.
+                const ImVec4 col = ln.rgba ? ImGui::ColorConvertU32ToFloat4(ln.rgba)
+                                           : Theme::TipGood();
+                // Sentences, so the effect lines' wrap rather than a wide card.
+                ImGui::PushTextWrapPos(300.0f * Theme::Scale());
+                ImGui::TextColored(col, "%.*s", len, ln.text);
+                ImGui::PopTextWrapPos();
+                if (indent > 0.0f) ImGui::Unindent(indent);
             }
         }
 

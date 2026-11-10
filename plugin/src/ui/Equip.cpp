@@ -2,6 +2,8 @@
 #include "game/Ledger.h"
 
 #include <SKSE/SKSE.h>
+#include "api/HostApi.h"
+#include "ui/Badges.h"
 #include "ui/Fallback.h"
 #include "game/Costume.h"
 #include "game/DualRing.h"
@@ -81,6 +83,10 @@ namespace FUI::Equip
             std::uint16_t       uid = 0;
             std::uint16_t       sig = 0;
             int                 hand = 0;   // 0 none, 1 right, 2 left
+            // The SOCKETER's row for the worn unit, copied where CollectEquipment
+            // has its list in hand (HostApi::Sockets) -- the slot is redrawn
+            // from this copy, never from a kept list.
+            GridInvAPI::Overlay sockets{};
         };
 
         // equip/unequip actions deferred to the game-update hook (Tick):
@@ -309,7 +315,8 @@ namespace FUI::Equip
                 // doll's record (uid N) and the board's plain pool (uid 0) never
                 // match on the way back down
                 const std::uint16_t uid = Grid::PoolUidOf(obj, xl);
-                a_out[slot] = { obj, count, glow, uid, Grid::InstanceSigOf(xl), hand };
+                auto& e = a_out[slot] = { obj, count, glow, uid, Grid::InstanceSigOf(xl), hand };
+                if (HostApi::HasSocketer()) HostApi::Sockets(obj->GetFormID(), xl, e.sockets);
             };
 
             // ...and hand out the accessory cells, in slot-number order, once
@@ -332,8 +339,11 @@ namespace FUI::Equip
                         (i < std::size(kDollAcc)) ? std::string(kDollAcc[i])
                                                   : ("acc" + std::to_string(i + 1));
                     const std::uint16_t uid = Grid::PoolUidOf(a.obj, a.xl);
-                    a_out[id] = { a.obj, a.count, a.glow, uid,
-                                  Grid::InstanceSigOf(a.xl), a.hand };
+                    auto& e = a_out[id] = { a.obj, a.count, a.glow, uid,
+                                            Grid::InstanceSigOf(a.xl), a.hand };
+                    if (HostApi::HasSocketer()) {
+                        HostApi::Sockets(a.obj->GetFormID(), a.xl, e.sockets);
+                    }
                 }
                 g_drawerCount = static_cast<int>(
                     accs.size() > std::size(kDollAcc) ? accs.size() - std::size(kDollAcc) : 0);
@@ -910,6 +920,33 @@ namespace FUI::Equip
                                          ImVec2(c.x + eqOff, c.y), dw, dh, eqRot);
                     UIRoot::DrawItemIconRot(dl, icon->srv,
                         ImVec2(c.x + eqOff, c.y), ImVec2(dw, dh), eqRot);
+                }
+                // GI8: the socket wells, on the worn unit as on the boards.
+                // ★Laid out on the item's OWN FOOTPRINT at the grid's cell
+                // size, centred on the slot -- not on the slot box, which is
+                // taller than most things worn in it. A two-socket cuirass then
+                // shows the same two wells, the same size and the same distance
+                // apart, here as in the pack. A slot smaller than the footprint
+                // shrinks the cell instead, so the wells stay inside it.
+                // ★Socketer rows only. The doll never drew a provider's badges,
+                // and starting to here is not this change's business.
+                if (eq->sockets.count > 0) {
+                    const auto bdef = Grid::ResolveDef(eq->obj);
+                    const int  fw   = (std::max)(1, bdef.w);
+                    const int  fh   = (std::max)(1, bdef.h);
+                    const float cpx = (std::min)({ Grid::CellPx(), a_w * 0.92f / fw,
+                                                   a_h * 0.92f / fh });
+                    const ImVec2 c((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+                    Badges::TileShape shape;
+                    shape.w = fw;
+                    shape.h = fh;
+                    // ★Same gate the partner board uses: geometry alone would
+                    // light a slot that sits under another window.
+                    const bool hov = UIRoot::CursorOwnsWindow() &&
+                                     ImGui::IsMouseHoveringRect(p0, p1, false);
+                    Badges::Draw(dl, ImVec2(c.x - fw * cpx * 0.5f, c.y - fh * cpx * 0.5f),
+                                 fw * cpx, fh * cpx, shape, 0x14u, eq->obj->GetFormID(),
+                                 eq->uid, hov, &eq->sockets);
                 }
                 // GI30: this slot wears the pool's favourite -- draw the mark
                 // here so it does not read as "the star disappeared".

@@ -1693,6 +1693,82 @@ namespace FUI::LootBarter
             }
         }
 
+        // ★TEMPORARY DIAGNOSTIC (2026-09-20) -- remove once the report closes.
+        //
+        // Written for one bug: the Companions heirloom quest (CR06) puts a
+        // Steel Battleaxe REFERENCE in a boss chest and advances when that
+        // reference reaches the player. Taken through this window it did not.
+        // The log already says what happened -- "GI2: count 1 < listed 2"
+        // from the frame of the take, so the chest's count fell and none of
+        // its lists left -- but not WHY: whether the pick came back nameless
+        // and the engine chose for itself, or a list was named and the engine
+        // declined to move it. That is a question about one call, so this
+        // prints both holders' entries on either side of it.
+        //
+        // Every extra type on each list is printed as a raw hex id, not a
+        // chosen few: the whole point is that the list carries something this
+        // file has not thought about.
+        void TraceTakeEntry(const char* a_when, const char* a_side,
+                            RE::TESObjectREFR* a_holder, RE::TESBoundObject* a_obj,
+                            const RE::ExtraDataList* a_named)
+        {
+            if (!a_holder || !a_obj) return;
+            auto* e = Grid::LiveEntryOf(a_holder, a_obj);
+            int authored = 0;
+            if (auto* cont = a_holder->GetContainer()) {
+                authored = cont->GetObjectCount(a_obj);
+            }
+            std::size_t lists = 0;
+            if (e && e->extraLists) {
+                for (auto* xl : *e->extraLists) { (void)xl; ++lists; }
+            }
+            SKSE::log::info("[XFER] trace {} {} {:08X} '{}': entry {} delta {} authored {} "
+                            "lists {} questEntry {}",
+                a_when, a_side, a_holder->GetFormID(), a_obj->GetName(),
+                e ? "present" : "ABSENT", e ? e->countDelta : 0, authored, lists,
+                e && e->IsQuestObject() ? "Y" : "n");
+            if (!e || !e->extraLists) return;
+            int idx = 0;
+            for (auto* xl : *e->extraLists) {
+                const int i = idx++;
+                if (!xl) {
+                    SKSE::log::info("[XFER] trace   [{}] (null list)", i);
+                    continue;
+                }
+                std::string types;
+                for (std::uint32_t t = 1; t < 0xC0; ++t) {
+                    if (xl->HasType(static_cast<RE::ExtraDataType>(t))) {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "%s%02X", types.empty() ? "" : " ", t);
+                        types += buf;
+                    }
+                }
+                const auto* xu = xl->GetByType<RE::ExtraUniqueID>();
+                SKSE::log::info("[XFER] trace   [{}] {:p}{} count {} rawUid {:04X} poolUid {:04X} "
+                                "sig {:04X} questAlias {} types [{}]",
+                    i, static_cast<const void*>(xl), xl == a_named ? " <-NAMED" : "",
+                    xl->GetCount(), xu ? xu->uniqueID : 0,
+                    Grid::PoolUidOf(a_obj, xl), Grid::InstanceSigOf(xl),
+                    xl->HasQuestObjectAlias() ? "Y" : "n", types);
+                if (auto* xa = xl->GetByType<RE::ExtraAliasInstanceArray>()) {
+                    RE::BSReadLockGuard lock{ xa->lock };
+                    for (const auto* inst : xa->aliases) {
+                        if (!inst) continue;
+                        SKSE::log::info("[XFER] trace       alias: quest {:08X} '{}' alias {} '{}'",
+                            inst->quest ? inst->quest->GetFormID() : 0u,
+                            inst->quest ? inst->quest->GetFormEditorID() : "?",
+                            inst->alias ? inst->alias->aliasID : 0u,
+                            inst->alias ? inst->alias->aliasName.c_str() : "?");
+                    }
+                }
+                if (auto* xr = xl->GetByType<RE::ExtraReferenceHandle>()) {
+                    const auto ref = xr->GetOriginalReference();
+                    SKSE::log::info("[XFER] trace       reference handle -> {:08X}",
+                        ref ? ref->GetFormID() : 0u);
+                }
+            }
+        }
+
         // ---- W1: TAKE THE WORN LIST OUT OF THE ENGINE'S REACH ---------------
         //
         // ★★★THE PLAIN POOL HAS NO NAME. Having no ExtraDataList is what
@@ -2179,6 +2255,14 @@ namespace FUI::LootBarter
                 // ★The deposit half goes FIRST -- vanilla serves your own
                 // goods before the room's, and a player who takes two of three
                 // should get the two that were theirs.
+                // ★TEMPORARY (2026-09-20): see TraceTakeEntry.
+                SKSE::log::info("[XFER] trace take '{}' x{} asked uid {:04X} sig {:04X} worn {} "
+                                "-> pick kind {} xl {:p} (deposit {} stolen {})",
+                    r.obj->GetName(), r.count, r.uid, r.sig, r.fromWorn,
+                    static_cast<int>(pick.kind), static_cast<const void*>(pick.xl),
+                    fromDeposit, stolenCount);
+                TraceTakeEntry("BEFORE", "source", source, r.obj, pick.xl);
+                TraceTakeEntry("BEFORE", "player", player, r.obj, nullptr);
                 GuardedRemove(source, r.obj,
                     pick.kind == Grid::PickKind::kFallback, "take", [&]() {
                     if (fromDeposit > 0) {
@@ -2205,6 +2289,11 @@ namespace FUI::LootBarter
                             xl2, player);
                     }
                 });
+                // ★TEMPORARY (2026-09-20): nothing is NAMED on this side of the
+                // call -- a list the engine moved is the player's now, and one
+                // it freed is not a pointer to compare against.
+                TraceTakeEntry("AFTER", "source", source, r.obj, nullptr);
+                TraceTakeEntry("AFTER", "player", player, r.obj, nullptr);
                 if (anyStolen) {
                     // ★★A UNIT WITH NO LIST CANNOT BE STOLEN, because ownership
                     // lives on the list. That is the whole of this bug.
@@ -4885,6 +4974,11 @@ namespace
             // it would only give a saved layout a way to disagree with items.ini
             // after an edit. w/h stay the mask's bounding box.
             FUI::Shape mask;
+            // ★The SOCKETER's row for this unit, copied at collect where its
+            // list is in hand (HostApi::Sockets). This is the window the socket
+            // wells matter most on -- what a chest holds is the decision -- and
+            // the draw has no list to ask with, so the cell carries the answer.
+            GridInvAPI::Overlay sockets{};
             void SetRot(int a_rot)
             {
                 // ★Turn the MASK by the same delta, in the same call that swaps
@@ -5583,6 +5677,9 @@ namespace
                 pc.uid = c.uid;
                 pc.sig = c.sig;
                 pc.xlIdx = c.xlIdx;
+                if (HostApi::HasSocketer()) {
+                    HostApi::Sockets(obj->GetFormID(), xl, pc.sockets);
+                }
                 pc.perUnit = perUnit;
                 pc.worn = c.worn;
                 pc.gold = c.gold;
@@ -6549,7 +6646,7 @@ namespace
                             p0, ImVec2(p0.x + bw, p0.y + bh), false);
                     Badges::Draw(dl, p0, bw, bh, shape,
                                  pr ? pr->GetFormID() : 0u,
-                                 it.obj->GetFormID(), it.uid, hov);
+                                 it.obj->GetFormID(), it.uid, hov, &it.sockets);
                 }
 
                 if (it.count > 1) {

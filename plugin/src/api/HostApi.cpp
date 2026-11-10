@@ -123,6 +123,14 @@ namespace FUI::HostApi
         GridInvAPI::Pricer g_pricer{};
         bool               g_havePricer = false;
 
+        // ---- registered socketer -----------------------------------------
+        //
+        // A fifth slot, same terms. Holding it does not take the provider's
+        // badges away from anyone: the two feed the same wells, and the board
+        // asks the socketer first only because it is the one told WHICH unit.
+        GridInvAPI::Socketer g_socketer{};
+        bool                 g_haveSocketer = false;
+
         void Notify(const char* a_text)
         {
             FUI::Sfx::Notify(a_text);
@@ -320,6 +328,48 @@ namespace FUI::HostApi
                          p->name ? p->name : "<unnamed>", who, p->abiVersion);
         }
 
+        // The socket handshake. Same shape and same rigour as the four above:
+        // the listener takes every sender, so the payload is measured before
+        // a single offset in it is trusted.
+        void OnRegisterSocketer(SKSE::MessagingInterface::Message* a_msg)
+        {
+            if (!a_msg->data || a_msg->dataLen < sizeof(GridInvAPI::Socketer)) {
+                logger::error("[API] SOCKET REFUSED '{}': payload is {} bytes, a Socketer is {}",
+                              a_msg->sender ? a_msg->sender : "<unknown>",
+                              a_msg->data ? a_msg->dataLen : 0u,
+                              sizeof(GridInvAPI::Socketer));
+                return;
+            }
+            const auto* s   = static_cast<const GridInvAPI::Socketer*>(a_msg->data);
+            const char* who = a_msg->sender ? a_msg->sender : "<unknown>";
+
+            if (s->abiVersion != GridInvAPI::kABIVersion ||
+                s->structSize != sizeof(GridInvAPI::Socketer)) {
+                logger::error("[API] SOCKET REFUSED '{}': abiVersion {} (need {}), structSize {} (need {})",
+                              who, s->abiVersion, GridInvAPI::kABIVersion,
+                              s->structSize, sizeof(GridInvAPI::Socketer));
+                Notify("Grid Inventory: socket extension version mismatch - not loaded");
+                return;
+            }
+            // GetLines is optional (see the header); the other two are not.
+            if (!s->GetSockets || !s->GetArt) {
+                logger::error("[API] SOCKET REFUSED '{}': null function pointer", who);
+                Notify("Grid Inventory: socket extension is incomplete - not loaded");
+                return;
+            }
+            if (g_haveSocketer) {
+                logger::warn("[API] socketer '{}' ignored: one is already registered ('{}')",
+                             who, g_socketer.name ? g_socketer.name : "?");
+                return;
+            }
+
+            g_socketer     = *s;   // copy; the caller's pointer is borrowed only
+            g_haveSocketer = true;
+            logger::info("[API] socketer registered: '{}' (from '{}') abi={} tooltip lines={}",
+                         s->name ? s->name : "<unnamed>", who, s->abiVersion,
+                         s->GetLines ? "yes" : "no");
+        }
+
         // This listener sees EVERY sender, so it must only ever act on our own
         // 4CC message types -- never on a lifecycle number.
         void OnApiMessage(SKSE::MessagingInterface::Message* a_msg)
@@ -339,6 +389,10 @@ namespace FUI::HostApi
             }
             if (a_msg->type == GridInvAPI::kMsgRegisterPricer) {
                 OnRegisterPricer(a_msg);
+                return;
+            }
+            if (a_msg->type == GridInvAPI::kMsgRegisterSocketer) {
+                OnRegisterSocketer(a_msg);
                 return;
             }
             if (a_msg->type == GridInvAPI::kMsgSuppressUI) {
@@ -538,5 +592,60 @@ namespace FUI::HostApi
         // every lround downstream. `!(m > 0)` catches NaN as well as <= 0.
         if (!(m > 0.0f) || !std::isfinite(m)) return 1.0f;
         return m;
+    }
+
+    bool HasSocketer()
+    {
+        return g_haveSocketer;
+    }
+
+    bool Sockets(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                 GridInvAPI::Overlay& a_out)
+    {
+        a_out = {};
+        // No list, no sockets: the ABI promises the socketer it is never asked
+        // about a plain unit, and this is where that promise is kept.
+        if (!g_haveSocketer || a_base == 0 || !a_xl) return false;
+        if (!g_socketer.GetSockets(g_socketer.self, a_base,
+                                   static_cast<const void*>(a_xl), &a_out) ||
+            a_out.count == 0) {
+            // ★"No" leaves NOTHING behind. A socketer that scribbled half a
+            // row and then said false must not have that half drawn the next
+            // time a caller forgets to test the return value.
+            a_out = {};
+            return false;
+        }
+        if (a_out.count > GridInvAPI::kMaxBadges) {
+            // A misbehaving socketer must not walk us off the array.
+            a_out.count = static_cast<std::uint8_t>(GridInvAPI::kMaxBadges);
+        }
+        return true;
+    }
+
+    bool SocketArt(std::uint32_t a_iconId, char* a_out, std::uint32_t a_capacity)
+    {
+        if (!g_haveSocketer || a_iconId == 0 || !a_out || a_capacity == 0) return false;
+        a_out[0] = '\0';
+        const bool ok = g_socketer.GetArt(g_socketer.self, a_iconId, a_out, a_capacity);
+        // ★THE TERMINATOR IS OURS TO GUARANTEE. The ABI asks for one inside
+        // the capacity, and a path that ran to the end of the buffer without
+        // it would be read past the end by the loader.
+        a_out[a_capacity - 1] = '\0';
+        if (!ok) a_out[0] = '\0';
+        return a_out[0] != '\0';
+    }
+
+    std::uint32_t SocketLines(std::uint32_t a_base, const RE::ExtraDataList* a_xl,
+                              GridInvAPI::TooltipLine* a_out, std::uint32_t a_capacity)
+    {
+        if (!g_haveSocketer || !g_socketer.GetLines || a_base == 0 || !a_xl ||
+            !a_out || a_capacity == 0) {
+            return 0;
+        }
+        // Clamped for the reason AnnotationLines gives: the count is ours to
+        // bound, the writes are the socketer's obligation.
+        const auto n = g_socketer.GetLines(g_socketer.self, a_base,
+                                           static_cast<const void*>(a_xl), a_out, a_capacity);
+        return (std::min)(n, a_capacity);
     }
 }

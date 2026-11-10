@@ -5,6 +5,11 @@
 struct ImDrawList;
 struct ImVec2;
 
+namespace GridInvAPI
+{
+    struct Overlay;
+}
+
 // =============================================================================
 //  GI8 -- extension badge overlay
 // =============================================================================
@@ -41,7 +46,13 @@ namespace FUI::Badges
     //
     // Call it AFTER the icon and BEFORE the count badge / marker tray so the
     // corner chrome stays readable on top.
+    //
+    // a_sockets is the unit's row from the SOCKETER table (HostApi::Sockets),
+    // copied where the unit's own list was in hand -- nullptr or count 0 when
+    // the board has none, and then the provider is asked by ItemKey as before.
+    // A socketer's filled wells draw its own art for the form when it has any.
     bool Draw(ImDrawList* a_dl, const ImVec2& a_px, float a_pw, float a_ph,
               const TileShape& a_shape, std::uint32_t a_owner, std::uint32_t a_base,
-              std::uint16_t a_uid, bool a_hovered);
+              std::uint16_t a_uid, bool a_hovered,
+              const GridInvAPI::Overlay* a_sockets = nullptr);
 }

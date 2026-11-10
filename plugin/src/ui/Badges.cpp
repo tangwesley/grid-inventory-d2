@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <array>
+#include <string>
+#include <unordered_map>
 
 namespace FUI::Badges
 {
@@ -150,21 +152,72 @@ namespace FUI::Badges
             a_dl->PathArcTo(a_c, a_r - 0.5f, 5.50f, 8.64f, 0);   // upper-left = shadow
             a_dl->PathStroke(IM_COL32(0, 0, 0, A(0.70f)), 0, 1.2f);
         }
+
+        // ---- socketer art -------------------------------------------------
+        //
+        // The socketer's own picture for a form, loaded on the first draw that
+        // needs it and kept for the process -- a socket mod has a few dozen
+        // stones, a few KB of VRAM each. A form with no art, or art that would
+        // not load, is remembered as such (null srv), so a missing file costs
+        // one disk probe per session rather than one per frame, and the well
+        // falls back to the form's captured icon.
+        const IconCache::Icon* SocketArt(std::uint32_t a_iconId)
+        {
+            static std::unordered_map<std::uint32_t, IconCache::Icon> s_art;
+            auto [it, fresh] = s_art.try_emplace(a_iconId);
+            if (fresh) {
+                char path[GridInvAPI::kArtPathLen]{};
+                if (HostApi::SocketArt(a_iconId, path, sizeof(path))) {
+                    // Relative to the game folder, as the fallback icon set
+                    // is: loose files only, which is what the ABI promises.
+                    const std::string full = std::string("Data/") + path;
+                    if (IconCache::LoadPngTexture(full, it->second)) {
+                        logger::info("[BADGE] socket art {:08X}: {} ({}x{})", a_iconId, full,
+                                     it->second.w, it->second.h);
+                    } else {
+                        logger::warn("[BADGE] socket art {:08X}: {} did not load -- "
+                                     "drawing the form's own icon", a_iconId, full);
+                    }
+                }
+            }
+            return it->second.srv ? &it->second : nullptr;
+        }
+
+        // Draw an icon CONTAIN-fitted into a square of side a_s about a_c.
+        void DrawFitted(ImDrawList* a_dl, const IconCache::Icon& a_ic, const ImVec2& a_c,
+                        float a_s)
+        {
+            const float m  = static_cast<float>((std::max)(a_ic.w, a_ic.h));
+            const float dw = a_ic.w / m * a_s;
+            const float dh = a_ic.h / m * a_s;
+            UIRoot::DrawItemIcon(a_dl, a_ic.srv,
+                ImVec2(a_c.x - dw * 0.5f, a_c.y - dh * 0.5f),
+                ImVec2(a_c.x + dw * 0.5f, a_c.y + dh * 0.5f));
+        }
     }
 
     bool Draw(ImDrawList* a_dl, const ImVec2& a_px, float a_pw, float a_ph,
               const TileShape& a_shape, std::uint32_t a_owner, std::uint32_t a_base,
-              std::uint16_t a_uid, bool a_hovered)
+              std::uint16_t a_uid, bool a_hovered, const GridInvAPI::Overlay* a_sockets)
     {
         if (!a_dl || a_shape.w <= 0 || a_shape.h <= 0) return false;
         // ★호버 중에만 표시 (원안 유지, 2026-07-30 사용자 재확인). 항상 표시로
         //  바꿔 봤으나 격자가 시끄러워진다 — 확인은 마우스를 올려서 한다.
         if (!a_hovered) return false;
 
-        // HOT PATH: one hash lookup inside the provider, then nothing when it
-        // has no opinion -- which is every tile for a player without the mod.
-        const GridInvAPI::ItemKey key{ a_owner, a_base, a_uid, 0, 0 };
-        const auto* ovl = HostApi::Overlay(key);
+        // ★THE SOCKETER'S ROW FIRST. It was asked about this unit by its own
+        // list; the provider below can only be asked by ItemKey, whose uid is
+        // 0 for every socketed unit, so its answer is about every copy of the
+        // form at once.
+        const bool fromSocketer = a_sockets && a_sockets->count > 0;
+        const GridInvAPI::Overlay* ovl = a_sockets;
+        if (!fromSocketer) {
+            // HOT PATH: one hash lookup inside the provider, then nothing when
+            // it has no opinion -- which is every tile for a player without
+            // the mod.
+            const GridInvAPI::ItemKey key{ a_owner, a_base, a_uid, 0, 0 };
+            ovl = HostApi::Overlay(key);
+        }
         if (!ovl || ovl->count == 0) return false;
 
         const int n = (std::min)(static_cast<int>(ovl->count),
@@ -211,20 +264,19 @@ namespace FUI::Badges
                 DrawWell(a_dl, ctr, rad, alpha);
 
                 if (b.state == GridInvAPI::kBadgeFilled && b.iconId != 0) {
-                    // iconId is a TESBoundObject FormID, not an atlas index --
-                    // so a provider gets our whole art pipeline (model capture,
-                    // both styles) for free, with nothing to version.
-                    if (auto* form = RE::TESForm::LookupByID(b.iconId)) {
+                    const float s = rad * 1.62f;   // inside the rim
+                    // A socketer's own picture of the stone, when it has one.
+                    if (const auto* art = fromSocketer ? SocketArt(b.iconId) : nullptr) {
+                        DrawFitted(a_dl, *art, ctr, s);
+                    } else if (auto* form = RE::TESForm::LookupByID(b.iconId)) {
+                        // iconId is a TESBoundObject FormID, not an atlas index
+                        // -- so a provider gets our whole art pipeline (model
+                        // capture, both styles) for free, with nothing to
+                        // version.
                         if (auto* bound = form->As<RE::TESBoundObject>()) {
                             auto* cache = IconCache::GetSingleton();
                             if (const auto* ic = cache->Get(bound)) {
-                                const float s = rad * 1.62f;   // inside the rim
-                                const float m = static_cast<float>((std::max)(ic->w, ic->h));
-                                const float dw = ic->w / m * s;
-                                const float dh = ic->h / m * s;
-                                UIRoot::DrawItemIcon(a_dl, ic->srv,
-                                    ImVec2(ctr.x - dw * 0.5f, ctr.y - dh * 0.5f),
-                                    ImVec2(ctr.x + dw * 0.5f, ctr.y + dh * 0.5f));
+                                DrawFitted(a_dl, *ic, ctr, s);
                             } else {
                                 cache->QueueCapture(bound);
                             }
